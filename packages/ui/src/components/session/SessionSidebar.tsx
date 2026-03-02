@@ -61,8 +61,6 @@ import {
   RiFolderAddLine,
   RiFolderLine,
   RiGitBranchLine,
-  RiGitPullRequestLine,
-  RiGitRepositoryLine,
   RiNodeTree,
   RiStickyNoteLine,
   RiLinkUnlinkM,
@@ -91,10 +89,8 @@ import { useGitStore } from '@/stores/useGitStore';
 import { useDeviceInfo } from '@/lib/device';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { updateDesktopSettings } from '@/lib/persistence';
-import { GitHubPullRequestPickerDialog } from './GitHubPullRequestPickerDialog';
 import { NewWorktreeDialog } from './NewWorktreeDialog';
 import { ProjectNotesTodoPanel } from './ProjectNotesTodoPanel';
-import { BranchPickerDialog } from './BranchPickerDialog';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { SessionFolderItem } from './SessionFolderItem';
 
@@ -401,7 +397,6 @@ interface SortableProjectItemProps {
   onHoverChange: (hovered: boolean) => void;
   onNewSession: () => void;
   onNewWorktreeSession?: () => void;
-  onNewSessionFromGitHubPR?: () => void;
   onOpenMultiRunLauncher: () => void;
   onRenameStart: () => void;
   onRenameSave: () => void;
@@ -433,7 +428,6 @@ const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
   onHoverChange,
   onNewSession,
   onNewWorktreeSession,
-  onNewSessionFromGitHubPR,
   onOpenMultiRunLauncher,
   onRenameStart,
   onRenameSave,
@@ -597,12 +591,6 @@ const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                     New Session in Worktree
                   </DropdownMenuItem>
                 )}
-                {showCreateButtons && isRepo && !hideDirectoryControls && onNewSessionFromGitHubPR && (
-                  <DropdownMenuItem onClick={onNewSessionFromGitHubPR}>
-                    <RiGitPullRequestLine className="mr-1.5 h-4 w-4" />
-                    New session from GitHub PR
-                  </DropdownMenuItem>
-                )}
                 {showCreateButtons && isRepo && !hideDirectoryControls && (
                   <DropdownMenuItem onClick={onOpenMultiRunLauncher}>
                     <ArrowsMerge className="mr-1.5 h-4 w-4" />
@@ -749,8 +737,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const [projectRepoStatus, setProjectRepoStatus] = React.useState<Map<string, boolean | null>>(new Map());
   const [expandedSessionGroups, setExpandedSessionGroups] = React.useState<Set<string>>(new Set());
   const [hoveredProjectId, setHoveredProjectId] = React.useState<string | null>(null);
-  const [pullRequestPickerOpen, setPullRequestPickerOpen] = React.useState(false);
-  const [isBranchPickerOpen, setIsBranchPickerOpen] = React.useState(false);
   const [newWorktreeDialogOpen, setNewWorktreeDialogOpen] = React.useState(false);
   const [projectNotesPanelOpen, setProjectNotesPanelOpen] = React.useState(false);
   const [stuckProjectHeaders, setStuckProjectHeaders] = React.useState<Set<string>>(new Set());
@@ -1882,17 +1868,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       : null),
     [activeProjectForHeader],
   );
-  const branchPickerProject = React.useMemo(() => {
-    if (!activeProjectForHeader) {
-      return null;
-    }
-    return {
-      id: activeProjectForHeader.id,
-      path: activeProjectForHeader.path,
-      normalizedPath: activeProjectForHeader.normalizedPath,
-      label: activeProjectForHeader.label,
-    };
-  }, [activeProjectForHeader]);
 
   const activeProjectIsRepo = React.useMemo(
     () => (activeProjectForHeader ? Boolean(projectRepoStatus.get(activeProjectForHeader.id)) : false),
@@ -3170,19 +3145,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    onClick={() => setPullRequestPickerOpen(true)}
-                    className={headerActionButtonClass}
-                    aria-label="New from PR"
-                  >
-                    <RiGitPullRequestLine className={headerActionIconClass} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" sideOffset={4}><p>New from PR</p></TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
                     onClick={openMultiRunLauncher}
                     className={headerActionButtonClass}
                     aria-label="New multi-run"
@@ -3193,21 +3155,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                 <TooltipContent side="bottom" sideOffset={4}><p>New multi-run</p></TooltipContent>
               </Tooltip>
                 </>
-              ) : null}
-              {stableActiveProjectIsRepo && branchPickerProject ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => setIsBranchPickerOpen(true)}
-                      className={headerActionButtonClass}
-                      aria-label="Manage branches"
-                    >
-                      <RiGitRepositoryLine className={headerActionIconClass} />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" sideOffset={4}><p>Manage branches</p></TooltipContent>
-                </Tooltip>
               ) : null}
               {useMobileNotesPanel ? (
                 <Tooltip>
@@ -3341,12 +3288,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                       }
                       createWorktreeSession();
                     }}
-                    onNewSessionFromGitHubPR={() => {
-                      if (projectKey !== activeProjectId) {
-                        setActiveProjectIdOnly(projectKey);
-                      }
-                      setPullRequestPickerOpen(true);
-                    }}
                     onOpenMultiRunLauncher={() => {
                       if (projectKey !== activeProjectId) {
                         setActiveProjectIdOnly(projectKey);
@@ -3420,23 +3361,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           </>
         )}
       </ScrollableOverlay>
-
-      <GitHubPullRequestPickerDialog
-        open={pullRequestPickerOpen}
-        onOpenChange={(open) => {
-          setPullRequestPickerOpen(open);
-          if (!open && mobileVariant) {
-            setActiveMainTab('chat');
-            setSessionSwitcherOpen(false);
-          }
-        }}
-      />
-
-      <BranchPickerDialog
-        open={isBranchPickerOpen}
-        onOpenChange={setIsBranchPickerOpen}
-        project={branchPickerProject}
-      />
 
       <NewWorktreeDialog
         open={newWorktreeDialogOpen}
