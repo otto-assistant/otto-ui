@@ -7,7 +7,6 @@ import {
     RiCloseLine,
     RiCommandLine,
     RiExternalLinkLine,
-    RiFileUploadLine,
     RiFullscreenLine,
     RiGithubLine,
     RiSendPlane2Line,
@@ -26,7 +25,6 @@ import { FileMentionAutocomplete, type FileMentionHandle } from './FileMentionAu
 import { CommandAutocomplete, type CommandAutocompleteHandle } from './CommandAutocomplete';
 import { SkillAutocomplete, type SkillAutocompleteHandle } from './SkillAutocomplete';
 import { cn, isMacOS } from '@/lib/utils';
-import { ServerFilePicker } from './ServerFilePicker';
 import { ModelControls } from './ModelControls';
 import { UnifiedControlsDrawer } from './UnifiedControlsDrawer';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
@@ -2036,21 +2034,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
         };
     }, [addAttachedFile, normalizeDroppedPath]);
 
-    const handleServerFilesSelected = React.useCallback(async (files: Array<{ path: string; name: string }>) => {
-        const mentionParts = files
-            .map((file) => toProjectRelativeMentionPath(file.path))
-            .filter((path) => path.length > 0)
-            .map((path) => `@${path}`);
-
-        if (mentionParts.length === 0) {
-            return;
-        }
-
-        insertTextAtSelection(`${mentionParts.join(' ')} `);
-    }, [insertTextAtSelection, toProjectRelativeMentionPath]);
-
     const fileInputRef = React.useRef<HTMLInputElement>(null);
-    const [projectFilePickerOpen, setProjectFilePickerOpen] = React.useState(false);
 
     const attachFiles = React.useCallback(async (files: FileList | File[]) => {
         let attachedCount = 0;
@@ -2231,54 +2215,37 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             />
 
             <div className="relative inline-flex">
-                <ServerFilePicker
-                    onFilesSelected={handleServerFilesSelected}
-                    multiSelect
-                    presentation={isMobile ? 'modal' : 'dropdown'}
-                    open={projectFilePickerOpen}
-                    onOpenChange={setProjectFilePickerOpen}
-                >
-                    {isMobile ? null : (
-                        <button
-                            type="button"
-                            tabIndex={-1}
-                            aria-hidden="true"
-                            className="absolute inset-0 opacity-0 pointer-events-none"
-                        />
-                    )}
-                </ServerFilePicker>
-
-                <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                        <button
-                            type="button"
-                            className={footerIconButtonClass}
-                            title="Add attachment"
-                            aria-label="Add attachment"
-                        >
-                            <RiAddCircleLine className={cn(iconSizeClass, 'text-current')} />
-                        </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                        <DropdownMenuItem
-                            onSelect={() => {
-                                requestAnimationFrame(() => handlePickLocalFiles());
-                            }}
-                        >
-                            <RiAttachment2 />
-                            Attach files
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                            onSelect={() => {
-                                requestAnimationFrame(() => {
-                                    setProjectFilePickerOpen(true);
-                                });
-                            }}
-                        >
-                            <RiFileUploadLine />
-                            Attach from project
-                        </DropdownMenuItem>
-                        {!isVSCode && (
+                {isVSCode ? (
+                    <button
+                        type="button"
+                        className={footerIconButtonClass}
+                        onClick={() => handlePickLocalFiles()}
+                        title="Attach files"
+                        aria-label="Attach files"
+                    >
+                        <RiAttachment2 className={cn(iconSizeClass, 'text-current')} />
+                    </button>
+                ) : (
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <button
+                                type="button"
+                                className={footerIconButtonClass}
+                                title="Add attachment"
+                                aria-label="Add attachment"
+                            >
+                                <RiAddCircleLine className={cn(iconSizeClass, 'text-current')} />
+                            </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start">
+                            <DropdownMenuItem
+                                onSelect={() => {
+                                    requestAnimationFrame(() => handlePickLocalFiles());
+                                }}
+                            >
+                                <RiAttachment2 />
+                                Attach files
+                            </DropdownMenuItem>
                             <DropdownMenuItem
                                 onSelect={() => {
                                     requestAnimationFrame(() => {
@@ -2289,9 +2256,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                                 <RiGithubLine />
                                 Link GitHub Issue
                             </DropdownMenuItem>
-                        )}
-                    </DropdownMenuContent>
-                </DropdownMenu>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                )}
             </div>
         </>
     );
