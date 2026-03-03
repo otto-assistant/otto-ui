@@ -8,6 +8,7 @@ import {
     RiCommandLine,
     RiExternalLinkLine,
     RiFullscreenLine,
+    RiGitPullRequestLine,
     RiGithubLine,
     RiSendPlane2Line,
 } from '@remixicon/react';
@@ -50,6 +51,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { GitHubIssuePickerDialog } from '@/components/session/GitHubIssuePickerDialog';
+import { GitHubPrPickerDialog } from '@/components/session/GitHubPrPickerDialog';
 import { useChatSearchDirectory } from '@/hooks/useChatSearchDirectory';
 import { opencodeClient } from '@/lib/opencode/client';
 
@@ -326,10 +328,22 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
 
     // Issue linking state
     const [issuePickerOpen, setIssuePickerOpen] = React.useState(false);
+    const [prPickerOpen, setPrPickerOpen] = React.useState(false);
     const [linkedIssue, setLinkedIssue] = React.useState<{ 
         number: number; 
         title: string; 
         url: string; 
+        contextText: string;
+        author?: { login: string; avatarUrl?: string };
+    } | null>(null);
+    const [linkedPr, setLinkedPr] = React.useState<{
+        number: number;
+        title: string;
+        url: string;
+        head: string;
+        base: string;
+        includeDiff: boolean;
+        instructionsText: string;
         contextText: string;
         author?: { login: string; avatarUrl?: string };
     } | null>(null);
@@ -746,6 +760,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             });
         }
 
+        if (linkedPr) {
+            additionalParts.push({
+                text: linkedPr.instructionsText,
+                synthetic: true,
+            });
+            additionalParts.push({
+                text: linkedPr.contextText,
+                synthetic: true,
+            });
+        }
+
         if (!primaryText && additionalParts.length === 0) return;
 
         // Clear queue and input
@@ -821,6 +846,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             // Clear linked issue after successful message send
             if (linkedIssue) {
                 setLinkedIssue(null);
+            }
+            if (linkedPr) {
+                setLinkedPr(null);
             }
         }).catch((error: unknown) => {
             const rawMessage =
@@ -2256,6 +2284,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                                 <RiGithubLine />
                                 Link GitHub Issue
                             </DropdownMenuItem>
+                            <DropdownMenuItem
+                                onSelect={() => {
+                                    requestAnimationFrame(() => {
+                                        setPrPickerOpen(true);
+                                    });
+                                }}
+                            >
+                                <RiGitPullRequestLine />
+                                Link GitHub PR
+                            </DropdownMenuItem>
                         </DropdownMenuContent>
                     </DropdownMenu>
                 )}
@@ -2432,6 +2470,57 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                         </button>
                     </div>
                 )}
+                {linkedPr && !isVSCode && (
+                    <div className="pb-2 w-full px-1">
+                        <button
+                            type="button"
+                            onClick={() => setPrPickerOpen(true)}
+                            className="flex w-full items-center gap-1.5 text-sm hover:opacity-80 transition-opacity text-left h-5 px-1"
+                        >
+                            {linkedPr.author?.avatarUrl && (
+                                <img
+                                    src={linkedPr.author.avatarUrl}
+                                    alt={linkedPr.author.login}
+                                    className="h-5 w-5 rounded-full flex-shrink-0"
+                                />
+                            )}
+                            <span className="text-muted-foreground flex-shrink-0">
+                                PR #{linkedPr.number}
+                                {linkedPr.author && (
+                                    <span className="ml-1">by {linkedPr.author.login}</span>
+                                )}
+                            </span>
+                            <span className="text-foreground truncate">
+                                {linkedPr.title}
+                            </span>
+                            <span className="text-muted-foreground flex-shrink-0 typography-meta">
+                                {linkedPr.head} → {linkedPr.base}
+                            </span>
+                            <span className="flex items-center gap-0.5 flex-shrink-0">
+                                <a
+                                    href={linkedPr.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="flex items-center justify-center h-6 w-6 hover:bg-[var(--interactive-hover)] rounded-full transition-colors"
+                                    aria-label="Open pull request in browser"
+                                >
+                                    <RiExternalLinkLine className="h-4 w-4 text-muted-foreground" />
+                                </a>
+                                <span
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setLinkedPr(null);
+                                    }}
+                                    className="flex items-center justify-center h-6 w-6 hover:bg-[var(--interactive-hover)] rounded-full transition-colors cursor-pointer"
+                                    aria-label="Remove linked pull request"
+                                >
+                                    <RiCloseLine className="h-4 w-4 text-muted-foreground" />
+                                </span>
+                            </span>
+                        </button>
+                    </div>
+                )}
                 <div
                     className={cn(
                         "flex flex-col relative overflow-visible",
@@ -2536,7 +2625,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                                 : undefined}
                         />
                     )}
-                    <div className="relative">
+                    <div className="relative overflow-hidden">
                         {highlightedComposerContent && (
                             <div
                                 aria-hidden
@@ -2717,7 +2806,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             open={issuePickerOpen}
             onOpenChange={setIssuePickerOpen}
             mode="select"
-            onSelect={(issue) => setLinkedIssue(issue)}
+            onSelect={(issue) => {
+                setLinkedIssue(issue);
+                setLinkedPr(null);
+            }}
+        />
+        <GitHubPrPickerDialog
+            open={prPickerOpen}
+            onOpenChange={setPrPickerOpen}
+            onSelect={(pr) => {
+                setLinkedPr(pr);
+                setLinkedIssue(null);
+            }}
         />
         </>
     );
