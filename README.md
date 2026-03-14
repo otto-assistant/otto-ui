@@ -177,6 +177,8 @@ environment:
   OPENCHAMBER_TUNNEL_CONFIG: /home/openchamber/.cloudflared/config.yml
 ```
 
+Managed-local path note: `OPENCHAMBER_TUNNEL_CONFIG` must point to a path inside the container user home (`/home/openchamber/...`). If your Cloudflare config references a credentials JSON file, that file path must also be accessible inside the container (mount with `volumes`).
+
 ### Tunnel behavior notes
 
 - OpenChamber supports one active tunnel per running instance (port).

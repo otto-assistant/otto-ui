@@ -71,6 +71,8 @@ environment:
   OPENCHAMBER_TUNNEL_CONFIG: /home/openchamber/.cloudflared/config.yml
 ```
 
+Managed-local path note: `OPENCHAMBER_TUNNEL_CONFIG` must use a container path under `/home/openchamber/...`. If the config file references `credentials-file`, ensure that JSON path is also mounted and reachable inside the container.
+
 **Data directory:** mount `data/` for persistent storage. Ensure permissions:
 ```bash
 mkdir -p data/openchamber data/opencode/share data/opencode/config data/ssh
