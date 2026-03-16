@@ -33,6 +33,11 @@ interface HistorySectionProps {
   loadingCommitHashes: Set<string>;
   onCopyHash: (hash: string) => void;
   showHeader?: boolean;
+  branchDivider?: {
+    insertBeforeIndex: number;
+    branchName: string;
+    direction: 'up' | 'down';
+  } | null;
 }
 
 export const HistorySection: React.FC<HistorySectionProps> = ({
@@ -46,6 +51,7 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
   loadingCommitHashes,
   onCopyHash,
   showHeader = true,
+  branchDivider = null,
 }) => {
   const [isOpen, setIsOpen] = React.useState(true);
 
@@ -63,16 +69,33 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
         </div>
       ) : (
         <ul className="divide-y divide-border/60">
-          {log.all.map((entry) => (
-            <HistoryCommitRow
-              key={entry.hash}
-              entry={entry}
-              isExpanded={expandedCommitHashes.has(entry.hash)}
-              onToggle={() => onToggleCommit(entry.hash)}
-              files={commitFilesMap.get(entry.hash) ?? []}
-              isLoadingFiles={loadingCommitHashes.has(entry.hash)}
-              onCopyHash={onCopyHash}
-            />
+          {log.all.map((entry, index) => (
+            <React.Fragment key={entry.hash}>
+              {branchDivider && index === branchDivider.insertBeforeIndex ? (
+                <li className="px-3 py-2" aria-hidden>
+                  <div className="flex items-center gap-2">
+                    <span className="h-px flex-1 bg-border/60" />
+                    <span className="inline-flex max-w-[80%] items-center gap-1 rounded-full border border-border/60 bg-background px-2 py-0.5 typography-micro text-muted-foreground">
+                      <span className="truncate" title={branchDivider.branchName}>
+                        {branchDivider.branchName}
+                      </span>
+                      <span className="text-muted-foreground/90">
+                        {branchDivider.direction === 'down' ? 'v' : '^'}
+                      </span>
+                    </span>
+                    <span className="h-px flex-1 bg-border/60" />
+                  </div>
+                </li>
+              ) : null}
+              <HistoryCommitRow
+                entry={entry}
+                isExpanded={expandedCommitHashes.has(entry.hash)}
+                onToggle={() => onToggleCommit(entry.hash)}
+                files={commitFilesMap.get(entry.hash) ?? []}
+                isLoadingFiles={loadingCommitHashes.has(entry.hash)}
+                onCopyHash={onCopyHash}
+              />
+            </React.Fragment>
           ))}
         </ul>
       )}
