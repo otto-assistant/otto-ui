@@ -73,17 +73,11 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
             <React.Fragment key={entry.hash}>
               {branchDivider && index === branchDivider.insertBeforeIndex ? (
                 <li className="px-3 py-2" aria-hidden>
-                  <div className="flex items-center gap-2">
-                    <span className="h-px flex-1 bg-border/60" />
-                    <span className="inline-flex max-w-[80%] items-center gap-1 rounded-full border border-border/60 bg-background px-2 py-0.5 typography-micro text-muted-foreground">
-                      <span className="truncate" title={branchDivider.branchName}>
-                        {branchDivider.branchName}
-                      </span>
-                      <span className="text-muted-foreground/90">
-                        {branchDivider.direction === 'down' ? 'v' : '^'}
-                      </span>
+                  <div className="flex items-center justify-center">
+                    <span className="inline-flex max-w-[90%] items-center gap-1 typography-micro text-muted-foreground">
+                      <span className="truncate" title={branchDivider.branchName}>{branchDivider.branchName}</span>
+                      <span>{branchDivider.direction === 'down' ? 'v' : '^'}</span>
                     </span>
-                    <span className="h-px flex-1 bg-border/60" />
                   </div>
                 </li>
               ) : null}
@@ -94,6 +88,8 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
                 files={commitFilesMap.get(entry.hash) ?? []}
                 isLoadingFiles={loadingCommitHashes.has(entry.hash)}
                 onCopyHash={onCopyHash}
+                roundTop={Boolean(branchDivider && index === branchDivider.insertBeforeIndex)}
+                roundBottom={Boolean(branchDivider && index === branchDivider.insertBeforeIndex - 1)}
               />
             </React.Fragment>
           ))}
