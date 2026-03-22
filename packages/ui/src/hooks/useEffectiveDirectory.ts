@@ -39,8 +39,8 @@ export const useEffectiveDirectory = (): string | undefined => {
     }
 
     // If a draft session is open, use its directoryOverride
-    if (newSessionDraft?.open && newSessionDraft.directoryOverride) {
-        return newSessionDraft.directoryOverride;
+    if (newSessionDraft?.open && (newSessionDraft.bootstrapPendingDirectory || newSessionDraft.directoryOverride)) {
+        return newSessionDraft.bootstrapPendingDirectory || newSessionDraft.directoryOverride;
     }
 
     // Fall back to the global directory
