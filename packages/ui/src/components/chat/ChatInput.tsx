@@ -63,6 +63,7 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { PROJECT_COLOR_MAP, PROJECT_ICON_MAP, getProjectIconImageUrl } from '@/lib/projectMeta';
 import { useGitBranches, useGitStore } from '@/stores/useGitStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
+import { createWorktreeDraft } from '@/lib/worktreeSessionCreator';
 import { usePermissionStore } from '@/stores/permissionStore';
 
 const MAX_VISIBLE_TEXTAREA_LINES = 8;
@@ -84,6 +85,8 @@ const normalizePath = (value?: string | null): string | null => {
     }
     return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
 };
+
+const NEW_WORKTREE_SENTINEL = '__new_worktree__';
 
 const getProjectDisplayLabel = (project: { label?: string; path: string }): string => {
     const label = project.label?.trim();
@@ -2470,6 +2473,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
     }, [activeProjectId, projects, setActiveProjectIdOnly, setNewSessionDraftTarget]);
 
     const handleDraftDirectoryChange = React.useCallback((directory: string) => {
+        if (directory === NEW_WORKTREE_SENTINEL) {
+            void createWorktreeDraft();
+            return;
+        }
         const draft = useSessionStore.getState().newSessionDraft;
         if (draft?.pendingWorktreeRequestId || draft?.bootstrapPendingDirectory || draft?.preserveDirectoryOverride) {
             return;
@@ -3022,19 +3029,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                                             </SelectItem>
                                         </SelectGroup>
                                     ) : null}
-                                    {worktreeBranchOptions.length > 0 ? (
-                                        <>
-                                            {projectRootBranchOption ? <SelectSeparator /> : null}
-                                            <SelectGroup>
-                                                <SelectLabel>Worktrees</SelectLabel>
-                                                {worktreeBranchOptions.map((option) => (
-                                                    <SelectItem key={option.value} value={option.value} className="max-w-[24rem] truncate">
-                                                        {option.label}
-                                                    </SelectItem>
-                                                ))}
-                                            </SelectGroup>
-                                        </>
-                                    ) : null}
+                                    {projectRootBranchOption ? <SelectSeparator /> : null}
+                                    <SelectGroup>
+                                        <SelectLabel>Worktrees</SelectLabel>
+                                        <SelectItem value={NEW_WORKTREE_SENTINEL} className="max-w-[24rem] truncate text-muted-foreground">
+                                            + New worktree…
+                                        </SelectItem>
+                                        {worktreeBranchOptions.map((option) => (
+                                            <SelectItem key={option.value} value={option.value} className="max-w-[24rem] truncate">
+                                                {option.label}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectGroup>
                                     {selectedDraftDirectory && !selectedDraftBranchIsKnown ? (
                                         <SelectItem value={selectedDraftDirectory} className="max-w-[24rem] truncate">
                                             {selectedDraftBranchLabel}
