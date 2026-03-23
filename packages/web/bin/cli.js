@@ -968,7 +968,7 @@ START OPTIONS:
   --hostname <hostname>   Managed-remote hostname
   --reserved-domain <d>   Ngrok reserved domain (reserved mode)
   --edge-id <id>          Ngrok edge id (edge mode)
-  --endpoint-id <id>      Alias of --edge-id
+  --endpoint-id <name>    Ngrok config endpoint selector
   --connect-ttl <value>   Connect-link TTL (e.g. 30m, 24h, 1d)
   --session-ttl <value>   Session TTL (e.g. 8h, 24h, 1d)
   --qr                    Print QR code for resulting tunnel URL
@@ -1170,7 +1170,7 @@ complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_
 complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l hostname -d 'Hostname'
 complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l reserved-domain -d 'Reserved domain'
 complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l edge-id -d 'Edge id'
-complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l endpoint-id -d 'Alias of edge id'
+complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l endpoint-id -d 'Ngrok endpoint selector'
 complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l dry-run -d 'Validate without applying'
 complete -c openchamber -n '__fish_seen_subcommand_from tunnel; and __fish_seen_subcommand_from start' -l qr -d 'Show QR code'
 `;
@@ -2359,7 +2359,7 @@ function formatTunnelStatusLine(statusBody, port) {
   };
 }
 
-function formatModeRequirements(mode) {
+function formatModeRequirements(mode, providerId) {
   const requires = Array.isArray(mode?.requires)
     ? mode.requires
       .filter(Boolean)
@@ -2372,6 +2372,19 @@ function formatModeRequirements(mode) {
   if ((mode?.key || '') === 'managed-local') {
     return 'config-path (or default cloudflared config)';
   }
+
+  if (providerId === 'ngrok') {
+    if ((mode?.key || '') === 'ephemeral') {
+      return 'token (or config-path / NGROK_AUTHTOKEN)';
+    }
+    if ((mode?.key || '') === 'reserved') {
+      return 'token, reserved-domain (or config-path with endpoint)';
+    }
+    if ((mode?.key || '') === 'edge') {
+      return 'token, edge-id (or config-path with endpoint)';
+    }
+  }
+
   if (requires.length === 0) {
     return 'none';
   }
@@ -2386,7 +2399,7 @@ function annotateTunnelProvidersForOutput(providers) {
       ...provider,
       modes: modes.map((mode) => ({
         ...mode,
-        displayRequires: formatModeRequirements(mode),
+        displayRequires: formatModeRequirements(mode, provider?.provider),
       })),
     };
   });
@@ -3486,7 +3499,7 @@ const commands = {
             const providerId = provider?.provider || 'unknown';
             process.stdout.write(`provider ${providerId} modes ${modes.length}\n`);
             for (const mode of modes) {
-              const requires = formatModeRequirements(mode).replace(/,\s+/g, ',');
+              const requires = formatModeRequirements(mode, providerId).replace(/,\s+/g, ',');
               process.stdout.write(`mode ${mode?.key || 'unknown'} requires ${requires}\n`);
             }
           }
@@ -3498,7 +3511,7 @@ const commands = {
           clackLog.success(`${clackFormatProviderWithIcon(provider.provider)} — ${modes.length} mode(s)`);
           for (const mode of modes) {
             const label = mode.label || mode.key;
-            const requires = formatModeRequirements(mode);
+            const requires = formatModeRequirements(mode, provider.provider);
             clackLog.step(`${mode.key} — ${label}\n  requires: ${requires}`);
           }
         }
@@ -4103,7 +4116,7 @@ const commands = {
               options: modes.map((m) => ({
                 value: m.key,
                 label: `${m.key} — ${m.label}`,
-                hint: formatModeRequirements(m) !== 'none' ? `requires: ${formatModeRequirements(m)}` : undefined,
+                hint: formatModeRequirements(m, provider) !== 'none' ? `requires: ${formatModeRequirements(m, provider)}` : undefined,
               })),
             });
             if (clackIsCancel(modeChoice)) {
