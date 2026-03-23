@@ -1802,24 +1802,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             insertTextAtSelection(pastedText);
         }
 
-        let attachedCount = 0;
-
         for (const file of imageFiles) {
-            const sizeBefore = useSessionStore.getState().attachedFiles.length;
             try {
                 await addAttachedFile(file);
-                const sizeAfter = useSessionStore.getState().attachedFiles.length;
-                if (sizeAfter > sizeBefore) {
-                    attachedCount += 1;
-                }
             } catch (error) {
                 console.error('Clipboard image attach failed', error);
                 toast.error(error instanceof Error ? error.message : 'Failed to attach image from clipboard');
             }
-        }
-
-        if (attachedCount > 0) {
-            toast.success(`Attached ${attachedCount} image${attachedCount > 1 ? 's' : ''} from clipboard`);
         }
     }, [addAttachedFile, currentSessionId, newSessionDraftOpen, insertTextAtSelection]);
 
@@ -2184,26 +2173,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             return;
         }
 
-        let attachedCount = 0;
-
         if (files.length > 0) {
             for (const file of files) {
-                const sizeBefore = useSessionStore.getState().attachedFiles.length;
                 try {
                     await addAttachedFile(file);
-                    const sizeAfter = useSessionStore.getState().attachedFiles.length;
-                    if (sizeAfter > sizeBefore) {
-                        attachedCount += 1;
-                    }
                 } catch (error) {
                     console.error('File attach failed', error);
                     toast.error(error instanceof Error ? error.message : 'Failed to attach file');
                 }
             }
-        }
-
-        if (attachedCount > 0) {
-            toast.success(`Attached ${attachedCount} file${attachedCount > 1 ? 's' : ''}`);
         }
         clearDropTextSuppression();
     };
@@ -2278,9 +2256,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                             : [];
                         if (paths.length === 0) return;
 
-                        let attachedCount = 0;
                         for (const path of paths) {
-                            const sizeBefore = useSessionStore.getState().attachedFiles.length;
                             try {
                                 const normalizedPath = normalizeDroppedPath(path);
                                 const fileName = normalizedPath.split(/[\\/]/).pop() || normalizedPath;
@@ -2309,15 +2285,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                                 }
 
                                 await addAttachedFile(file);
-                                const sizeAfter = useSessionStore.getState().attachedFiles.length;
-                                if (sizeAfter > sizeBefore) attachedCount++;
                             } catch (error) {
                                 console.error('Failed to attach dropped file:', path, error);
                                 toast.error(`Failed to attach ${path.split(/[\\/]/).pop() || 'file'}`);
                             }
-                        }
-                        if (attachedCount > 0) {
-                            toast.success(`Attached ${attachedCount} file${attachedCount > 1 ? 's' : ''}`);
                         }
                     }
                 });
@@ -2343,25 +2314,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
     const attachFiles = React.useCallback(async (files: FileList | File[]) => {
-        let attachedCount = 0;
         const list = Array.isArray(files) ? files : Array.from(files);
 
         for (const file of list) {
-            const sizeBefore = useSessionStore.getState().attachedFiles.length;
             try {
                 await addAttachedFile(file);
-                const sizeAfter = useSessionStore.getState().attachedFiles.length;
-                if (sizeAfter > sizeBefore) {
-                    attachedCount += 1;
-                }
             } catch (error) {
                 console.error('File attach failed', error);
                 toast.error(error instanceof Error ? error.message : 'Failed to attach file');
             }
-        }
-
-        if (attachedCount > 0) {
-            toast.success(`Attached ${attachedCount} file${attachedCount > 1 ? 's' : ''}`);
         }
     }, [addAttachedFile]);
 

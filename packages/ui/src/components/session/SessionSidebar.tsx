@@ -1241,12 +1241,13 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   }, [prStatusEntries]);
 
   const renderGroupSessions = React.useCallback(
-    (group: SessionGroup, groupKey: string, projectId?: string | null, hideGroupLabel?: boolean, dragHandleProps?: SortableDragHandleProps | null) => (
+    (group: SessionGroup, groupKey: string, projectId?: string | null, hideGroupLabel?: boolean, dragHandleProps?: SortableDragHandleProps | null, compactBodyPadding?: boolean) => (
       <SessionGroupSection
         group={group}
         groupKey={groupKey}
         projectId={projectId}
         hideGroupLabel={hideGroupLabel}
+        compactBodyPadding={compactBodyPadding}
         hasSessionSearchQuery={hasSessionSearchQuery}
         normalizedSessionSearchQuery={normalizedSessionSearchQuery}
         groupSearchDataByGroup={groupSearchDataByGroup}

@@ -91,6 +91,7 @@ type Props = {
   }>;
   onToggleCollapsedGroup: (groupKey: string) => void;
   dragHandleProps?: SortableDragHandleProps | null;
+  compactBodyPadding?: boolean;
 };
 
 export function SessionGroupSection(props: Props): React.ReactNode {
@@ -132,6 +133,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
     prVisualStateByDirectoryBranch,
     onToggleCollapsedGroup,
     dragHandleProps,
+    compactBodyPadding = false,
   } = props;
 
   const searchData = hasSessionSearchQuery ? groupSearchDataByGroup.get(group) : null;
@@ -415,8 +417,10 @@ export function SessionGroupSection(props: Props): React.ReactNode {
     </SessionFolderDndScope>
   );
 
+  const groupBodyPaddingClass = compactBodyPadding ? 'pb-2 pl-1' : 'pb-3 pl-4';
+
   if (hideGroupLabel) {
-    return <div className="oc-group"><div className="oc-group-body pb-3 pl-4">{body}</div></div>;
+    return <div className="oc-group"><div className={cn('oc-group-body', groupBodyPaddingClass)}>{body}</div></div>;
   }
 
   return (
@@ -659,7 +663,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
            </div>
          ) : null}
       </div>
-      {!isCollapsed ? <div className="oc-group-body pb-3 pl-4">{body}</div> : null}
+      {!isCollapsed ? <div className={cn('oc-group-body', groupBodyPaddingClass)}>{body}</div> : null}
     </div>
   );
 }
