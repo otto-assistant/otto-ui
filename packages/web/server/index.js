@@ -6612,10 +6612,18 @@ function setupProxy(app) {
 
   const isSseApiPath = (path) => path === '/event' || path === '/global/event';
 
-  const forwardSseRequest = async (req, res) => {
+  const forwardSseRequest = async (req, res, options = {}) => {
     const startedAt = Date.now();
-    const upstreamPath = getUpstreamPathForRequest(req);
-    const targetUrl = buildOpenCodeUrl(upstreamPath, '');
+    const {
+      upstreamPath: explicitUpstreamPath,
+      directory = null,
+      registerUiClient = false,
+    } = options;
+    const upstreamPath = explicitUpstreamPath || getUpstreamPathForRequest(req);
+    const targetUrl = new URL(buildOpenCodeUrl(upstreamPath, ''));
+    if (typeof directory === 'string' && directory.trim().length > 0) {
+      targetUrl.searchParams.set('directory', directory.trim());
+    }
     const authHeaders = getOpenCodeAuthHeaders();
 
     const requestHeaders = {
@@ -6624,6 +6632,11 @@ function setupProxy(app) {
       connection: 'keep-alive',
       ...(authHeaders.Authorization ? { Authorization: authHeaders.Authorization } : {}),
     };
+
+    const lastEventId = req.header('Last-Event-ID');
+    if (typeof lastEventId === 'string' && lastEventId.length > 0) {
+      requestHeaders['Last-Event-ID'] = lastEventId;
+    }
 
     const controller = new AbortController();
     let connectTimer = null;
@@ -6644,7 +6657,11 @@ function setupProxy(app) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
       }
+      if (registerUiClient) {
+        uiNotificationClients.delete(res);
+      }
       req.off('close', onClientClose);
+      req.off('error', onClientClose);
     };
 
     const resetIdleTimeout = () => {
@@ -6663,6 +6680,7 @@ function setupProxy(app) {
     };
 
     req.on('close', onClientClose);
+    req.on('error', onClientClose);
 
     try {
       connectTimer = setTimeout(() => {
@@ -6702,6 +6720,10 @@ function setupProxy(app) {
       res.setHeader('x-content-type-options', 'nosniff');
       if (typeof res.flushHeaders === 'function') {
         res.flushHeaders();
+      }
+
+      if (registerUiClient) {
+        uiNotificationClients.add(res);
       }
 
       resetIdleTimeout();
@@ -6758,8 +6780,25 @@ function setupProxy(app) {
     }
   };
 
-  app.get('/api/event', forwardSseRequest);
-  app.get('/api/global/event', forwardSseRequest);
+  app.get('/api/global/event', async (req, res) => {
+    await forwardSseRequest(req, res, {
+      upstreamPath: '/global/event',
+      registerUiClient: true,
+    });
+  });
+
+  app.get('/api/event', async (req, res) => {
+    const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
+    const directoryParam = Array.isArray(req.query.directory)
+      ? req.query.directory[0]
+      : req.query.directory;
+    const resolvedDirectory = headerDirectory || directoryParam || null;
+
+    await forwardSseRequest(req, res, {
+      upstreamPath: '/event',
+      directory: typeof resolvedDirectory === 'string' ? resolvedDirectory : null,
+    });
+  });
 
   app.use('/api', (_req, _res, next) => {
     ensureOpenCodeApiPrefix();
@@ -8661,287 +8700,6 @@ async function main(options = {}) {
   });
 
   // ── End Tunnel API ────────────────────────────────────────────────
-
-  app.get('/api/global/event', async (req, res) => {
-    let targetUrl;
-    try {
-      targetUrl = new URL(buildOpenCodeUrl('/global/event', ''));
-    } catch {
-      return res.status(503).json({ error: 'OpenCode service unavailable' });
-    }
-
-    const headers = {
-      Accept: 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      ...getOpenCodeAuthHeaders(),
-    };
-
-    const lastEventId = req.header('Last-Event-ID');
-    if (typeof lastEventId === 'string' && lastEventId.length > 0) {
-      headers['Last-Event-ID'] = lastEventId;
-    }
-
-    const controller = new AbortController();
-    const cleanup = () => {
-      if (!controller.signal.aborted) {
-        controller.abort();
-      }
-    };
-
-    req.on('close', cleanup);
-    req.on('error', cleanup);
-
-    let upstream;
-    try {
-      upstream = await fetch(targetUrl.toString(), {
-        headers,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      return res.status(502).json({ error: 'Failed to connect to OpenCode event stream' });
-    }
-
-    if (!upstream.ok || !upstream.body) {
-      return res.status(502).json({ error: `OpenCode event stream unavailable (${upstream.status})` });
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    if (typeof res.flushHeaders === 'function') {
-      res.flushHeaders();
-    }
-
-    uiNotificationClients.add(res);
-    const cleanupClient = () => {
-      uiNotificationClients.delete(res);
-    };
-    req.on('close', cleanupClient);
-    req.on('error', cleanupClient);
-
-    const heartbeatInterval = setInterval(() => {
-      writeSseEvent(res, { type: 'openchamber:heartbeat', timestamp: Date.now() });
-    }, 15000);
-
-    const decoder = new TextDecoder();
-    const reader = upstream.body.getReader();
-    let buffer = '';
-
-    const forwardBlock = (block) => {
-      if (!block) return;
-      const payload = parseSseDataPayload(block);
-
-      res.write(`${block}
-
-`);
-      // Cache session titles from session.updated/session.created events (global stream)
-      maybeCacheSessionInfoFromEvent(payload);
-
-      // Keep server-authoritative session state fresh even if the
-      // background watcher is disconnected.
-      if (payload && payload.type === 'session.status') {
-        const update = extractSessionStatusUpdate(payload);
-        if (update) {
-          updateSessionState(update.sessionId, update.type, update.eventId || `proxy-${Date.now()}`, {
-            attempt: update.attempt,
-            message: update.message,
-            next: update.next,
-          });
-        }
-      }
-
-      const transitions = deriveSessionActivityTransitions(payload);
-      if (transitions && transitions.length > 0) {
-        for (const activity of transitions) {
-          if (setSessionActivityPhase(activity.sessionId, activity.phase)) {
-            writeSseEvent(res, {
-              type: 'openchamber:session-activity',
-              properties: {
-                sessionId: activity.sessionId,
-                phase: activity.phase,
-              }
-            });
-          }
-        }
-      }
-    };
-
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-
-        let separatorIndex = buffer.indexOf('\n\n');
-        while (separatorIndex !== -1) {
-          const block = buffer.slice(0, separatorIndex);
-          buffer = buffer.slice(separatorIndex + 2);
-          forwardBlock(block);
-          separatorIndex = buffer.indexOf('\n\n');
-        }
-      }
-
-      if (buffer.trim().length > 0) {
-        forwardBlock(buffer.trim());
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        console.warn('SSE proxy stream error:', error);
-      }
-    } finally {
-      clearInterval(heartbeatInterval);
-      cleanupClient();
-      cleanup();
-      try {
-        res.end();
-      } catch {
-        // ignore
-      }
-    }
-  });
-
-  app.get('/api/event', async (req, res) => {
-    let targetUrl;
-    try {
-      targetUrl = new URL(buildOpenCodeUrl('/event', ''));
-    } catch {
-      return res.status(503).json({ error: 'OpenCode service unavailable' });
-    }
-
-    const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
-    const directoryParam = Array.isArray(req.query.directory)
-      ? req.query.directory[0]
-      : req.query.directory;
-    const resolvedDirectory = headerDirectory || directoryParam || null;
-    if (typeof resolvedDirectory === 'string' && resolvedDirectory.trim().length > 0) {
-      targetUrl.searchParams.set('directory', resolvedDirectory.trim());
-    }
-
-    const headers = {
-      Accept: 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      ...getOpenCodeAuthHeaders(),
-    };
-
-    const lastEventId = req.header('Last-Event-ID');
-    if (typeof lastEventId === 'string' && lastEventId.length > 0) {
-      headers['Last-Event-ID'] = lastEventId;
-    }
-
-    const controller = new AbortController();
-    const cleanup = () => {
-      if (!controller.signal.aborted) {
-        controller.abort();
-      }
-    };
-
-    req.on('close', cleanup);
-    req.on('error', cleanup);
-
-    let upstream;
-    try {
-      upstream = await fetch(targetUrl.toString(), {
-        headers,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      return res.status(502).json({ error: 'Failed to connect to OpenCode event stream' });
-    }
-
-    if (!upstream.ok || !upstream.body) {
-      return res.status(502).json({ error: `OpenCode event stream unavailable (${upstream.status})` });
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    if (typeof res.flushHeaders === 'function') {
-      res.flushHeaders();
-    }
-
-    const heartbeatInterval = setInterval(() => {
-      writeSseEvent(res, { type: 'openchamber:heartbeat', timestamp: Date.now() });
-    }, 15000);
-
-    const decoder = new TextDecoder();
-    const reader = upstream.body.getReader();
-    let buffer = '';
-
-    const forwardBlock = (block) => {
-      if (!block) return;
-      const payload = parseSseDataPayload(block);
-
-      res.write(`${block}
-
-`);
-      // Cache session titles from session.updated/session.created events (per-session stream)
-      maybeCacheSessionInfoFromEvent(payload);
-
-      if (payload && payload.type === 'session.status') {
-        const update = extractSessionStatusUpdate(payload);
-        if (update) {
-          updateSessionState(update.sessionId, update.type, update.eventId || `proxy-${Date.now()}`, {
-            attempt: update.attempt,
-            message: update.message,
-            next: update.next,
-          });
-        }
-      }
-
-      const transitions = deriveSessionActivityTransitions(payload);
-      if (transitions && transitions.length > 0) {
-        for (const activity of transitions) {
-          if (setSessionActivityPhase(activity.sessionId, activity.phase)) {
-            writeSseEvent(res, {
-              type: 'openchamber:session-activity',
-              properties: {
-                sessionId: activity.sessionId,
-                phase: activity.phase,
-              }
-            });
-          }
-        }
-      }
-    };
-
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-
-        let separatorIndex = buffer.indexOf('\n\n');
-        while (separatorIndex !== -1) {
-          const block = buffer.slice(0, separatorIndex);
-          buffer = buffer.slice(separatorIndex + 2);
-          forwardBlock(block);
-          separatorIndex = buffer.indexOf('\n\n');
-        }
-      }
-
-      if (buffer.trim().length > 0) {
-        forwardBlock(buffer.trim());
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        console.warn('SSE proxy stream error:', error);
-      }
-    } finally {
-      clearInterval(heartbeatInterval);
-      cleanup();
-      try {
-        res.end();
-      } catch {
-        // ignore
-      }
-    }
-  });
 
   app.get('/api/config/settings', async (_req, res) => {
     try {

@@ -811,7 +811,6 @@ function areMessageListEntryPropsEqual(prevProps: MessageListEntryProps, nextPro
 // Inner component that renders staged turn entries.
 const MessageListContent: React.FC<{
     entries: RenderEntry[];
-    trailingEntry?: RenderEntry;
     onMessageContentChange: (reason?: ContentChangeReason) => void;
     getAnimationHandlers: (messageId: string) => AnimationHandlers;
     scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
@@ -823,7 +822,7 @@ const MessageListContent: React.FC<{
     chatRenderMode: 'sorted' | 'live';
     shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
     onUserAnimationConsumed: (messageId: string) => void;
-}> = ({ entries, trailingEntry, onMessageContentChange, getAnimationHandlers, scrollToBottom, stickyUserHeader, sessionIsWorking, defaultActivityExpanded, turnUiStates, onToggleTurnGroup, chatRenderMode, shouldAnimateUserMessage, onUserAnimationConsumed }) => {
+}> = ({ entries, onMessageContentChange, getAnimationHandlers, scrollToBottom, stickyUserHeader, sessionIsWorking, defaultActivityExpanded, turnUiStates, onToggleTurnGroup, chatRenderMode, shouldAnimateUserMessage, onUserAnimationConsumed }) => {
     const renderEntry = React.useCallback((entry: RenderEntry) => {
         return (
             <MessageListEntry
@@ -845,12 +844,69 @@ const MessageListContent: React.FC<{
     }, [chatRenderMode, defaultActivityExpanded, getAnimationHandlers, onMessageContentChange, onToggleTurnGroup, onUserAnimationConsumed, scrollToBottom, sessionIsWorking, shouldAnimateUserMessage, stickyUserHeader, turnUiStates]);
 
     return (
-        <>
-            <TurnList entries={entries} renderEntry={renderEntry} />
-            {trailingEntry ? renderEntry(trailingEntry) : null}
-        </>
+        <TurnList entries={entries} renderEntry={renderEntry} />
     );
 };
+
+const StreamingTailContent: React.FC<{
+    entry: RenderEntry;
+    onMessageContentChange: (reason?: ContentChangeReason) => void;
+    getAnimationHandlers: (messageId: string) => AnimationHandlers;
+    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    stickyUserHeader: boolean;
+    sessionIsWorking: boolean;
+    defaultActivityExpanded: boolean;
+    turnUiStates: Map<string, TurnUiState>;
+    onToggleTurnGroup: (turnId: string) => void;
+    chatRenderMode: 'sorted' | 'live';
+    shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
+    onUserAnimationConsumed: (messageId: string) => void;
+}> = React.memo(({
+    entry,
+    onMessageContentChange,
+    getAnimationHandlers,
+    scrollToBottom,
+    stickyUserHeader,
+    sessionIsWorking,
+    defaultActivityExpanded,
+    turnUiStates,
+    onToggleTurnGroup,
+    chatRenderMode,
+    shouldAnimateUserMessage,
+    onUserAnimationConsumed,
+}) => {
+    return (
+        <MessageListEntry
+            entry={entry}
+            onMessageContentChange={onMessageContentChange}
+            getAnimationHandlers={getAnimationHandlers}
+            scrollToBottom={scrollToBottom}
+            stickyUserHeader={stickyUserHeader}
+            sessionIsWorking={sessionIsWorking}
+            defaultActivityExpanded={defaultActivityExpanded}
+            turnUiStates={turnUiStates}
+            onToggleTurnGroup={onToggleTurnGroup}
+            chatRenderMode={chatRenderMode}
+            shouldAnimateUserMessage={shouldAnimateUserMessage}
+            onUserAnimationConsumed={onUserAnimationConsumed}
+        />
+    );
+}, (prev, next) => {
+    return prev.entry === next.entry
+        && prev.onMessageContentChange === next.onMessageContentChange
+        && prev.getAnimationHandlers === next.getAnimationHandlers
+        && prev.scrollToBottom === next.scrollToBottom
+        && prev.stickyUserHeader === next.stickyUserHeader
+        && prev.sessionIsWorking === next.sessionIsWorking
+        && prev.defaultActivityExpanded === next.defaultActivityExpanded
+        && prev.turnUiStates === next.turnUiStates
+        && prev.onToggleTurnGroup === next.onToggleTurnGroup
+        && prev.chatRenderMode === next.chatRenderMode
+        && prev.shouldAnimateUserMessage === next.shouldAnimateUserMessage
+        && prev.onUserAnimationConsumed === next.onUserAnimationConsumed;
+});
+
+StreamingTailContent.displayName = 'StreamingTailContent';
 
 const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({ 
     sessionKey,
@@ -1156,6 +1212,11 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         return staticRenderEntries.slice(staging.stageStartIndex);
     }, [staticRenderEntries, staging.stageStartIndex]);
 
+    const historyEntries = stagedEntries;
+    const allEntries = React.useMemo(() => {
+        return trailingStreamingEntry ? [...historyEntries, trailingStreamingEntry] : historyEntries;
+    }, [historyEntries, trailingStreamingEntry]);
+
     const currentUserOrder = React.useMemo(() => {
         return messages
             .filter((message) => resolveMessageRole(message) === 'user')
@@ -1204,11 +1265,11 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         // The ref-based animatedIds set is reset on session switch.
     }, []);
 
-    const shouldVirtualize = Boolean(resolveScrollContainer()) && stagedEntries.length >= MESSAGE_VIRTUALIZE_THRESHOLD;
+    const shouldVirtualize = Boolean(resolveScrollContainer()) && historyEntries.length >= MESSAGE_VIRTUALIZE_THRESHOLD;
 
     const estimateEntrySize = React.useCallback(
         (index: number): number => {
-            const entry = stagedEntries[index];
+            const entry = historyEntries[index];
             if (!entry) {
                 return 220;
             }
@@ -1222,22 +1283,22 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
             const role = resolveMessageRole(entry.message);
             return role === 'user' ? 100 : 220;
         },
-        [stagedEntries]
+        [historyEntries]
     );
 
     const virtualizer = useMessageListVirtualizer<Element>({
-        count: stagedEntries.length,
+        count: historyEntries.length,
         getScrollElement: resolveScrollContainer,
         estimateSize: estimateEntrySize,
         overscan: isMobile ? MESSAGE_VIRTUAL_OVERSCAN_MOBILE : MESSAGE_VIRTUAL_OVERSCAN_DESKTOP,
-        getItemKey: (index: number) => stagedEntries[index]?.key ?? index,
+        getItemKey: (index: number) => historyEntries[index]?.key ?? index,
         enabled: shouldVirtualize,
         useFlushSync: false,
     });
 
     const isVirtualRowInRange = React.useCallback(
-        (row: VirtualItem) => row.index >= 0 && row.index < stagedEntries.length,
-        [stagedEntries.length],
+        (row: VirtualItem) => row.index >= 0 && row.index < historyEntries.length,
+        [historyEntries.length],
     );
 
     const virtualRows = shouldVirtualize ? virtualizer.getVirtualItems().filter(isVirtualRowInRange) : [];
@@ -1269,7 +1330,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
     const messageIndexMap = React.useMemo(() => {
         const indexMap = new Map<string, number>();
 
-        stagedEntries.forEach((entry, index) => {
+        allEntries.forEach((entry, index) => {
             if (entry.kind === 'ungrouped') {
                 indexMap.set(entry.message.info.id, index);
                 return;
@@ -1281,17 +1342,17 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         });
 
         return indexMap;
-    }, [stagedEntries]);
+    }, [allEntries]);
 
     const turnIndexMap = React.useMemo(() => {
         const indexMap = new Map<string, number>();
-        stagedEntries.forEach((entry, index) => {
+        allEntries.forEach((entry, index) => {
             if (entry.kind === 'turn') {
                 indexMap.set(entry.turn.turnId, index);
             }
         });
         return indexMap;
-    }, [stagedEntries]);
+    }, [allEntries]);
 
     const findMessageElement = React.useCallback((messageId: string): HTMLElement | null => {
         const container = resolveScrollContainer();
@@ -1332,7 +1393,9 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
                     return false;
                 }
 
-                if (shouldVirtualize) {
+                const targetIsTail = trailingStreamingEntry !== undefined && index >= historyEntries.length;
+
+                if (shouldVirtualize && !targetIsTail) {
                     scrollVirtualizerToIndex(index, behavior === 'instant' ? 'auto' : behavior);
                     if (typeof window !== 'undefined') {
                         window.requestAnimationFrame(() => {
@@ -1368,7 +1431,9 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
                     return false;
                 }
 
-                if (shouldVirtualize) {
+                const targetIsTail = trailingStreamingEntry !== undefined && index >= historyEntries.length;
+
+                if (shouldVirtualize && !targetIsTail) {
                     scrollVirtualizerToIndex(index, behavior === 'instant' ? 'auto' : behavior);
                     if (scrollMessageElementIntoView(messageId, behavior)) {
                         return true;
@@ -1479,7 +1544,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         return () => {
             objectRef.current = null;
         };
-    }, [findMessageElement, messageIndexMap, scrollMessageElementIntoView, resolveScrollContainer, scrollVirtualizerToIndex, shouldVirtualize, turnIndexMap, ref]);
+    }, [findMessageElement, historyEntries.length, messageIndexMap, scrollMessageElementIntoView, resolveScrollContainer, scrollVirtualizerToIndex, shouldVirtualize, trailingStreamingEntry, turnIndexMap, ref]);
 
     const disableFadeIn = isLoadingOlder || (renderVirtualized && virtualizer.isScrolling);
 
@@ -1513,47 +1578,64 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
 
                 <FadeInDisabledProvider disabled={disableFadeIn}>
                     {renderVirtualized ? (
-                        <div
-                            className="relative w-full"
-                            style={{ height: `${virtualizer.getTotalSize()}px` }}
-                        >
-                            {effectiveVirtualRows.map((virtualRow: VirtualItem) => {
-                                const entry = stagedEntries[virtualRow.index];
-                                if (!entry) {
-                                    return null;
-                                }
+                        <>
+                            <div
+                                className="relative w-full"
+                                style={{ height: `${virtualizer.getTotalSize()}px` }}
+                            >
+                                {effectiveVirtualRows.map((virtualRow: VirtualItem) => {
+                                    const entry = historyEntries[virtualRow.index];
+                                    if (!entry) {
+                                        return null;
+                                    }
 
-                                return (
-                                    <div
-                                        key={entry.key}
-                                        data-index={virtualRow.index}
-                                        ref={virtualizer.measureElement}
-                                        className="absolute left-0 top-0 w-full [overflow-anchor:none]"
-                                        style={{ transform: `translateY(${virtualRow.start}px)` }}
-                                    >
-                                        <MessageListEntry
-                                            entry={entry}
-                                            onMessageContentChange={stableOnMessageContentChange}
-                                            getAnimationHandlers={stableGetAnimationHandlers}
-                                            scrollToBottom={stableScrollToBottom}
-                                            stickyUserHeader={false}
-                                            sessionIsWorking={sessionIsWorking}
-                                            defaultActivityExpanded={defaultActivityExpanded}
-                                            turnUiStates={turnUiStates}
-                                            onToggleTurnGroup={toggleTurnGroup}
-                                            chatRenderMode={chatRenderMode}
-                                            shouldAnimateUserMessage={shouldAnimateUserMessage}
-                                            onUserAnimationConsumed={onUserAnimationConsumed}
-                                        />
-                                    </div>
-                                );
-                            })}
-                        </div>
+                                    return (
+                                        <div
+                                            key={entry.key}
+                                            data-index={virtualRow.index}
+                                            ref={virtualizer.measureElement}
+                                            className="absolute left-0 top-0 w-full [overflow-anchor:none]"
+                                            style={{ transform: `translateY(${virtualRow.start}px)` }}
+                                        >
+                                            <MessageListEntry
+                                                entry={entry}
+                                                onMessageContentChange={stableOnMessageContentChange}
+                                                getAnimationHandlers={stableGetAnimationHandlers}
+                                                scrollToBottom={stableScrollToBottom}
+                                                stickyUserHeader={false}
+                                                sessionIsWorking={sessionIsWorking}
+                                                defaultActivityExpanded={defaultActivityExpanded}
+                                                turnUiStates={turnUiStates}
+                                                onToggleTurnGroup={toggleTurnGroup}
+                                                chatRenderMode={chatRenderMode}
+                                                shouldAnimateUserMessage={shouldAnimateUserMessage}
+                                                onUserAnimationConsumed={onUserAnimationConsumed}
+                                            />
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            {trailingStreamingEntry ? (
+                                <StreamingTailContent
+                                    entry={trailingStreamingEntry}
+                                    onMessageContentChange={stableOnMessageContentChange}
+                                    getAnimationHandlers={stableGetAnimationHandlers}
+                                    scrollToBottom={stableScrollToBottom}
+                                    stickyUserHeader={stickyUserHeader}
+                                    sessionIsWorking={sessionIsWorking}
+                                    defaultActivityExpanded={defaultActivityExpanded}
+                                    turnUiStates={turnUiStates}
+                                    onToggleTurnGroup={toggleTurnGroup}
+                                    chatRenderMode={chatRenderMode}
+                                    shouldAnimateUserMessage={shouldAnimateUserMessage}
+                                    onUserAnimationConsumed={onUserAnimationConsumed}
+                                />
+                            ) : null}
+                        </>
                     ) : (
                         <div className="relative w-full">
                         <MessageListContent
-                            entries={stagedEntries}
-                            trailingEntry={trailingStreamingEntry}
+                            entries={historyEntries}
                             onMessageContentChange={stableOnMessageContentChange}
                             getAnimationHandlers={stableGetAnimationHandlers}
                             scrollToBottom={stableScrollToBottom}
@@ -1566,6 +1648,22 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
                             shouldAnimateUserMessage={shouldAnimateUserMessage}
                             onUserAnimationConsumed={onUserAnimationConsumed}
                         />
+                        {trailingStreamingEntry ? (
+                            <StreamingTailContent
+                                entry={trailingStreamingEntry}
+                                onMessageContentChange={stableOnMessageContentChange}
+                                getAnimationHandlers={stableGetAnimationHandlers}
+                                scrollToBottom={stableScrollToBottom}
+                                stickyUserHeader={stickyUserHeader}
+                                sessionIsWorking={sessionIsWorking}
+                                defaultActivityExpanded={defaultActivityExpanded}
+                                turnUiStates={turnUiStates}
+                                onToggleTurnGroup={toggleTurnGroup}
+                                chatRenderMode={chatRenderMode}
+                                shouldAnimateUserMessage={shouldAnimateUserMessage}
+                                onUserAnimationConsumed={onUserAnimationConsumed}
+                            />
+                        ) : null}
                         </div>
                     )}
                 </FadeInDisabledProvider>
