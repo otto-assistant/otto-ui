@@ -520,6 +520,9 @@ export const ChatContainer: React.FC = () => {
                         <ScrollShadow
                             className="absolute inset-0 overflow-y-auto overflow-x-hidden z-0 chat-scroll overlay-scrollbar-target"
                             ref={scrollRef}
+                            style={(timelineController.pendingRevealWork || timelineController.isLoadingOlder)
+                                ? { overflowAnchor: 'none' }
+                                : undefined}
                             observeMutations={false}
                             hideTopShadow={isMobile && stickyUserHeader}
                             data-scroll-shadow="true"

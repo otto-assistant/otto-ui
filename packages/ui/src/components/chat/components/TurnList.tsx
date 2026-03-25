@@ -16,10 +16,6 @@ const TurnList = <TEntry extends TurnListEntry>({ entries, renderEntry }: TurnLi
                 <div
                     key={entry.key}
                     data-turn-entry={entry.key}
-                    style={{
-                        contentVisibility: 'auto',
-                        containIntrinsicSize: 'auto 520px',
-                    }}
                 >
                     {renderEntry(entry)}
                 </div>

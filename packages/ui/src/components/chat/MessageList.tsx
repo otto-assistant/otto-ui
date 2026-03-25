@@ -1503,7 +1503,20 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
 
                 const containerRect = container.getBoundingClientRect();
                 const nodes: HTMLElement[] = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'));
-                const firstVisible = nodes.find((node) => node.getBoundingClientRect().bottom > containerRect.top + 1);
+                const firstVisible = nodes.find((node) => {
+                    const rect = node.getBoundingClientRect();
+                    if (rect.bottom <= containerRect.top + 1) {
+                        return false;
+                    }
+
+                    if (typeof window === 'undefined') {
+                        return true;
+                    }
+
+                    const computed = window.getComputedStyle(node);
+                    const isStuckSticky = computed.position === 'sticky' && rect.top <= containerRect.top + 1;
+                    return !isStuckSticky;
+                }) ?? nodes.find((node) => node.getBoundingClientRect().bottom > containerRect.top + 1);
                 if (!firstVisible) {
                     return null;
                 }
@@ -1543,25 +1556,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
                     return true;
                 };
 
-                if (applyAnchor()) {
-                    return true;
-                }
-
-                if (typeof window !== 'undefined') {
-                    let attempts = 0;
-                    const retry = () => {
-                        attempts += 1;
-                        if (applyAnchor()) {
-                            return;
-                        }
-                        if (attempts < 3) {
-                            window.requestAnimationFrame(retry);
-                        }
-                    };
-                    window.requestAnimationFrame(retry);
-                }
-
-                return true;
+                return applyAnchor();
             },
         };
 
@@ -1579,7 +1574,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         };
     }, [findMessageElement, historyEntries.length, messageIndexMap, scrollMessageElementIntoView, resolveScrollContainer, trailingStreamingEntry, turnIndexMap, ref]);
 
-    const disableFadeIn = isLoadingOlder;
+    const disableFadeIn = false;
 
     return (
         <div>

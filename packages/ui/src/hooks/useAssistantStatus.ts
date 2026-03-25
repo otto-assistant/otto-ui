@@ -1,6 +1,5 @@
 import React from 'react';
 import type { AssistantMessage, Message, Part, ReasoningPart, TextPart, ToolPart } from '@opencode-ai/sdk/v2';
-import { useShallow } from 'zustand/react/shallow';
 
 import type { MessageStreamPhase } from '@/stores/types/sessionTypes';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -74,6 +73,9 @@ const DEFAULT_WORKING: WorkingSummary = {
     retryInfo: null,
 };
 
+const EMPTY_SESSION_MESSAGES: Array<{ info: Message; parts: Part[] }> = [];
+const EMPTY_SESSION_PERMISSIONS: unknown[] = [];
+
 const isAssistantMessage = (message: Message): message is AssistantMessageWithState => message.role === 'assistant';
 
 const isReasoningPart = (part: Part): part is ReasoningPart => part.type === 'reasoning';
@@ -114,13 +116,33 @@ const getToolDisplayName = (part: ToolPart): string => {
 };
 
 export function useAssistantStatus(): AssistantStatusSnapshot {
-    const { currentSessionId, messages, permissions, sessionAbortFlags } = useSessionStore(
-        useShallow((state) => ({
-            currentSessionId: state.currentSessionId,
-            messages: state.messages,
-            permissions: state.permissions,
-            sessionAbortFlags: state.sessionAbortFlags,
-        }))
+    const currentSessionId = useSessionStore((state) => state.currentSessionId);
+
+    const sessionMessages = useSessionStore(
+        React.useCallback((state) => {
+            if (!currentSessionId) {
+                return EMPTY_SESSION_MESSAGES;
+            }
+            return (state.messages.get(currentSessionId) ?? EMPTY_SESSION_MESSAGES) as Array<{ info: Message; parts: Part[] }>;
+        }, [currentSessionId])
+    );
+
+    const sessionPermissionRequests = useSessionStore(
+        React.useCallback((state) => {
+            if (!currentSessionId) {
+                return EMPTY_SESSION_PERMISSIONS;
+            }
+            return state.permissions?.get(currentSessionId) ?? EMPTY_SESSION_PERMISSIONS;
+        }, [currentSessionId])
+    );
+
+    const sessionAbortRecord = useSessionStore(
+        React.useCallback((state) => {
+            if (!currentSessionId) {
+                return null;
+            }
+            return state.sessionAbortFlags?.get(currentSessionId) ?? null;
+        }, [currentSessionId])
     );
 
     const { phase: activityPhase, isWorking: isPhaseWorking } = useCurrentSessionActivity();
@@ -136,14 +158,6 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
         const s = state.sessionStatus.get(currentSessionId);
         return s?.type === 'retry' ? s.next : undefined;
     });
-
-    const sessionMessages = React.useMemo<Array<{ info: Message; parts: Part[] }>>(() => {
-        if (!currentSessionId) {
-            return [];
-        }
-        const records = messages.get(currentSessionId) ?? [];
-        return records as Array<{ info: Message; parts: Part[] }>;
-    }, [currentSessionId, messages]);
 
     type ParsedStatusResult = {
         activePartType: 'text' | 'tool' | 'reasoning' | 'editing' | undefined;
@@ -287,11 +301,9 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
     }, [sessionMessages]);
 
     const abortState = React.useMemo(() => {
-        const sessionId = currentSessionId;
-        const abortRecord = sessionId ? sessionAbortFlags?.get(sessionId) ?? null : null;
-        const hasActiveAbort = Boolean(abortRecord && !abortRecord.acknowledged);
+        const hasActiveAbort = Boolean(sessionAbortRecord && !sessionAbortRecord.acknowledged);
         return { wasAborted: hasActiveAbort, abortActive: hasActiveAbort };
-    }, [currentSessionId, sessionAbortFlags]);
+    }, [sessionAbortRecord]);
 
     const baseWorking = React.useMemo<WorkingSummary>(() => {
 
@@ -388,9 +400,7 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
             return baseWorking;
         }
 
-        const sessionId = currentSessionId;
-        const permissionList = sessionId ? permissions?.get(sessionId) ?? [] : [];
-        const hasPendingPermission = permissionList.length > 0;
+        const hasPendingPermission = sessionPermissionRequests.length > 0;
 
         if (!hasPendingPermission) {
             return baseWorking;
@@ -403,7 +413,7 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
             canAbort: false,
             retryInfo: null,
         };
-    }, [currentSessionId, permissions, baseWorking]);
+    }, [baseWorking, sessionPermissionRequests]);
 
     return {
         forming,
