@@ -533,6 +533,10 @@ declare global {
     }
 }
 
+// In-flight dedup: prevent concurrent duplicate loadProviders/loadAgents calls for the same directory
+const _inFlightProviders = new Map<string, Promise<void>>();
+const _inFlightAgents = new Map<string, Promise<boolean>>();
+
 export const useConfigStore = create<ConfigStore>()(
     devtools(
         persist(
@@ -724,6 +728,12 @@ export const useConfigStore = create<ConfigStore>()(
 
                 loadProviders: async (options) => {
                     const directoryKey = toDirectoryKey(options?.directory ?? fromDirectoryKey(get().activeDirectoryKey));
+
+                    // Dedup: if a load is already in-flight for this directory, reuse it
+                    const existing = _inFlightProviders.get(directoryKey);
+                    if (existing) return existing;
+
+                    const promise = (async () => {
                     const existingSnapshot = get().directoryScoped[directoryKey];
                     const previousProviders = existingSnapshot?.providers ?? (get().activeDirectoryKey === directoryKey ? get().providers : []);
                     const previousDefaults = existingSnapshot?.defaultProviders ?? (get().activeDirectoryKey === directoryKey ? get().defaultProviders : {});
@@ -872,6 +882,10 @@ export const useConfigStore = create<ConfigStore>()(
 
                         return nextState;
                     });
+                    })().finally(() => _inFlightProviders.delete(directoryKey));
+
+                    _inFlightProviders.set(directoryKey, promise);
+                    return promise;
                 },
 
                 setProvider: (providerId: string) => {
@@ -1082,6 +1096,12 @@ export const useConfigStore = create<ConfigStore>()(
 
                 loadAgents: async (options) => {
                     const directoryKey = toDirectoryKey(options?.directory ?? fromDirectoryKey(get().activeDirectoryKey));
+
+                    // Dedup: if a load is already in-flight for this directory, reuse it
+                    const existing = _inFlightAgents.get(directoryKey);
+                    if (existing) return existing;
+
+                    const promise = (async (): Promise<boolean> => {
                     const existingSnapshot = get().directoryScoped[directoryKey];
                     const previousAgents = existingSnapshot?.agents ?? (get().activeDirectoryKey === directoryKey ? get().agents : []);
                     let lastError: unknown = null;
@@ -1392,6 +1412,10 @@ export const useConfigStore = create<ConfigStore>()(
                     });
 
                     return false;
+                    })().finally(() => _inFlightAgents.delete(directoryKey));
+
+                    _inFlightAgents.set(directoryKey, promise);
+                    return promise;
                 },
 
                 setAgent: (agentName: string | undefined) => {

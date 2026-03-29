@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { RuntimeAPIs } from '@/lib/api/types';
+import { mapWithConcurrency } from '@/lib/concurrency';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { useGitHubPrStatusStore } from '@/stores/useGitHubPrStatusStore';
@@ -93,34 +94,6 @@ const prioritizeDirectoriesForFetch = (
 
     return left.localeCompare(right);
   });
-};
-
-const mapWithConcurrency = async <T, R>(
-  values: T[],
-  concurrency: number,
-  mapper: (value: T) => Promise<R>,
-): Promise<R[]> => {
-  if (values.length === 0) {
-    return [];
-  }
-
-  const safeConcurrency = Math.max(1, Math.min(concurrency, values.length));
-  const results = new Array<R>(values.length);
-  let cursor = 0;
-
-  const worker = async () => {
-    while (true) {
-      const nextIndex = cursor;
-      cursor += 1;
-      if (nextIndex >= values.length) {
-        return;
-      }
-      results[nextIndex] = await mapper(values[nextIndex]);
-    }
-  };
-
-  await Promise.all(Array.from({ length: safeConcurrency }, () => worker()));
-  return results;
 };
 
 const toPrTargets = (cache: Map<string, BranchCacheEntry>, directories: string[]): PrTarget[] => {
@@ -383,7 +356,11 @@ export const useGitHubPrBackgroundTracking = (
       }
     };
 
-    void runRefresh({ forceCurrent: true, maxFetchCount: MAX_STATUS_FETCH_ON_RESUME });
+    // Delay initial PR tracking to avoid startup CPU burst
+    const startupDelayId = window.setTimeout(() => {
+      if (cancelled) return;
+      void runRefresh({ forceCurrent: true, maxFetchCount: MAX_STATUS_FETCH_ON_RESUME });
+    }, 5_000);
 
     const intervalId = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
@@ -442,6 +419,7 @@ export const useGitHubPrBackgroundTracking = (
 
     return () => {
       cancelled = true;
+      window.clearTimeout(startupDelayId);
       window.clearInterval(intervalId);
       window.removeEventListener('focus', refreshOnResume);
       document.removeEventListener('visibilitychange', refreshOnResume);

@@ -534,8 +534,7 @@ export const useGitStore = create<GitStore>()(
 
         await get().fetchIdentity(directory, git);
 
-        // Pre-fetch all diffs so they're ready when user opens Diff tab
-        void get().fetchAllDiffs(directory, git);
+        // Diff prefetch deferred — triggered on-demand when Git tab opens (GitView reactive prefetch)
 
       },
 
@@ -737,8 +736,7 @@ export const useGitStore = create<GitStore>()(
                 anyStatusChanged = true;
                 if (targetDirectory === activeDirectory) {
                   await get().fetchLog(activeDirectory, git);
-                  // Pre-fetch all diffs so they're ready when user opens Diff tab
-                  void get().fetchAllDiffs(activeDirectory, git);
+                  // Diff prefetch deferred — triggered on-demand when Git tab opens (GitView reactive prefetch)
                 }
               }
             }
