@@ -58,7 +58,7 @@ interface GitStore {
   setActiveDirectory: (directory: string | null) => void;
   getDirectoryState: (directory: string) => DirectoryGitState | null;
 
-  fetchStatus: (directory: string, git: GitAPI, options?: { silent?: boolean }) => Promise<boolean>;
+  fetchStatus: (directory: string, git: GitAPI, options?: { silent?: boolean; mode?: 'light' }) => Promise<boolean>;
   fetchBranches: (directory: string, git: GitAPI) => Promise<void>;
   fetchLog: (directory: string, git: GitAPI, maxCount?: number) => Promise<void>;
   fetchIdentity: (directory: string, git: GitAPI) => Promise<void>;
@@ -88,7 +88,7 @@ interface GitFileDiffResponse {
 
 interface GitAPI {
   checkIsGitRepository: (directory: string) => Promise<boolean>;
-  getGitStatus: (directory: string) => Promise<GitStatus>;
+  getGitStatus: (directory: string, options?: { mode?: 'light' }) => Promise<GitStatus>;
   getGitBranches: (directory: string) => Promise<GitBranch>;
   getGitLog: (directory: string, options?: { maxCount?: number }) => Promise<GitLogResponse>;
   getCurrentGitIdentity: (directory: string) => Promise<GitIdentitySummary | null>;
@@ -372,7 +372,7 @@ export const useGitStore = create<GitStore>()(
               return false;
             }
 
-            const newStatus = await git.getGitStatus(directory);
+            const newStatus = await git.getGitStatus(directory, options.mode ? { mode: options.mode } : undefined);
 
             if (hasStatusChanged(dirState.status, newStatus)) {
               statusChanged = true;
@@ -738,7 +738,7 @@ export const useGitStore = create<GitStore>()(
             let anyStatusChanged = false;
 
             for (const targetDirectory of pollTargets) {
-              const statusChanged = await get().fetchStatus(targetDirectory, git, { silent: true });
+              const statusChanged = await get().fetchStatus(targetDirectory, git, { silent: true, mode: 'light' });
               if (statusChanged) {
                 anyStatusChanged = true;
                 if (targetDirectory === activeDirectory) {

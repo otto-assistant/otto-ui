@@ -248,7 +248,7 @@ export const useGitHubPrBackgroundTracking = (
         STATUS_FETCH_CONCURRENCY,
         async (directory) => {
           try {
-            const status = await git.getGitStatus(directory);
+            const status = await git.getGitStatus(directory, { mode: 'light' });
             const branch = typeof status.current === 'string' ? status.current.trim() : '';
             return {
               directory,

@@ -209,7 +209,8 @@ export function registerGitRoutes(app) {
         return res.json({ isGitRepository: false, files: [], branch: null, ahead: 0, behind: 0 });
       }
 
-      const status = await getStatus(directory);
+      const mode = req.query.mode === 'light' ? 'light' : undefined;
+      const status = await getStatus(directory, { mode });
       res.json(status);
     } catch (error) {
       const errorText = extractGitErrorText(error);

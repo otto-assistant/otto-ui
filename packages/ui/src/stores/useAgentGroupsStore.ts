@@ -120,6 +120,10 @@ const startsWithDirectory = (candidate: string, root: string): boolean => {
   return normalizedCandidate.startsWith(prefix);
 };
 
+// Cache canonical directory resolutions to avoid repeated path.get() calls
+const _canonicalCache = new Map<string, { value: string; at: number }>();
+const CANONICAL_CACHE_TTL = 60_000; // 1 minute
+
 const resolveCanonicalDirectory = async (
   apiClient: ReturnType<typeof opencodeClient.getApiClient>,
   directory: string
@@ -128,11 +132,20 @@ const resolveCanonicalDirectory = async (
   if (!normalized) {
     return normalized;
   }
+
+  const cached = _canonicalCache.get(normalized);
+  if (cached && Date.now() - cached.at < CANONICAL_CACHE_TTL) {
+    return cached.value;
+  }
+
   try {
     const response = await apiClient.path.get({ directory: normalized });
     const canonical = normalize((response.data as { directory?: string | null } | null)?.directory ?? '');
-    return canonical || normalized;
+    const result = canonical || normalized;
+    _canonicalCache.set(normalized, { value: result, at: Date.now() });
+    return result;
   } catch {
+    _canonicalCache.set(normalized, { value: normalized, at: Date.now() });
     return normalized;
   }
 };

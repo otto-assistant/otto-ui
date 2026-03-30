@@ -88,7 +88,7 @@ export function useGitPolling() {
             immediateRefreshTimerRef.current = null;
             lastImmediateRefreshAtRef.current = Date.now();
             void (async () => {
-                const statusChanged = await fetchStatus(targetDirectory, git, { silent: true });
+                const statusChanged = await fetchStatus(targetDirectory, git, { silent: true, mode: 'light' });
                 if (shouldForceDiffRefresh && !statusChanged) {
                     clearDiffCache(targetDirectory);
                 }

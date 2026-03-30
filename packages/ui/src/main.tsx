@@ -24,12 +24,14 @@ const runtimeAPIs = (typeof window !== 'undefined' && window.__OPENCHAMBER_RUNTI
   throw new Error('Runtime APIs not provided for legacy UI entrypoint.');
 })();
 
-await syncDesktopSettings();
-await initializeAppearancePreferences();
+await Promise.all([
+  syncDesktopSettings(),
+  initializeAppearancePreferences(),
+  applyPersistedDirectoryPreferences(),
+]);
 startAppearanceAutoSave();
 startModelPrefsAutoSave();
 startTypographyWatcher();
-await applyPersistedDirectoryPreferences();
 
 
 const rootElement = document.getElementById('root');
