@@ -311,6 +311,11 @@ const applyDesktopUiPreferences = (settings: DesktopSettings) => {
       store.setAutoDeleteAfterDays(normalized);
     }
   }
+  if (settings.sessionRetentionAction === 'archive' || settings.sessionRetentionAction === 'delete') {
+    if (settings.sessionRetentionAction !== store.sessionRetentionAction) {
+      store.setSessionRetentionAction(settings.sessionRetentionAction);
+    }
+  }
 
   if (typeof settings.queueModeEnabled === 'boolean' && settings.queueModeEnabled !== queueStore.queueModeEnabled) {
     queueStore.setQueueMode(settings.queueModeEnabled);
@@ -521,6 +526,9 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   }
   if (typeof candidate.autoDeleteAfterDays === 'number' && Number.isFinite(candidate.autoDeleteAfterDays)) {
     result.autoDeleteAfterDays = candidate.autoDeleteAfterDays;
+  }
+  if (candidate.sessionRetentionAction === 'archive' || candidate.sessionRetentionAction === 'delete') {
+    result.sessionRetentionAction = candidate.sessionRetentionAction;
   }
   if (typeof candidate.tunnelProvider === 'string') {
     const provider = candidate.tunnelProvider.trim().toLowerCase();
