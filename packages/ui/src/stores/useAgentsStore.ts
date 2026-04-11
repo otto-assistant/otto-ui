@@ -16,28 +16,6 @@ import { useProjectsStore } from "@/stores/useProjectsStore";
 import { useSkillsCatalogStore } from "@/stores/useSkillsCatalogStore";
 import { useSkillsStore } from "@/stores/useSkillsStore";
 
-// Note: useDirectoryStore cannot be imported at top level to avoid circular dependency
-// useDirectoryStore -> useAgentsStore (for refreshAfterOpenCodeRestart)
-// useAgentsStore -> useDirectoryStore (for currentDirectory)
-const getCurrentDirectory = (): string | null => {
-  const opencodeDirectory = opencodeClient.getDirectory();
-  if (typeof opencodeDirectory === 'string' && opencodeDirectory.trim().length > 0) {
-    return opencodeDirectory;
-  }
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const store = (window as any).__zustand_directory_store__;
-    if (store) {
-      return store.getState().currentDirectory;
-    }
-  } catch {
-    // ignore
-  }
-
-  return null;
-};
-
 const getConfigDirectory = (): string | null => {
   try {
     const projectsStore = useProjectsStore.getState();
@@ -576,7 +554,6 @@ async function performConfigRefresh(options: {
 } = {}) {
   const { message, delayMs } = options;
   const scopes = normalizeRefreshScopes(options.scopes);
-  const mode: ConfigRefreshMode = options.mode ?? (scopes.includes("all") ? "projects" : "active");
 
   try {
     updateConfigUpdateMessage(message || "Refreshing configuration…");
@@ -598,15 +575,6 @@ async function performConfigRefresh(options: {
     const refreshAgentConfigs = scopes.includes("all") || scopes.includes("agents");
     const refreshCommands = scopes.includes("all") || scopes.includes("commands");
     const refreshSkills = scopes.includes("all") || scopes.includes("skills");
-
-    const currentDirectory = getCurrentDirectory();
-    const projects = mode === "projects" ? useProjectsStore.getState().projects : [];
-    const directoriesToRefresh = Array.from(
-      new Set([
-        ...(currentDirectory ? [currentDirectory] : []),
-        ...projects.map((project) => project.path).filter(Boolean),
-      ]),
-    );
 
     // Providers and agents are now global - load once
     const sdkRefreshTasks: Promise<void>[] = [];

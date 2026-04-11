@@ -24,20 +24,26 @@ export interface UseMessageTTSReturn {
 export function useMessageTTS(): UseMessageTTSReturn {
     const [isPlaying, setIsPlaying] = useState(false);
     
-    const {
-        voiceProvider,
-        speechRate,
-        speechPitch,
-        speechVolume,
-        sayVoice,
-        browserVoice,
-        openaiVoice,
-        summarizeMessageTTS,
-        summarizeCharacterThreshold,
-    } = useConfigStore();
-    
-    const { speak: speakServerTTS, stop: stopServerTTS, isAvailable: isServerTTSAvailable } = useServerTTS();
-    const { speak: speakSayTTS, stop: stopSayTTS, isAvailable: isSayTTSAvailable } = useSayTTS();
+    const voiceProvider = useConfigStore((state) => state.voiceProvider);
+    const speechRate = useConfigStore((state) => state.speechRate);
+    const speechPitch = useConfigStore((state) => state.speechPitch);
+    const speechVolume = useConfigStore((state) => state.speechVolume);
+    const sayVoice = useConfigStore((state) => state.sayVoice);
+    const browserVoice = useConfigStore((state) => state.browserVoice);
+    const openaiVoice = useConfigStore((state) => state.openaiVoice);
+    const summarizeMessageTTS = useConfigStore((state) => state.summarizeMessageTTS);
+    const summarizeCharacterThreshold = useConfigStore((state) => state.summarizeCharacterThreshold);
+    const showMessageTTSButtons = useConfigStore((state) => state.showMessageTTSButtons);
+
+    const shouldCheckOpenAIAvailability = showMessageTTSButtons && voiceProvider === 'openai';
+    const shouldCheckSayAvailability = showMessageTTSButtons && voiceProvider === 'say';
+
+    const { speak: speakServerTTS, stop: stopServerTTS, isAvailable: isServerTTSAvailable } = useServerTTS({
+        enabled: shouldCheckOpenAIAvailability,
+    });
+    const { speak: speakSayTTS, stop: stopSayTTS, isAvailable: isSayTTSAvailable } = useSayTTS({
+        enabled: shouldCheckSayAvailability,
+    });
     
     const stop = useCallback(() => {
         setIsPlaying(false);

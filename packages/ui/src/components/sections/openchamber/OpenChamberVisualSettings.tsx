@@ -143,7 +143,7 @@ const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain' 
     return mode === 'markdown' ? 'markdown' : 'plain';
 };
 
-export type VisibleSetting = 'theme' | 'pwaInstallName' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'activityRenderMode' | 'stickyUserHeader' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'showToolFileIcons' | 'expandedTools' | 'queueMode' | 'terminalQuickKeys' | 'persistDraft' | 'inputSpellcheck';
+export type VisibleSetting = 'theme' | 'pwaInstallName' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'activityRenderMode' | 'stickyUserHeader' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'showToolFileIcons' | 'expandedTools' | 'queueMode' | 'terminalQuickKeys' | 'persistDraft' | 'inputSpellcheck' | 'reportUsage';
 
 interface OpenChamberVisualSettingsProps {
     /** Which settings to show. If undefined, shows all. */
@@ -210,6 +210,14 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
 
     const [themesReloading, setThemesReloading] = React.useState(false);
     const [chatRenderPreviewTick, setChatRenderPreviewTick] = React.useState(0);
+    const reportUsage = useUIStore(state => state.reportUsage);
+    const setReportUsage = useUIStore(state => state.setReportUsage);
+
+    // Sync reportUsage changes to server settings
+    const handleReportUsageChange = React.useCallback((enabled: boolean) => {
+        setReportUsage(enabled);
+        void updateDesktopSettings({ reportUsage: enabled });
+    }, [setReportUsage]);
 
     const shouldAnimateChatPreview = isSettingsDialogOpen
         && (visibleSettings ? visibleSettings.includes('chatRenderMode') : true);
@@ -219,12 +227,41 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
             return;
         }
 
-        const intervalId = setInterval(() => {
-            setChatRenderPreviewTick((prev) => (prev + 1) % 24);
-        }, 420);
+        // Use requestAnimationFrame for smoother animation without setInterval overhead
+        let rafId: number | null = null;
+        let lastTime = Date.now();
+        
+        const tick = () => {
+            const now = Date.now();
+            // Update every ~420ms
+            if (now - lastTime >= 420) {
+                setChatRenderPreviewTick((prev) => (prev + 1) % 24);
+                lastTime = now;
+            }
+            rafId = requestAnimationFrame(tick);
+        };
+        
+        // Only run when visible
+        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+            rafId = requestAnimationFrame(tick);
+        }
+        
+        const onVisibility = () => {
+            if (document.visibilityState === 'visible' && rafId === null) {
+                rafId = requestAnimationFrame(tick);
+            } else if (document.visibilityState !== 'visible' && rafId !== null) {
+                cancelAnimationFrame(rafId);
+                rafId = null;
+            }
+        };
+        
+        document.addEventListener('visibilitychange', onVisibility);
 
         return () => {
-            clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibility);
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId);
+            }
         };
     }, [shouldAnimateChatPreview]);
 
@@ -1241,6 +1278,42 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                 </section>
                             )}
 
+                    </div>
+                )}
+
+                {/* --- Privacy & Data --- */}
+                {shouldShow('reportUsage') && (
+                    <div className="space-y-3">
+                        <section className="px-2 pb-2 pt-0">
+                            <h4 className="typography-ui-header font-medium text-foreground mb-2">Privacy</h4>
+                            <div className="flex items-start gap-2 py-1.5">
+                                <Checkbox
+                                    checked={reportUsage}
+                                    onChange={handleReportUsageChange}
+                                    ariaLabel="Send anonymous usage reports"
+                                />
+                                <div className="flex min-w-0 flex-col gap-0.5">
+                                    <div
+                                        className="group flex cursor-pointer"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-pressed={reportUsage}
+                                        onClick={() => handleReportUsageChange(!reportUsage)}
+                                        onKeyDown={(event) => {
+                                            if (event.key === ' ' || event.key === 'Enter') {
+                                                event.preventDefault();
+                                                handleReportUsageChange(!reportUsage);
+                                            }
+                                        }}
+                                    >
+                                        <span className="typography-ui-label text-foreground">Send anonymous usage reports</span>
+                                    </div>
+                                    <span className="typography-meta text-muted-foreground pointer-events-none">
+                                        Helps us understand which app versions are actively used so we can prioritize improvements. Only app version, platform, and runtime are collected - no personal data or code.
+                                    </span>
+                                </div>
+                            </div>
+                        </section>
                     </div>
                 )}
 

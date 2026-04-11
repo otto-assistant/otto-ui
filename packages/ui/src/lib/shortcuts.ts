@@ -196,8 +196,8 @@ const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
   {
     id: 'new_chat_worktree',
     defaultCombo: 'mod+shift+n',
-    label: 'New session with worktree',
-    description: 'Start a new session in a worktree',
+    label: 'New worktree draft',
+    description: 'Create a new worktree and open a draft in it',
     customizable: true,
   },
   {
@@ -229,13 +229,6 @@ const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
     defaultCombo: 'mod+4',
     label: 'Open git panel',
     description: 'Switch to the git panel',
-  },
-  {
-    id: 'open_timeline',
-    defaultCombo: 'mod+t',
-    label: 'Open timeline',
-    description: 'Open the timeline dialog',
-    customizable: true,
   },
   {
     id: 'open_help',

@@ -1,6 +1,7 @@
 import React, { useRef, memo } from 'react';
 import { RiAttachment2, RiCloseLine, RiFileImageLine, RiFileLine, RiFilePdfLine, RiGithubLine, RiGitPullRequestLine } from '@remixicon/react';
-import { useSessionStore, type AttachedFile } from '@/stores/useSessionStore';
+import { useInputStore } from '@/sync/input-store';
+import type { AttachedFile } from '@/sync/session-ui-store';
 import { useUIStore } from '@/stores/useUIStore';
 import { toast } from '@/components/ui';
 import { cn } from '@/lib/utils';
@@ -13,30 +14,21 @@ import type { ToolPopupContent } from './message/types';
 
 export const FileAttachmentButton = memo(() => {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { addAttachedFile } = useSessionStore();
-  const { isMobile } = useUIStore();
+  const addAttachedFile = useInputStore((state) => state.addAttachedFile);
+  const isMobile = useUIStore((state) => state.isMobile);
   const isVSCodeRuntime = useIsVSCodeRuntime();
   const buttonSizeClass = isMobile ? 'h-9 w-9' : 'h-7 w-7';
   const iconSizeClass = isMobile ? 'h-5 w-5' : 'h-[18px] w-[18px]';
 
   const attachFiles = async (files: FileList | File[]) => {
-    let attachedCount = 0;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const sizeBefore = useSessionStore.getState().attachedFiles.length;
       try {
         await addAttachedFile(file);
-        const sizeAfter = useSessionStore.getState().attachedFiles.length;
-        if (sizeAfter > sizeBefore) {
-          attachedCount++;
-        }
       } catch (error) {
         console.error('File attach failed', error);
         toast.error(error instanceof Error ? error.message : 'Failed to attach file');
       }
-    }
-    if (attachedCount > 0) {
-      toast.success(`Attached ${attachedCount} file${attachedCount > 1 ? 's' : ''}`);
     }
   };
 
@@ -264,7 +256,8 @@ const FileChip = memo(({ file, onRemove }: FileChipProps) => {
 FileChip.displayName = 'FileChip';
 
 export const AttachedFilesList = memo(() => {
-  const { attachedFiles, removeAttachedFile } = useSessionStore();
+  const attachedFiles = useInputStore((state) => state.attachedFiles);
+  const removeAttachedFile = useInputStore((state) => state.removeAttachedFile);
 
   const localFiles = attachedFiles.filter((file) => file.source !== 'server');
 
@@ -347,13 +340,13 @@ export const MessageFilesDisplay = memo(({ files, onShowPopup, compact = false }
     return filename || path;
   };
 
-  const resolveDisplayName = (file: FilePart): string => {
+  const resolveDisplayName = React.useCallback((file: FilePart): string => {
     const isGitHubLink = getGitHubLinkKind(file) !== null;
     if (isGitHubLink && typeof file.filename === 'string' && file.filename.trim().length > 0) {
       return file.filename.trim();
     }
     return extractFilename(file.filename || file.url);
-  };
+  }, []);
 
   const formatFileSize = (bytes?: number) => {
     if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return '';
@@ -377,7 +370,7 @@ export const MessageFilesDisplay = memo(({ files, onShowPopup, compact = false }
           size: file.size,
         }];
       }),
-    [imageFiles]
+    [imageFiles, resolveDisplayName]
   );
 
   const handleImageClick = React.useCallback((index: number) => {

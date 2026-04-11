@@ -16,9 +16,11 @@ import * as nanogpt from './nanogpt.js';
 import * as openai from './openai.js';
 import * as openrouter from './openrouter.js';
 import * as zai from './zai.js';
+import * as zhipuaiCodingPlan from './zhipuai-coding-plan.js';
 import * as minimaxCodingPlan from './minimax-coding-plan.js';
 import * as minimaxCnCodingPlan from './minimax-cn-coding-plan.js';
 import * as ollamaCloud from './ollama-cloud.js';
+import * as zhipuai from './zhipuai.js';
 
 const registry = {
   claude: {
@@ -44,6 +46,12 @@ const registry = {
     providerName: zai.providerName,
     isConfigured: zai.isConfigured,
     fetchQuota: zai.fetchQuota
+  },
+  'zhipuai-coding-plan': {
+    providerId: zhipuaiCodingPlan.providerId,
+    providerName: zhipuaiCodingPlan.providerName,
+    isConfigured: zhipuaiCodingPlan.isConfigured,
+    fetchQuota: zhipuaiCodingPlan.fetchQuota
   },
   'kimi-for-coding': {
     providerId: kimi.providerId,
@@ -92,6 +100,12 @@ const registry = {
     providerName: ollamaCloud.providerName,
     isConfigured: ollamaCloud.isConfigured,
     fetchQuota: ollamaCloud.fetchQuota
+  },
+  'zhipuai-coding-plan': {
+    providerId: zhipuai.providerId,
+    providerName: zhipuai.providerName,
+    isConfigured: zhipuai.isConfigured,
+    fetchQuota: zhipuai.fetchQuota
   }
 };
 
@@ -146,7 +160,9 @@ export const fetchCopilotAddonQuota = copilot.fetchQuotaAddon;
 export const fetchKimiQuota = kimi.fetchQuota;
 export const fetchOpenRouterQuota = openrouter.fetchQuota;
 export const fetchZaiQuota = zai.fetchQuota;
+export const fetchZhipuaiCodingPlanQuota = zhipuaiCodingPlan.fetchQuota;
 export const fetchNanoGptQuota = nanogpt.fetchQuota;
 export const fetchMinimaxCodingPlanQuota = minimaxCodingPlan.fetchQuota;
 export const fetchMinimaxCnCodingPlanQuota = minimaxCnCodingPlan.fetchQuota;
 export const fetchOllamaCloudQuota = ollamaCloud.fetchQuota;
+export const fetchZhipuaiQuota = zhipuai.fetchQuota;

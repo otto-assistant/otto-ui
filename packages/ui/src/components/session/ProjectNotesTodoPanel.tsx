@@ -19,8 +19,9 @@ import {
   type ProjectRef,
 } from '@/lib/openchamberConfig';
 import { useUIStore } from '@/stores/useUIStore';
-import { useSessionStore } from '@/stores/useSessionStore';
-import { createWorktreeOnly } from '@/lib/worktreeSessionCreator';
+import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useInputStore } from '@/sync/input-store';
+import { createWorktreeDraft } from '@/lib/worktreeSessionCreator';
 import { cn } from '@/lib/utils';
 
 interface ProjectNotesTodoPanelProps {
@@ -52,9 +53,9 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
   const [sendingTodoId, setSendingTodoId] = React.useState<string | null>(null);
   const [expandedTodoIds, setExpandedTodoIds] = React.useState<Set<string>>(() => new Set());
 
-  const currentSessionId = useSessionStore((state) => state.currentSessionId);
-  const openNewSessionDraft = useSessionStore((state) => state.openNewSessionDraft);
-  const setPendingInputText = useSessionStore((state) => state.setPendingInputText);
+  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
+  const openNewSessionDraft = useSessionUIStore((state) => state.openNewSessionDraft);
+  const setPendingInputText = useInputStore((state) => state.setPendingInputText);
   const setActiveMainTab = useUIStore((state) => state.setActiveMainTab);
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
 
@@ -228,22 +229,18 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
       }
       setSendingTodoId(todoId);
       try {
-        const newWorktreePath = await createWorktreeOnly();
+        routeToChat();
+        const newWorktreePath = await createWorktreeDraft({ initialPrompt: todoText });
         if (!newWorktreePath) {
           return;
         }
-        routeToChat();
-        openNewSessionDraft({
-          directoryOverride: newWorktreePath,
-          initialPrompt: todoText,
-        });
         toast.success('Todo sent to new worktree session');
         onActionComplete?.();
       } finally {
         setSendingTodoId(null);
       }
     },
-    [canCreateWorktree, onActionComplete, openNewSessionDraft, projectRef, routeToChat]
+    [canCreateWorktree, onActionComplete, projectRef, routeToChat]
   );
 
   if (!projectRef) {

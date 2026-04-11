@@ -6,8 +6,9 @@ import { opencodeClient } from "@/lib/opencode/client";
 import { scopeMatches, subscribeToConfigChanges } from "@/lib/configSync";
 import type { ModelMetadata } from "@/types";
 import { getSafeStorage } from "./utils/safeStorage";
-import type { SessionStore } from "./types/sessionTypes";
 import { filterVisibleAgents } from "./useAgentsStore";
+import { useSessionUIStore } from "@/sync/session-ui-store";
+import { useSelectionStore } from "@/sync/selection-store";
 import { getRegisteredRuntimeAPIs } from "@/contexts/runtimeAPIRegistry";
 import { updateDesktopSettings } from "@/lib/persistence";
 import { useDirectoryStore } from "@/stores/useDirectoryStore";
@@ -233,6 +234,39 @@ const buildModelMetadataKey = (providerId: string, modelId: string) => {
     return `${normalizedProvider}/${modelId}`;
 };
 
+const mapModalities = (cap: { text: boolean; audio: boolean; image: boolean; video: boolean; pdf: boolean } | undefined): string[] => {
+    if (!cap) return [];
+    const result: string[] = [];
+    if (cap.text) result.push('text');
+    if (cap.audio) result.push('audio');
+    if (cap.image) result.push('image');
+    if (cap.video) result.push('video');
+    if (cap.pdf) result.push('pdf');
+    return result;
+};
+
+const deriveModelMetadata = (providerId: string, model: ProviderModel): ModelMetadata => ({
+    id: model.id,
+    providerId,
+    name: model.name,
+    tool_call: model.capabilities?.toolcall,
+    reasoning: model.capabilities?.reasoning,
+    temperature: model.capabilities?.temperature,
+    attachment: model.capabilities?.attachment,
+    modalities: model.capabilities ? {
+        input: mapModalities(model.capabilities.input),
+        output: mapModalities(model.capabilities.output),
+    } : undefined,
+    cost: model.cost ? {
+        input: model.cost.input,
+        output: model.cost.output,
+        cache_read: model.cost.cache?.read,
+        cache_write: model.cost.cache?.write,
+    } : undefined,
+    limit: model.limit,
+    release_date: model.release_date,
+});
+
 const transformModelsDevResponse = (payload: unknown): Map<string, ModelMetadata> => {
     const metadataMap = new Map<string, ModelMetadata>();
 
@@ -415,6 +449,15 @@ interface ConfigStore {
     browserVoice: string;
     openaiVoice: string;
     openaiApiKey: string;
+    openaiCompatibleUrl: string;
+    openaiCompatibleVoice: string;
+    // STT (speech-to-text) settings
+    sttProvider: 'browser' | 'server';
+    sttServerUrl: string;
+    sttModel: string;
+    sttLanguage: string;
+    sttSilenceThresholdDb: number;
+    sttSilenceHoldMs: number;
     showMessageTTSButtons: boolean;
     voiceModeEnabled: boolean;
     // Summarization settings
@@ -429,6 +472,14 @@ interface ConfigStore {
     setBrowserVoice: (voice: string) => void;
     setOpenaiVoice: (voice: string) => void;
     setOpenaiApiKey: (apiKey: string) => void;
+    setOpenaiCompatibleUrl: (url: string) => void;
+    setOpenaiCompatibleVoice: (voice: string) => void;
+    setSttProvider: (provider: 'browser' | 'server') => void;
+    setSttServerUrl: (url: string) => void;
+    setSttModel: (model: string) => void;
+    setSttLanguage: (lang: string) => void;
+    setSttSilenceThresholdDb: (db: number) => void;
+    setSttSilenceHoldMs: (ms: number) => void;
     setShowMessageTTSButtons: (show: boolean) => void;
     setVoiceModeEnabled: (enabled: boolean) => void;
     setSummarizeMessageTTS: (enabled: boolean) => void;
@@ -469,7 +520,6 @@ interface ConfigStore {
 declare global {
     interface Window {
         __zustand_config_store__?: UseBoundStore<StoreApi<ConfigStore>>;
-        __zustand_session_store__?: UseBoundStore<StoreApi<SessionStore>>;
     }
 }
 
@@ -567,6 +617,71 @@ export const useConfigStore = create<ConfigStore>()(
                     }
                     return '';
                 })(),
+                // OpenAI-compatible custom server URL
+                openaiCompatibleUrl: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('openaiCompatibleUrl');
+                        if (saved) return saved;
+                    }
+                    return '';
+                })(),
+                // OpenAI-compatible custom server voice
+                openaiCompatibleVoice: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('openaiCompatibleVoice');
+                        if (saved) return saved;
+                    }
+                    return 'af_sky';
+                })(),
+                // STT provider: 'browser' (Web Speech API) or 'server' (OpenAI-compat)
+                sttProvider: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('sttProvider');
+                        if (saved === 'browser' || saved === 'server') return saved;
+                    }
+                    return 'browser' as const;
+                })(),
+                sttServerUrl: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('sttServerUrl');
+                        if (saved) return saved;
+                    }
+                    return 'http://localhost:8001/v1';
+                })(),
+                sttModel: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('sttModel');
+                        if (saved) return saved;
+                    }
+                    return 'deepdml/faster-whisper-large-v3-turbo-ct2';
+                })(),
+                sttLanguage: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('sttLanguage');
+                        if (saved !== null) return saved;
+                    }
+                    return '';
+                })(),
+                sttSilenceThresholdDb: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('sttSilenceThresholdDb');
+                        if (saved) {
+                            const parsed = parseFloat(saved);
+                            if (!isNaN(parsed)) return parsed;
+                        }
+                    }
+                    return -45;
+                })(),
+                sttSilenceHoldMs: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('sttSilenceHoldMs');
+                        if (saved) {
+                            const parsed = parseInt(saved, 10);
+                            if (!isNaN(parsed)) return parsed;
+                        }
+                    }
+                    return 1500;
+                })(),
                 // Show TTS buttons on messages - disabled by default until user enables it
                 showMessageTTSButtons: (() => {
                     if (typeof window !== 'undefined') {
@@ -631,7 +746,7 @@ export const useConfigStore = create<ConfigStore>()(
                     }
                 },
 
-loadProviders: async () => {
+                loadProviders: async () => {
                     let lastError: unknown = null;
 
                     for (let attempt = 0; attempt < 3; attempt++) {
@@ -955,44 +1070,29 @@ setProvider: (providerId: string) => {
 
                     set({ currentAgentName: agentName });
 
-                    if (agentName && typeof window !== "undefined") {
+                    if (agentName) {
+                        const { currentSessionId } = useSessionUIStore.getState();
+                        const selState = useSelectionStore.getState();
 
-                        const sessionStore = window.__zustand_session_store__;
-                        if (sessionStore) {
-                            const sessionState = sessionStore.getState();
-                            const { currentSessionId, isOpenChamberCreatedSession, initializeNewOpenChamberSession, getAgentModelForSession } = sessionState;
+                        if (currentSessionId) {
+                            selState.saveSessionAgentSelection(currentSessionId, agentName);
+                        }
 
-                            if (currentSessionId) {
-
-                                sessionStore.setState((state) => {
-                                    const newAgentContext = new Map(state.currentAgentContext);
-                                    newAgentContext.set(currentSessionId, agentName);
-                                    return { currentAgentContext: newAgentContext };
-                                });
-                            }
-
-                            if (currentSessionId && isOpenChamberCreatedSession(currentSessionId)) {
-                                const existingAgentModel = getAgentModelForSession(currentSessionId, agentName);
-                                if (!existingAgentModel) {
-
-                                    initializeNewOpenChamberSession(currentSessionId, agents);
-                                }
+                        if (currentSessionId && useSessionUIStore.getState().isOpenChamberCreatedSession(currentSessionId)) {
+                            const existingAgentModel = selState.getAgentModelForSession(currentSessionId, agentName);
+                            if (!existingAgentModel) {
+                                useSessionUIStore.getState().initializeNewOpenChamberSession(currentSessionId, agents);
                             }
                         }
                     }
 
-                    if (agentName && typeof window !== "undefined") {
-                        const sessionStore = window.__zustand_session_store__;
-                        if (sessionStore?.getState) {
-                            const { currentSessionId, getAgentModelForSession } = sessionStore.getState();
+                    if (agentName) {
+                        const { currentSessionId } = useSessionUIStore.getState();
 
-                            if (currentSessionId) {
-                                const existingAgentModel = getAgentModelForSession(currentSessionId, agentName);
-
-                                if (existingAgentModel) {
-
-                                    return;
-                                }
+                        if (currentSessionId) {
+                            const existingAgentModel = useSelectionStore.getState().getAgentModelForSession(currentSessionId, agentName);
+                            if (existingAgentModel) {
+                                return;
                             }
                         }
 
@@ -1131,6 +1231,62 @@ setProvider: (providerId: string) => {
                     }
                 },
 
+                setOpenaiCompatibleUrl: (url: string) => {
+                    set({ openaiCompatibleUrl: url });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('openaiCompatibleUrl', url);
+                    }
+                },
+
+                setOpenaiCompatibleVoice: (voice: string) => {
+                    set({ openaiCompatibleVoice: voice });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('openaiCompatibleVoice', voice);
+                    }
+                },
+
+                setSttProvider: (provider: 'browser' | 'server') => {
+                    set({ sttProvider: provider });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sttProvider', provider);
+                    }
+                },
+
+                setSttServerUrl: (url: string) => {
+                    set({ sttServerUrl: url });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sttServerUrl', url);
+                    }
+                },
+
+                setSttModel: (model: string) => {
+                    set({ sttModel: model });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sttModel', model);
+                    }
+                },
+
+                setSttLanguage: (lang: string) => {
+                    set({ sttLanguage: lang });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sttLanguage', lang);
+                    }
+                },
+
+                setSttSilenceThresholdDb: (db: number) => {
+                    set({ sttSilenceThresholdDb: db });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sttSilenceThresholdDb', String(db));
+                    }
+                },
+
+                setSttSilenceHoldMs: (ms: number) => {
+                    set({ sttSilenceHoldMs: ms });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('sttSilenceHoldMs', String(ms));
+                    }
+                },
+
                 setShowMessageTTSButtons: (show: boolean) => {
                     set({ showMessageTTSButtons: show });
                     if (typeof window !== 'undefined') {
@@ -1255,8 +1411,23 @@ setProvider: (providerId: string) => {
                     if (!key) {
                         return undefined;
                     }
-                    const { modelsMetadata } = get();
-                    return modelsMetadata.get(key);
+                    const { modelsMetadata, providers } = get();
+                    const cached = modelsMetadata.get(key);
+                    if (cached) {
+                        return cached;
+                    }
+
+                    // Fallback: derive metadata from provider model data (covers custom providers not in models.dev)
+                    const provider = providers.find((p) => p.id === providerId);
+                    if (!provider) {
+                        return undefined;
+                    }
+                    const model = provider.models.find((m) => m.id === modelId);
+                    if (!model) {
+                        return undefined;
+                    }
+
+                    return deriveModelMetadata(providerId, model);
                 },
                 getVisibleAgents: () => {
                     const { agents } = get();

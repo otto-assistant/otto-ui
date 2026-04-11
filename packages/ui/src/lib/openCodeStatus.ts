@@ -1,4 +1,5 @@
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionUIStore } from '@/sync/session-ui-store';
+import { getSyncSessions } from '@/sync/sync-refs';
 import { useUIStore } from '@/stores/useUIStore';
 
 declare const __APP_VERSION__: string | undefined;
@@ -19,7 +20,9 @@ type OpenChamberHealthSnapshot = {
   lastOpenCodeError?: unknown;
   opencodeBinaryResolved?: unknown;
   opencodeBinarySource?: unknown;
-  opencodeShimInterpreter?: unknown;
+  opencodeLaunchBinary?: unknown;
+  opencodeLaunchArgs?: unknown;
+  opencodeLaunchWrapperType?: unknown;
   nodeBinaryResolved?: unknown;
   bunBinaryResolved?: unknown;
 };
@@ -31,16 +34,19 @@ type OpenChamberOpencodeResolution = {
   source?: unknown;
   detectedNow?: unknown;
   detectedSourceNow?: unknown;
-  shim?: unknown;
+  launchBinary?: unknown;
+  launchArgs?: unknown;
+  launchWrapperType?: unknown;
   node?: unknown;
   bun?: unknown;
 };
 
 const getCurrentDirectory = (): string => {
-  const state = useSessionStore.getState();
+  const state = useSessionUIStore.getState();
   const currentSessionId = state.currentSessionId;
   if (!currentSessionId) return '';
-  const session = state.sessions.find((s) => s.id === currentSessionId);
+  const sessions = getSyncSessions();
+  const session = sessions.find((s) => s.id === currentSessionId);
   return typeof session?.directory === 'string' ? session.directory : '';
 };
 
@@ -271,10 +277,20 @@ export const buildOpenCodeStatusReport = async (): Promise<string> => {
       openChamberOpencodeResolution && typeof openChamberOpencodeResolution.source === 'string'
         ? openChamberOpencodeResolution.source
         : (openChamberHealth && typeof openChamberHealth.opencodeBinarySource === 'string' ? openChamberHealth.opencodeBinarySource : '');
-    const shim =
-      openChamberOpencodeResolution && typeof openChamberOpencodeResolution.shim === 'string'
-        ? openChamberOpencodeResolution.shim
-        : (openChamberHealth && typeof openChamberHealth.opencodeShimInterpreter === 'string' ? openChamberHealth.opencodeShimInterpreter : '');
+    const launchBinary =
+      openChamberOpencodeResolution && typeof openChamberOpencodeResolution.launchBinary === 'string'
+        ? openChamberOpencodeResolution.launchBinary
+        : (openChamberHealth && typeof openChamberHealth.opencodeLaunchBinary === 'string' ? openChamberHealth.opencodeLaunchBinary : '');
+    const launchWrapperType =
+      openChamberOpencodeResolution && typeof openChamberOpencodeResolution.launchWrapperType === 'string'
+        ? openChamberOpencodeResolution.launchWrapperType
+        : (openChamberHealth && typeof openChamberHealth.opencodeLaunchWrapperType === 'string' ? openChamberHealth.opencodeLaunchWrapperType : '');
+    const launchArgs =
+      openChamberOpencodeResolution && Array.isArray(openChamberOpencodeResolution.launchArgs)
+        ? openChamberOpencodeResolution.launchArgs.filter((value): value is string => typeof value === 'string')
+        : (openChamberHealth && Array.isArray(openChamberHealth.opencodeLaunchArgs)
+          ? openChamberHealth.opencodeLaunchArgs.filter((value): value is string => typeof value === 'string')
+          : []);
     const node =
       openChamberOpencodeResolution && typeof openChamberOpencodeResolution.node === 'string'
         ? openChamberOpencodeResolution.node
@@ -308,7 +324,9 @@ export const buildOpenCodeStatusReport = async (): Promise<string> => {
       lines.push(`- detected-now: ${detectedNow}`);
       lines.push(`- detected-source: ${detectedSourceNow || '(n/a)'}`);
     }
-    lines.push(`- shim: ${shim || '(n/a)'}`);
+    lines.push(`- launch-binary: ${launchBinary || '(n/a)'}`);
+    lines.push(`- launch-wrapper: ${launchWrapperType || '(n/a)'}`);
+    lines.push(`- launch-args: ${launchArgs.length ? launchArgs.join(' ') : '(none)'}`);
     lines.push(`- node: ${node || '(n/a)'}`);
     lines.push(`- bun: ${bun || '(n/a)'}`);
     if (!openChamberOpencodeResolution && openChamberOpencodeResolutionResult.error) {

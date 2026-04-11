@@ -5,8 +5,12 @@ This module provides server-side Text-to-Speech services using OpenAI's TTS API,
 
 ## Entrypoints and structure
 - `packages/web/server/lib/tts/index.js`: Public entrypoint imported by `packages/web/server/index.js`.
+- `packages/web/server/lib/tts/routes.js`: Express route registration for `/api/voice/*`, `/api/tts/*`, and `/api/stt/*` endpoints.
+- `packages/web/server/lib/tts/capability-runtime.js`: runtime helper for probing local macOS `say` TTS voice capability.
 - `packages/web/server/lib/tts/service.js`: TTS service implementation with OpenAI integration.
 - `packages/web/server/lib/tts/summarization.js`: Text summarization and sanitization utilities using opencode.ai zen API.
+- `packages/web/server/lib/tts/stt.js`: STT proxy for OpenAI-compatible transcription endpoints.
+- `packages/web/server/lib/tts/base-url.js`: shared base URL validation and normalization for custom OpenAI-compatible endpoints.
 
 ## Public exports
 
@@ -18,6 +22,9 @@ This module provides server-side Text-to-Speech services using OpenAI's TTS API,
 ### Summarization (from summarization.js)
 - `summarizeText({ text, threshold, maxLength, zenModel })`: Summarizes text for TTS output using opencode.ai zen API.
 - `sanitizeForTTS(text)`: Sanitizes text by removing markdown, URLs, file paths, and other non-speakable content.
+
+### Capability runtime (capability-runtime.js)
+- `detectSayTtsCapability(processLike)`: probes local `say -v "?"` support and returns `{ available, voices, reason }`.
 
 ## Constants
 

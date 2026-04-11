@@ -119,8 +119,9 @@ export async function checkIsGitRepository(directory: string): Promise<boolean> 
   }
 }
 
-export async function getGitStatus(directory: string): Promise<GitStatus> {
-  const key = normalizeDirectoryKey(directory);
+export async function getGitStatus(directory: string, options?: { mode?: 'light' }): Promise<GitStatus> {
+  const mode = options?.mode;
+  const key = mode === 'light' ? `${normalizeDirectoryKey(directory)}::light` : normalizeDirectoryKey(directory);
   const now = Date.now();
   const cached = gitStatusCache.get(key);
   if (cached && cached.expiresAt > now) {
@@ -133,7 +134,7 @@ export async function getGitStatus(directory: string): Promise<GitStatus> {
   }
 
   const task = (async () => {
-    const response = await fetch(buildUrl(`${API_BASE}/status`, directory));
+    const response = await fetch(buildUrl(`${API_BASE}/status`, directory, mode ? { mode } : undefined));
     if (!response.ok) {
       throw new Error(`Failed to get git status: ${response.statusText}`);
     }
@@ -419,6 +420,30 @@ export async function validateGitWorktree(directory: string, payload: CreateGitW
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(error.error || 'Failed to validate worktree');
+  }
+
+  return response.json();
+}
+
+export async function getGitWorktreeBootstrapStatus(directory: string): Promise<import('./api/types').GitWorktreeBootstrapStatus> {
+  const response = await fetch(buildUrl(`${API_BASE}/worktrees/bootstrap-status`, directory));
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || 'Failed to get worktree bootstrap status');
+  }
+  return response.json();
+}
+
+export async function previewGitWorktree(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeCreateResult> {
+  const response = await fetch(buildUrl(`${API_BASE}/worktrees/preview`, directory), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || 'Failed to preview worktree');
   }
 
   return response.json();

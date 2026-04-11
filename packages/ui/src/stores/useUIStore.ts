@@ -12,6 +12,7 @@ export type MermaidRenderingMode = 'svg' | 'ascii';
 export type UserMessageRenderingMode = 'markdown' | 'plain';
 export type ChatRenderMode = 'sorted' | 'live';
 export type ActivityRenderMode = 'collapsed' | 'summary';
+export type SessionRetentionAction = 'archive' | 'delete';
 
 type ContextPanelTab = {
   id: string;
@@ -503,6 +504,7 @@ interface UIStore {
   showDeletionDialog: boolean;
   autoDeleteEnabled: boolean;
   autoDeleteAfterDays: number;
+  sessionRetentionAction: SessionRetentionAction;
   autoDeleteLastRunAt: number | null;
   messageLimit: number;
   fontSize: number;
@@ -558,10 +560,8 @@ interface UIStore {
   stickyUserHeader: boolean;
   showMobileSessionStatusBar: boolean;
   isMobileSessionStatusBarCollapsed: boolean;
-  viewPagerPage: 'left' | 'center' | 'right';
-
   isExpandedInput: boolean;
-
+  reportUsage: boolean;
   shortcutOverrides: Record<string, ShortcutCombo>;
 
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
@@ -619,6 +619,7 @@ interface UIStore {
   setShowDeletionDialog: (value: boolean) => void;
   setAutoDeleteEnabled: (value: boolean) => void;
   setAutoDeleteAfterDays: (days: number) => void;
+  setSessionRetentionAction: (value: SessionRetentionAction) => void;
   setAutoDeleteLastRunAt: (timestamp: number | null) => void;
   setMessageLimit: (value: number) => void;
   setFontSize: (size: number) => void;
@@ -669,11 +670,13 @@ interface UIStore {
   setStickyUserHeader: (value: boolean) => void;
   setShowMobileSessionStatusBar: (value: boolean) => void;
   setIsMobileSessionStatusBarCollapsed: (value: boolean) => void;
+  viewPagerPage: 'left' | 'center' | 'right';
   setViewPagerPage: (page: 'left' | 'center' | 'right') => void;
   toggleExpandedInput: () => void;
   setExpandedInput: (value: boolean) => void;
   openMultiRunLauncher: () => void;
   openMultiRunLauncherWithPrompt: (prompt: string) => void;
+  setReportUsage: (value: boolean) => void;
   setShortcutOverride: (actionId: string, combo: ShortcutCombo) => void;
   clearShortcutOverride: (actionId: string) => void;
   resetAllShortcutOverrides: () => void;
@@ -730,6 +733,7 @@ export const useUIStore = create<UIStore>()(
         showDeletionDialog: true,
         autoDeleteEnabled: false,
         autoDeleteAfterDays: 30,
+        sessionRetentionAction: 'archive',
         autoDeleteLastRunAt: null,
         messageLimit: 200,
         fontSize: 100,
@@ -782,6 +786,7 @@ export const useUIStore = create<UIStore>()(
         showMobileSessionStatusBar: true,
         isMobileSessionStatusBarCollapsed: false,
         isExpandedInput: false,
+        reportUsage: true,
         shortcutOverrides: {},
 
         setTheme: (theme) => {
@@ -1312,6 +1317,10 @@ export const useUIStore = create<UIStore>()(
           set({ autoDeleteAfterDays: clampedDays });
         },
 
+        setSessionRetentionAction: (value) => {
+          set({ sessionRetentionAction: value });
+        },
+
         setAutoDeleteLastRunAt: (timestamp) => {
           set({ autoDeleteLastRunAt: timestamp });
         },
@@ -1690,6 +1699,9 @@ export const useUIStore = create<UIStore>()(
         setIsMobileSessionStatusBarCollapsed: (value) => {
           set({ isMobileSessionStatusBarCollapsed: value });
         },
+        setReportUsage: (value) => {
+          set({ reportUsage: value });
+        },
         viewPagerPage: 'center',
         setViewPagerPage: (page: 'left' | 'center' | 'right') => {
           set({ viewPagerPage: page });
@@ -1831,6 +1843,7 @@ export const useUIStore = create<UIStore>()(
           showDeletionDialog: state.showDeletionDialog,
           autoDeleteEnabled: state.autoDeleteEnabled,
           autoDeleteAfterDays: state.autoDeleteAfterDays,
+          sessionRetentionAction: state.sessionRetentionAction,
           autoDeleteLastRunAt: state.autoDeleteLastRunAt,
           messageLimit: state.messageLimit,
           fontSize: state.fontSize,

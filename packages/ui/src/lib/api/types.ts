@@ -29,20 +29,23 @@ export interface RetryPolicy {
   maxDelayMs: number;
 }
 
+export interface TerminalTransportCapability {
+  preferred?: 'ws' | 'http' | 'sse';
+  transports?: Array<'ws' | 'http' | 'sse'>;
+  ws?: {
+    path: string;
+    v?: number;
+    enc?: string;
+  };
+}
+
 export interface TerminalSession {
   sessionId: string;
   cols: number;
   rows: number;
   capabilities?: {
-    input?: {
-      preferred?: 'ws' | 'http';
-      transports?: Array<'ws' | 'http'>;
-      ws?: {
-        path: string;
-        v?: number;
-        enc?: string;
-      };
-    };
+    input?: TerminalTransportCapability;
+    stream?: TerminalTransportCapability;
   };
 }
 
@@ -306,6 +309,12 @@ export interface GitWorktreeValidationResult {
   };
 }
 
+export interface GitWorktreeBootstrapStatus {
+  status: 'pending' | 'ready' | 'failed';
+  error: string | null;
+  updatedAt: number;
+}
+
 export interface CreateGitWorktreePayload {
   mode?: 'new' | 'existing';
   /** Worktree folder name (falls back to OpenCode name generation when omitted). */
@@ -380,13 +389,15 @@ export interface GeneratedPullRequestDescription {
 export interface GitWorktreeAPI {
   list(directory: string): Promise<GitWorktreeInfo[]>;
   validate?(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeValidationResult>;
+  bootstrapStatus?(directory: string): Promise<GitWorktreeBootstrapStatus>;
+  preview?(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeCreateResult>;
   create?(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeCreateResult>;
   remove?(directory: string, payload: RemoveGitWorktreePayload): Promise<{ success: boolean }>;
 }
 
 export interface GitAPI {
   checkIsGitRepository(directory: string): Promise<boolean>;
-  getGitStatus(directory: string): Promise<GitStatus>;
+  getGitStatus(directory: string, options?: { mode?: 'light' }): Promise<GitStatus>;
   getGitDiff(directory: string, options: GetGitDiffOptions): Promise<GitDiffResponse>;
   getGitFileDiff(directory: string, options: GetGitFileDiffOptions): Promise<GitFileDiffResponse>;
   revertGitFile(directory: string, filePath: string): Promise<void>;
@@ -402,6 +413,8 @@ export interface GitAPI {
   ): Promise<GeneratedPullRequestDescription>;
   listGitWorktrees(directory: string): Promise<GitWorktreeInfo[]>;
   validateGitWorktree?(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeValidationResult>;
+  getGitWorktreeBootstrapStatus?(directory: string): Promise<GitWorktreeBootstrapStatus>;
+  previewGitWorktree?(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeCreateResult>;
   createGitWorktree?(directory: string, payload: CreateGitWorktreePayload): Promise<GitWorktreeCreateResult>;
   deleteGitWorktree?(directory: string, payload: RemoveGitWorktreePayload): Promise<{ success: boolean }>;
   createGitCommit(directory: string, message: string, options?: CreateGitCommitOptions): Promise<GitCommitResult>;
@@ -480,6 +493,7 @@ export interface FilesAPI {
   listDirectory(path: string, options?: ListDirectoryOptions): Promise<DirectoryListResult>;
   search(payload: FileSearchQuery): Promise<FileSearchResult[]>;
   createDirectory(path: string): Promise<{ success: boolean; path: string }>;
+  statFile?(path: string): Promise<{ path: string; isFile: boolean; size: number }>;
   readFile?(path: string): Promise<{ content: string; path: string }>;
   readFileBinary?(path: string): Promise<{ dataUrl: string; path: string }>;
   writeFile?(path: string, content: string): Promise<{ success: boolean; path: string }>;
@@ -526,6 +540,7 @@ export interface SettingsPayload {
   notificationMode?: 'always' | 'hidden-only';
   autoDeleteEnabled?: boolean;
   autoDeleteAfterDays?: number;
+  sessionRetentionAction?: 'archive' | 'delete';
   queueModeEnabled?: boolean;
   gitmojiEnabled?: boolean;
   inputSpellcheckEnabled?: boolean;

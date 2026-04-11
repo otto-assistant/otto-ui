@@ -27,7 +27,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { browserVoiceService } from '@/lib/voice/browserVoiceService';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { audioStreamService } from '@/lib/voice/audioStreamService';
+import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useInputStore } from '@/sync/input-store';
+import { getSyncMessages, getSyncParts } from '@/sync/sync-refs';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useServerTTS } from './useServerTTS';
 import { useSayTTS } from './useSayTTS';
@@ -107,8 +110,6 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
     return false;
   });
   
-  const isSupported = browserVoiceService.isSupported();
-  
   // Mobile detection
   const isMobile = useMemo(() => {
     if (typeof navigator === 'undefined') return false;
@@ -120,35 +121,56 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
   const isActiveRef = useRef(false);
   const processingMessageRef = useRef(false);
   const lastTranscriptRef = useRef('');
-  const messagesRef = useRef<Map<string, { info: { role: string }; parts: Array<{ type: string; text?: string }> }>>(new Map());
   const pendingResumeOnVisibleRef = useRef(false);
   const pendingFinalTranscriptRef = useRef('');
   const finalTranscriptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const deviceChangeRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Store access
-  const currentSessionId = useSessionStore((s) => s.currentSessionId);
-  const sendMessage = useSessionStore((s) => s.sendMessage);
-  const setPendingInputText = useSessionStore((s) => s.setPendingInputText);
-  const messages = useSessionStore((s) => s.messages);
-  const createSession = useSessionStore((s) => s.createSession);
-  const { currentProviderId, currentModelId, currentAgentName, voiceProvider, speechRate, speechPitch, speechVolume, sayVoice, browserVoice, openaiVoice, summarizeVoiceConversation, summarizeCharacterThreshold } = useConfigStore();
-  
+  const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
+  const sendMessage = useSessionUIStore((s) => s.sendMessage);
+  const setPendingInputText = useInputStore((s) => s.setPendingInputText);
+  const createSession = useSessionUIStore((s) => s.createSession);
+  const currentProviderId = useConfigStore((state) => state.currentProviderId);
+  const currentModelId = useConfigStore((state) => state.currentModelId);
+  const currentAgentName = useConfigStore((state) => state.currentAgentName);
+  const voiceModeEnabled = useConfigStore((state) => state.voiceModeEnabled);
+  const voiceProvider = useConfigStore((state) => state.voiceProvider);
+  const speechRate = useConfigStore((state) => state.speechRate);
+  const speechPitch = useConfigStore((state) => state.speechPitch);
+  const speechVolume = useConfigStore((state) => state.speechVolume);
+  const sayVoice = useConfigStore((state) => state.sayVoice);
+  const browserVoice = useConfigStore((state) => state.browserVoice);
+  const openaiVoice = useConfigStore((state) => state.openaiVoice);
+  const openaiCompatibleVoice = useConfigStore((state) => state.openaiCompatibleVoice);
+  const openaiCompatibleUrl = useConfigStore((state) => state.openaiCompatibleUrl);
+  const summarizeVoiceConversation = useConfigStore((state) => state.summarizeVoiceConversation);
+  const summarizeCharacterThreshold = useConfigStore((state) => state.summarizeCharacterThreshold);
+
+  const shouldCheckOpenAIAvailability = voiceModeEnabled && voiceProvider === 'openai';
+  const shouldCheckSayAvailability = voiceModeEnabled && voiceProvider === 'say';
+
+  // STT provider config
+  const sttProvider = useConfigStore((state) => state.sttProvider);
+  const sttServerUrl = useConfigStore((state) => state.sttServerUrl);
+  const sttModel = useConfigStore((state) => state.sttModel);
+  const sttLanguage = useConfigStore((state) => state.sttLanguage);
+  const sttSilenceThresholdDb = useConfigStore((state) => state.sttSilenceThresholdDb);
+  const sttSilenceHoldMs = useConfigStore((state) => state.sttSilenceHoldMs);
+
+  const isSupported = sttProvider === 'server'
+    ? audioStreamService.isSupported()
+    : browserVoiceService.isSupported();
+
   // Server TTS for mobile (bypasses Safari audio restrictions)
-  const { speak: speakServerTTS, stop: stopServerTTS, isAvailable: isServerTTSAvailable, unlockAudio: unlockServerTTSAudio } = useServerTTS();
-  
+  const { speak: speakServerTTS, stop: stopServerTTS, isAvailable: isServerTTSAvailable, unlockAudio: unlockServerTTSAudio } = useServerTTS({
+    enabled: shouldCheckOpenAIAvailability,
+  });
+
   // macOS Say TTS
-  const { speak: speakSayTTS, stop: stopSayTTS, isAvailable: isSayTTSAvailable, unlockAudio: unlockSayTTSAudio } = useSayTTS();
-  
-  // Update messages ref when messages change
-  useEffect(() => {
-    if (currentSessionId) {
-      const sessionMessages = messages.get(currentSessionId);
-      if (sessionMessages) {
-        messagesRef.current = new Map(sessionMessages.map(m => [m.info.id, m]));
-      }
-    }
-  }, [messages, currentSessionId]);
+  const { speak: speakSayTTS, stop: stopSayTTS, isAvailable: isSayTTSAvailable, unlockAudio: unlockSayTTSAudio } = useSayTTS({
+    enabled: shouldCheckSayAvailability,
+  });
   
   // Stop voice when session changes to prevent microphone from staying active
   // This ensures voice mode doesn't carry over between sessions
@@ -161,6 +183,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
         isActiveRef.current = false;
         processingMessageRef.current = false;
         browserVoiceService.stopListening();
+        audioStreamService.stopListening();
         browserVoiceService.cancelSpeech();
         setStatus('idle');
         setError(null);
@@ -300,11 +323,15 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
         if (isActiveRef.current) {
           setStatus('listening');
           setError(null);
-          browserVoiceService.startListening(language, handleSpeechResultRef.current!, handleSpeechError);
+          if (sttProvider === 'server') {
+            audioStreamService.startListening(language, handleSpeechResultRef.current!, handleSpeechError).catch(() => {});
+          } else {
+            browserVoiceService.startListening(language, handleSpeechResultRef.current!, handleSpeechError);
+          }
         }
       }, 1000);
     }
-  }, [language, conversationMode]);
+  }, [language, conversationMode, sttProvider]);
 
   // Update the ref when handleSpeechError changes
   useEffect(() => {
@@ -327,6 +354,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
 
     // Stop listening while processing
     browserVoiceService.stopListening();
+    audioStreamService.stopListening();
 
     // Non-continuous mode: fill chat input only, do not auto-send.
     if (!conversationMode) {
@@ -367,22 +395,23 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       // Wait for AI response and speak it
       // We'll poll for new assistant messages
       const checkForResponse = async () => {
-        if (!isActiveRef.current) return;
-        
-        const sessionMessages = messagesRef.current;
-        const assistantMessages = Array.from(sessionMessages.values())
-          .filter(m => m.info.role === 'assistant')
+        if (!isActiveRef.current || !sessionId) return;
+
+        const rawMessages = getSyncMessages(sessionId);
+        const assistantMessages = rawMessages
+          .filter(m => m.role === 'assistant')
           .sort((a, b) => {
-            const aTime = (a.info as { time?: { created?: number } }).time?.created ?? 0;
-            const bTime = (b.info as { time?: { created?: number } }).time?.created ?? 0;
+            const aTime = (a as { time?: { created?: number } }).time?.created ?? 0;
+            const bTime = (b as { time?: { created?: number } }).time?.created ?? 0;
             return bTime - aTime;
           });
-        
+
         if (assistantMessages.length > 0) {
           const latestMessage = assistantMessages[0];
-          const textParts = latestMessage.parts
-            .filter(p => p.type === 'text')
-            .map(p => p.text)
+          const parts = getSyncParts(latestMessage.id);
+          const textParts = parts
+            .filter((p: { type: string; text?: string }) => p.type === 'text')
+            .map((p: { type: string; text?: string }) => p.text ?? '')
             .join(' ');
           
           if (textParts.trim()) {
@@ -413,7 +442,11 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
                   }
 
                   setStatus('listening');
-                  if (isMobile) {
+                  if (sttProvider === 'server') {
+                    audioStreamService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!).catch((err) => {
+                      console.error('[useBrowserVoice] Failed to restart server STT:', err);
+                    });
+                  } else if (isMobile) {
                     try {
                       browserVoiceService.startListeningSync(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
                     } catch (err) {
@@ -504,7 +537,11 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
               // Only restart listening if conversation mode is enabled
               if (conversationMode) {
                 setStatus('listening');
-                if (isMobile) {
+                if (sttProvider === 'server') {
+                  audioStreamService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!).catch((err) => {
+                    console.error('[useBrowserVoice] Failed to restart server STT after speech error:', err);
+                  });
+                } else if (isMobile) {
                   try {
                     browserVoiceService.startListeningSync(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
                   } catch (restartErr) {
@@ -536,7 +573,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       setStatus('error');
       processingMessageRef.current = false;
     }
-  }, [currentSessionId, currentProviderId, currentModelId, currentAgentName, language, sendMessage, setPendingInputText, createSession, speechRate, speechPitch, speechVolume, isMobile, isServerTTSAvailable, speakServerTTS, isSayTTSAvailable, speakSayTTS, voiceProvider, sayVoice, browserVoice, openaiVoice, summarizeVoiceConversation, summarizeCharacterThreshold, conversationMode]);
+  }, [currentSessionId, currentProviderId, currentModelId, currentAgentName, language, sendMessage, setPendingInputText, createSession, speechRate, speechPitch, speechVolume, isMobile, isServerTTSAvailable, speakServerTTS, isSayTTSAvailable, speakSayTTS, voiceProvider, sayVoice, browserVoice, openaiVoice, openaiCompatibleVoice, openaiCompatibleUrl, summarizeVoiceConversation, summarizeCharacterThreshold, conversationMode, sttProvider]);
 
   // Handle speech recognition result
   const handleSpeechResult = useCallback(async (text: string, isFinal: boolean) => {
@@ -579,7 +616,9 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       pendingResumeOnVisibleRef.current = false;
       setStatus('listening');
       try {
-        if (isMobile) {
+        if (sttProvider === 'server') {
+          void audioStreamService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
+        } else if (isMobile) {
           browserVoiceService.startListeningSync(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
         } else {
           browserVoiceService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
@@ -595,7 +634,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [conversationMode, isMobile, language]);
+  }, [conversationMode, isMobile, language, sttProvider]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined') {
@@ -630,11 +669,16 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
         }
 
         try {
-          browserVoiceService.stopListening();
-          if (isMobile) {
-            browserVoiceService.startListeningSync(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
+          if (sttProvider === 'server') {
+            audioStreamService.stopListening();
+            void audioStreamService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
           } else {
-            void browserVoiceService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
+            browserVoiceService.stopListening();
+            if (isMobile) {
+              browserVoiceService.startListeningSync(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
+            } else {
+              void browserVoiceService.startListening(language, handleSpeechResultRef.current!, handleSpeechErrorRef.current!);
+            }
           }
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : 'Microphone source changed. Tap mic to continue.';
@@ -654,7 +698,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
         deviceChangeRestartTimerRef.current = null;
       }
     };
-  }, [isMobile, language, status]);
+  }, [isMobile, language, status, sttProvider]);
 
   // Update the ref when handleSpeechResult changes
   useEffect(() => {
@@ -666,6 +710,10 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
     if (!isSupported) {
       return false;
     }
+    if (sttProvider === 'server') {
+      // getUserMedia permission is requested on startListening; nothing to prepare
+      return true;
+    }
     try {
       await browserVoiceService.prepareListening();
       return true;
@@ -674,12 +722,12 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       setError(errorMsg);
       return false;
     }
-  }, [isSupported]);
+  }, [isSupported, sttProvider]);
 
   // Start voice mode
   const startVoice = useCallback(async () => {
     if (!isSupported) {
-      setError('Browser voice not supported');
+      setError('Voice input not supported in this browser');
       setStatus('error');
       return;
     }
@@ -694,7 +742,29 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
     lastTranscriptRef.current = '';
     setError(null);
     setStatus('listening');
-    
+
+    if (sttProvider === 'server') {
+      // Server STT: configure the service then start async recording
+      audioStreamService.configure({
+        baseURL: sttServerUrl,
+        model: sttModel,
+        language: sttLanguage || undefined,
+        silenceThresholdDb: sttSilenceThresholdDb,
+        silenceHoldMs: sttSilenceHoldMs,
+      });
+      try {
+        await audioStreamService.startListening(language, handleSpeechResult, handleSpeechError);
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : 'Failed to start voice';
+        console.error('[useBrowserVoice] Server STT start error:', errorMsg);
+        setError(errorMsg);
+        setStatus('error');
+        isActiveRef.current = false;
+      }
+      return;
+    }
+
+    // Browser STT
     // On mobile, use sync path to ensure SpeechRecognition.start() is called
     // within the same user gesture context (required by iOS Safari)
     // Also unlock audio immediately for TTS playback later
@@ -732,7 +802,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
         isActiveRef.current = false;
       }
     }
-  }, [isSupported, currentSessionId, language, handleSpeechResult, handleSpeechError, isMobile, unlockServerTTSAudio, unlockSayTTSAudio]);
+  }, [isSupported, currentSessionId, language, handleSpeechResult, handleSpeechError, isMobile, unlockServerTTSAudio, unlockSayTTSAudio, sttProvider, sttServerUrl, sttModel, sttLanguage, sttSilenceThresholdDb, sttSilenceHoldMs]);
 
   // Stop voice mode
   const stopVoice = useCallback(() => {
@@ -749,6 +819,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       finalTranscriptTimerRef.current = null;
     }
     browserVoiceService.stopListening();
+    audioStreamService.stopListening();
     browserVoiceService.cancelSpeech();
     stopServerTTS(); // Also stop server TTS if playing
     stopSayTTS(); // Also stop Say TTS if playing
@@ -771,6 +842,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       }
       browserVoiceService.setConversationMode(false);
       browserVoiceService.stopListening();
+      audioStreamService.stopListening();
       browserVoiceService.cancelSpeech();
     };
   }, []);

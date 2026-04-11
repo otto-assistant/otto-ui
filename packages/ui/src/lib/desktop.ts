@@ -94,6 +94,7 @@ export type DesktopSettings = {
   }>;  // Per-provider custom model groups configuration
   autoDeleteEnabled?: boolean;
   autoDeleteAfterDays?: number;
+  sessionRetentionAction?: 'archive' | 'delete';
   tunnelProvider?: string;
   tunnelMode?: 'quick' | 'managed-remote' | 'managed-local';
   tunnelBootstrapTtlMs?: number | null;
@@ -144,6 +145,8 @@ export type DesktopSettings = {
 
   // User-added skills catalogs (persisted to ~/.config/openchamber/settings.json)
   skillCatalogs?: SkillCatalogConfig[];
+  // Opt-in to send anonymous usage reports for update checks (default: true)
+  reportUsage?: boolean;
 };
 
 type TauriGlobal = {
