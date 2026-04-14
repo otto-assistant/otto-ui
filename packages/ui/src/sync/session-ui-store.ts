@@ -6,6 +6,9 @@
  * current selection, draft state, viewport anchors, model/agent preferences,
  * voice state, abort prompts, attached files, worktree metadata.
  *
+ * Session↔worktree attachments are the authoritative exception: they live in
+ * session-worktree-store (shared sync), and session-ui-store routes through it.
+ *
  * SDK-calling actions that need domain data read it from sync-refs.
  */
 
@@ -47,6 +50,7 @@ import {
 import { useInputStore, type SyntheticContextPart } from "./input-store"
 import { useSelectionStore } from "./selection-store"
 import { useViewportStore } from "./viewport-store"
+import { useSessionWorktreeStore } from "./session-worktree-store"
 
 export type { AttachedFile }
 
@@ -624,13 +628,30 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     // Stub — was a no-op in old store
   },
 
-  setWorktreeMetadata: (sessionId, metadata) =>
+  setWorktreeMetadata: (sessionId, metadata) => {
+    // Write to authoritative session-worktree-store
+    if (metadata) {
+      useSessionWorktreeStore.getState().setAttachment(sessionId, {
+        worktreeRoot: metadata.worktreeRoot ?? metadata.path ?? null,
+        cwd: metadata.path ?? null,
+        branch: metadata.branch ?? null,
+        headState: metadata.headState ?? (metadata.branch ? 'branch' : 'detached'),
+        worktreeStatus: metadata.worktreeStatus ?? 'ready',
+        worktreeSource: metadata.worktreeSource ?? null,
+        legacy: false,
+        degraded: false,
+      })
+    } else {
+      useSessionWorktreeStore.getState().clearAttachment(sessionId)
+    }
+    // Also keep local map for backward compatibility
     set((s) => {
       const map = new Map(s.worktreeMetadata)
       if (metadata) map.set(sessionId, metadata)
       else map.delete(sessionId)
       return { worktreeMetadata: map }
-    }),
+    })
+  },
 
   overrideNewSessionDraftTarget: (options) => {
     let nextDirectory: string | null = null
