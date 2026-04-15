@@ -17,6 +17,7 @@ import {
   RiContractUpDownLine,
   RiExpandUpDownLine,
   RiStickyNoteLine,
+  RiCalendarScheduleLine,
 } from '@remixicon/react';
 import { ArrowsMerge } from '@/components/icons/ArrowsMerge';
 import type { ProjectRef } from '@/lib/openchamberConfig';
@@ -47,6 +48,7 @@ type Props = {
   searchMatchCount: number;
   collapseAllProjects: () => void;
   expandAllProjects: () => void;
+  openScheduledTasksDialog: () => void;
 };
 
 export function SidebarHeader(props: Props): React.ReactNode {
@@ -74,6 +76,7 @@ export function SidebarHeader(props: Props): React.ReactNode {
     searchMatchCount,
     collapseAllProjects,
     expandAllProjects,
+    openScheduledTasksDialog,
   } = props;
 
   const displayMode = useSessionDisplayStore((state) => state.displayMode);
@@ -89,6 +92,20 @@ export function SidebarHeader(props: Props): React.ReactNode {
         <div className="flex h-auto min-h-8 flex-col gap-1">
           <div className="flex h-8 items-center justify-between gap-2">
             <div className="flex items-center gap-1.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={openScheduledTasksDialog}
+                    className={headerActionButtonClass}
+                    aria-label="Scheduled tasks"
+                  >
+                    <RiCalendarScheduleLine className={headerActionIconClass} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={4}><p>Scheduled tasks</p></TooltipContent>
+              </Tooltip>
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button

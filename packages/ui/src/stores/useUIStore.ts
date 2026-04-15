@@ -487,6 +487,7 @@ interface UIStore {
   isOpenCodeStatusDialogOpen: boolean;
   openCodeStatusText: string;
   isSessionCreateDialogOpen: boolean;
+  isScheduledTasksDialogOpen: boolean;
   isSettingsDialogOpen: boolean;
   isModelSelectorOpen: boolean;
   sidebarSection: SidebarSection;
@@ -606,6 +607,7 @@ interface UIStore {
   setOpenCodeStatusDialogOpen: (open: boolean) => void;
   setOpenCodeStatusText: (text: string) => void;
   setSessionCreateDialogOpen: (open: boolean) => void;
+  setScheduledTasksDialogOpen: (open: boolean) => void;
   setSettingsDialogOpen: (open: boolean) => void;
   setModelSelectorOpen: (open: boolean) => void;
   applyTheme: () => void;
@@ -720,6 +722,7 @@ export const useUIStore = create<UIStore>()(
         isOpenCodeStatusDialogOpen: false,
         openCodeStatusText: '',
         isSessionCreateDialogOpen: false,
+        isScheduledTasksDialogOpen: false,
         isSettingsDialogOpen: false,
         isModelSelectorOpen: false,
         sidebarSection: 'sessions',
@@ -1254,6 +1257,10 @@ export const useUIStore = create<UIStore>()(
 
         setSessionCreateDialogOpen: (open) => {
           set({ isSessionCreateDialogOpen: open });
+        },
+
+        setScheduledTasksDialogOpen: (open) => {
+          set({ isScheduledTasksDialogOpen: open });
         },
 
         setSettingsDialogOpen: (open) => {
