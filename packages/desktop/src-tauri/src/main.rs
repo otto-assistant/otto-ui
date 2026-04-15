@@ -152,6 +152,8 @@ const MENU_ITEM_REQUEST_FEATURE_ID: &str = "menu_request_feature";
 const MENU_ITEM_JOIN_DISCORD_ID: &str = "menu_join_discord";
 #[cfg(target_os = "macos")]
 const MENU_ITEM_CLEAR_CACHE_ID: &str = "menu_clear_cache";
+#[cfg(target_os = "macos")]
+const MENU_ITEM_QUIT_ID: &str = "menu_quit";
 
 #[cfg(target_os = "macos")]
 const GITHUB_BUG_REPORT_URL: &str =
@@ -161,6 +163,30 @@ const GITHUB_FEATURE_REQUEST_URL: &str =
     "https://github.com/btriapitsyn/openchamber/issues/new?template=feature_request.yml";
 #[cfg(target_os = "macos")]
 const DISCORD_INVITE_URL: &str = "https://discord.gg/ZYRSdnwwKA";
+
+static QUIT_CONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+fn request_quit_with_confirmation(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
+    let handle = app.clone();
+    app.dialog()
+        .message(
+            "Background processes (sidecar, SSH sessions) will be stopped \
+             and any scheduled tasks will not be completed.",
+        )
+        .title("Quit OpenChamber?")
+        .buttons(MessageDialogButtons::OkCancel)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+        .show(move |confirmed| {
+            if confirmed {
+                QUIT_CONFIRMED.store(true, Ordering::SeqCst);
+                handle.exit(0);
+            }
+        });
+}
 
 #[cfg(target_os = "macos")]
 fn build_macos_menu<R: tauri::Runtime>(
@@ -394,7 +420,13 @@ fn build_macos_menu<R: tauri::Runtime>(
                     &PredefinedMenuItem::hide(app, None)?,
                     &PredefinedMenuItem::hide_others(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &MenuItem::with_id(
+                        app,
+                        MENU_ITEM_QUIT_ID,
+                        format!("Quit {}", pkg_info.name),
+                        true,
+                        Some("Cmd+Q"),
+                    )?,
                 ],
             )?,
             &Submenu::with_items(
@@ -3611,6 +3643,10 @@ fn main() {
                     });
                     return;
                 }
+                if id == MENU_ITEM_QUIT_ID {
+                    request_quit_with_confirmation(app);
+                    return;
+                }
             }
         })
         .on_window_event(|window, event| {
@@ -3624,12 +3660,10 @@ fn main() {
             }
 
             if let tauri::WindowEvent::Destroyed = event {
-                // Clean up focus tracking for the destroyed window.
                 if let Some(state) = app.try_state::<WindowFocusState>() {
                     state.remove_window(&label);
                 }
 
-                // Remove stale per-window init script.
                 if let Some(state) = app.try_state::<DesktopUiInjectionState>() {
                     state
                         .scripts
@@ -3637,24 +3671,25 @@ fn main() {
                         .expect("desktop ui injection mutex")
                         .remove(&label);
                 }
-
-                // If this was the last window, kill the sidecar and exit.
-                let remaining = app.webview_windows().len();
-                if remaining == 0 {
-                    if let Some(state) = app.try_state::<DesktopSshManagerState>() {
-                        state.shutdown_all(&app);
-                    }
-                    kill_sidecar(app.clone());
-                    app.exit(0);
-                }
             }
 
             if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
                 schedule_window_state_persist(window.clone(), false);
             }
 
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 schedule_window_state_persist(window.clone(), true);
+
+                let remaining_visible = app
+                    .webview_windows()
+                    .values()
+                    .filter(|w| w.is_visible().unwrap_or(false))
+                    .count();
+
+                if remaining_visible <= 1 {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -3857,8 +3892,12 @@ fn main() {
 
     app.run(|app_handle, event| {
         match event {
-            tauri::RunEvent::ExitRequested { .. } => {
-                // Best-effort cleanup; never block shutdown.
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                use std::sync::atomic::Ordering;
+                if !QUIT_CONFIRMED.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    return;
+                }
                 if let Some(state) = app_handle.try_state::<DesktopSshManagerState>() {
                     state.shutdown_all(app_handle);
                 }
@@ -3875,9 +3914,18 @@ fn main() {
                 has_visible_windows,
                 ..
             } => {
-                // macOS: clicking dock icon when no windows are open opens a new one.
                 if !has_visible_windows {
-                    open_new_window(app_handle);
+                    let windows = app_handle.webview_windows();
+                    let hidden = windows
+                        .values()
+                        .find(|w| !w.is_visible().unwrap_or(true));
+                    if let Some(w) = hidden {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    } else {
+                        drop(windows);
+                        open_new_window(app_handle);
+                    }
                 }
             }
             _ => {}
