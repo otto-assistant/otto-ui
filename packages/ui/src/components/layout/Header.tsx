@@ -23,7 +23,7 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessionWorktreeStore } from '@/sync/session-worktree-store';
 import { formatSessionWorktreeBadge } from '@/sync/session-worktree-contract';
-import { useSession, useSessionMessagesResolved } from '@/sync/sync-context';
+import { useAllLiveSessions, useSession, useSessionMessagesResolved } from '@/sync/sync-context';
 import { getAllSyncSessions } from '@/sync/sync-refs';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useQuotaAutoRefresh, useQuotaStore } from '@/stores/useQuotaStore';
@@ -64,7 +64,7 @@ import type { SessionContextUsage } from '@/stores/types/sessionTypes';
 import { DesktopHostSwitcherDialog } from '@/components/desktop/DesktopHostSwitcher';
 import { OpenInAppButton } from '@/components/desktop/OpenInAppButton';
 import { ProjectActionsButton } from '@/components/layout/ProjectActionsButton';
-import { isDesktopShell, isVSCodeRuntime } from '@/lib/desktop';
+import { isDesktopShell, isVSCodeRuntime, startDesktopWindowDrag } from '@/lib/desktop';
 import { desktopHostsGet, locationMatchesHost, redactSensitiveUrl } from '@/lib/desktopHosts';
 import { resolveSessionDiffStats } from '@/components/session/sidebar/utils';
 import type { Session } from '@opencode-ai/sdk/v2/client';
@@ -642,6 +642,7 @@ export const Header: React.FC<HeaderProps> = ({
   const currentSessionMessagesResolved = useSessionMessagesResolved(currentSessionId ?? '');
   const currentSyncedSession = useSession(currentSessionId ?? null);
   const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
+  const liveSessions = useAllLiveSessions();
   const activeProject = useProjectsStore((state) => {
     if (!state.activeProjectId) {
       return null;
@@ -942,13 +943,12 @@ export const Header: React.FC<HeaderProps> = ({
 
   const currentSessionLive = React.useMemo(() => {
     if (!currentSessionId) return null;
-    // Resolve from the global sessions snapshot first (same source as sidebar).
-    // Child-store lists are intentionally partial/truncated during bootstrap.
-    return globalActiveSessions.find((s) => s.id === currentSessionId)
+    return liveSessions.find((s) => s.id === currentSessionId)
+      ?? globalActiveSessions.find((s) => s.id === currentSessionId)
       ?? currentSyncedSession
       ?? getAllSyncSessions().find((s) => s.id === currentSessionId)
       ?? null;
-  }, [currentSessionId, currentSyncedSession, globalActiveSessions]);
+  }, [currentSessionId, currentSyncedSession, globalActiveSessions, liveSessions]);
 
   const lastResolvedSessionRef = React.useRef<{
     sessionId: string;
@@ -1427,13 +1427,7 @@ export const Header: React.FC<HeaderProps> = ({
       return;
     }
     if (isDesktopApp) {
-      try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        const window = getCurrentWindow();
-        await window.startDragging();
-      } catch (error) {
-        console.error('Failed to start window dragging:', error);
-      }
+      await startDesktopWindowDrag();
     }
   }, [isDesktopApp]);
 

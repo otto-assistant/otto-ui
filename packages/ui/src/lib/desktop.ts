@@ -122,6 +122,8 @@ export type DesktopSettings = {
   showToolFileIcons?: boolean;
   showExpandedBashTools?: boolean;
   showExpandedEditTools?: boolean;
+  timeFormatPreference?: 'auto' | '12h' | '24h';
+  weekStartPreference?: 'auto' | 'sunday' | 'monday';
   chatRenderMode?: 'sorted' | 'live';
   activityRenderMode?: 'collapsed' | 'summary';
   mermaidRenderingMode?: 'svg' | 'ascii';
@@ -137,6 +139,7 @@ export type DesktopSettings = {
   recentModels?: Array<{ providerID: string; modelID: string }>;
   diffLayoutPreference?: 'dynamic' | 'inline' | 'side-by-side';
   diffViewMode?: 'single' | 'stacked';
+  gitChangesViewMode?: 'flat' | 'tree';
   directoryShowHidden?: boolean;
   filesViewShowGitignored?: boolean;
 
@@ -240,6 +243,21 @@ export const isDesktopShell = (): boolean => {
     return true;
   }
   return isTauriShell();
+};
+
+export const startDesktopWindowDrag = async (): Promise<boolean> => {
+  if (!isDesktopShell() || !isTauriShell()) {
+    return false;
+  }
+
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const appWindow = getCurrentWindow();
+    await appWindow.startDragging();
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 export const isVSCodeRuntime = (): boolean => {
@@ -442,12 +460,20 @@ export const restartToApplyUpdate = async (): Promise<boolean> => {
     return false;
   }
 
+  return restartDesktopApp();
+};
+
+export const restartDesktopApp = async (): Promise<boolean> => {
+  if (!isTauriShell()) {
+    return false;
+  }
+
   try {
     const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
     await tauri?.core?.invoke?.('desktop_restart');
     return true;
   } catch (error) {
-    console.warn('Failed to restart for update (tauri)', error);
+    console.warn('Failed to restart desktop app (tauri)', error);
     return false;
   }
 };
