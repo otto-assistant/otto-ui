@@ -323,7 +323,7 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
           usesActivePillIndicator && 'pill-tabs__track',
           usesActivePillIndicator && (activePillInsetClassName ?? 'gap-0.5 py-0.5'),
           useUnderlineIndicator && 'items-center overflow-y-hidden',
-          showPillTrackBackground && 'rounded-[10px] [corner-shape:squircle] supports-[corner-shape:squircle]:rounded-[50px] bg-[var(--surface-subtle)] p-0.5 gap-0.5',
+          showPillTrackBackground && 'rounded-[10px] [corner-shape:squircle] supports-[corner-shape:squircle]:rounded-[50px] bg-[color-mix(in_srgb,var(--foreground)_2%,transparent)] p-0.5 gap-0.5',
           isScrollable
             ? 'overflow-x-auto scrollbar-none'
             : 'overflow-x-hidden',
