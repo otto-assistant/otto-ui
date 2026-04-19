@@ -80,8 +80,7 @@ import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import { ensurePierreThemeRegistered } from '@/lib/shiki/appThemeRegistry';
 import { getDefaultTheme } from '@/lib/theme/themes';
-import { openDesktopPath, openDesktopProjectInApp } from '@/lib/desktop';
-import { OPEN_DIRECTORY_APP_IDS } from '@/lib/openInApps';
+import { openDesktopFileInApp, openDesktopPath } from '@/lib/desktop';
 import { useOpenInAppsStore } from '@/stores/useOpenInAppsStore';
 import { eventMatchesShortcut, getEffectiveShortcutCombo } from '@/lib/shortcuts';
 
@@ -664,21 +663,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   }, [files]);
 
   const handleOpenInApp = React.useCallback(async (app: { id: string; appName: string }) => {
-    if (!selectedFile?.path || !root) {
+    if (!selectedFile?.path) {
       return;
     }
 
-    const fileDirectory = getParentDirectoryPath(selectedFile.path) || root;
-
-    if (OPEN_DIRECTORY_APP_IDS.has(app.id)) {
-      const openedDirectory = await openDesktopPath(fileDirectory, app.appName);
-      if (!openedDirectory) {
-        toast.error(`Failed to open in ${app.appName}`);
-      }
-      return;
-    }
-
-    const openedInApp = await openDesktopProjectInApp(root, app.id, app.appName, selectedFile.path);
+    const openedInApp = await openDesktopFileInApp(selectedFile.path, app.id, app.appName);
     if (openedInApp) {
       return;
     }
@@ -688,10 +677,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
       return;
     }
 
-    const openedDirectory = await openDesktopPath(fileDirectory, app.appName);
-    if (!openedDirectory) {
-      toast.error(`Failed to open in ${app.appName}`);
+    const fileDirectory = getParentDirectoryPath(selectedFile.path) || root;
+    if (fileDirectory) {
+      const openedDirectory = await openDesktopPath(fileDirectory, app.appName);
+      if (openedDirectory) {
+        return;
+      }
     }
+    toast.error(`Failed to open in ${app.appName}`);
   }, [root, selectedFile?.path]);
 
   const handleOpenDialog = React.useCallback((type: 'createFile' | 'createFolder' | 'rename' | 'delete', data: { path: string; name?: string; type?: 'file' | 'directory' }) => {

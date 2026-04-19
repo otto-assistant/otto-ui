@@ -581,7 +581,6 @@ export const openDesktopProjectInApp = async (
   projectPath: string,
   appId: string,
   appName: string,
-  filePath?: string | null,
 ): Promise<boolean> => {
   if (!isTauriShell() || !isDesktopLocalOriginActive()) {
     return false;
@@ -590,7 +589,6 @@ export const openDesktopProjectInApp = async (
   const trimmedProjectPath = projectPath?.trim();
   const trimmedAppId = appId?.trim();
   const trimmedAppName = appName?.trim();
-  const trimmedFilePath = typeof filePath === 'string' ? filePath.trim() : '';
 
   if (!trimmedProjectPath || !trimmedAppId || !trimmedAppName) {
     return false;
@@ -602,11 +600,41 @@ export const openDesktopProjectInApp = async (
       projectPath: trimmedProjectPath,
       appId: trimmedAppId,
       appName: trimmedAppName,
-      filePath: trimmedFilePath.length > 0 ? trimmedFilePath : undefined,
     });
     return true;
   } catch (error) {
-    console.warn('Failed to open project in app (tauri)', error);
+    console.warn('Failed to open project in app', error);
+    return false;
+  }
+};
+
+export const openDesktopFileInApp = async (
+  filePath: string,
+  appId: string,
+  appName: string,
+): Promise<boolean> => {
+  if (!isTauriShell() || !isDesktopLocalOriginActive()) {
+    return false;
+  }
+
+  const trimmedFilePath = filePath?.trim();
+  const trimmedAppId = appId?.trim();
+  const trimmedAppName = appName?.trim();
+
+  if (!trimmedFilePath || !trimmedAppId || !trimmedAppName) {
+    return false;
+  }
+
+  try {
+    const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
+    await tauri?.core?.invoke?.('desktop_open_file_in_app', {
+      filePath: trimmedFilePath,
+      appId: trimmedAppId,
+      appName: trimmedAppName,
+    });
+    return true;
+  } catch (error) {
+    console.warn('Failed to open file in app', error);
     return false;
   }
 };

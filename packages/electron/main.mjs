@@ -916,6 +916,85 @@ const updateHostUrlForSshInstance = async (id, label, localUrl) => {
   await writeDesktopHostsConfig({ hosts: nextHosts, defaultHostId: config.defaultHostId });
 };
 
+const JETBRAINS_APP_IDS = new Set([
+  'pycharm',
+  'intellij',
+  'webstorm',
+  'phpstorm',
+  'rider',
+  'rustrover',
+  'android-studio',
+]);
+
+const CLI_BY_APP_ID = {
+  vscode: 'code',
+  cursor: 'cursor',
+  vscodium: 'codium',
+  windsurf: 'windsurf',
+  zed: 'zed',
+};
+
+const buildOpenProjectSpecs = ({ projectPath, appId, appName }) => {
+  if (appId === 'finder') {
+    return [{ program: 'open', args: [projectPath] }];
+  }
+
+  if (appId === 'terminal' || appId === 'iterm2' || appId === 'ghostty') {
+    return [{ program: 'open', args: ['-a', appName, projectPath] }];
+  }
+
+  const specs = [];
+
+  const cli = CLI_BY_APP_ID[appId];
+  if (cli) {
+    specs.push({ program: cli, args: ['-n', projectPath] });
+  }
+
+  if (JETBRAINS_APP_IDS.has(appId)) {
+    specs.push({ program: 'open', args: ['-na', appName, '--args', projectPath] });
+  }
+
+  specs.push({ program: 'open', args: ['-a', appName, projectPath] });
+  return specs;
+};
+
+const buildOpenFileSpecs = ({ filePath, appId, appName }) => {
+  if (appId === 'finder') {
+    return [{ program: 'open', args: ['-R', filePath] }];
+  }
+
+  const parentDir = path.dirname(filePath);
+  if (appId === 'terminal' || appId === 'iterm2' || appId === 'ghostty') {
+    return [{ program: 'open', args: ['-a', appName, parentDir] }];
+  }
+
+  const specs = [];
+
+  const cli = CLI_BY_APP_ID[appId];
+  if (cli) {
+    specs.push({ program: cli, args: [filePath] });
+  }
+
+  specs.push({ program: 'open', args: ['-a', appName, filePath] });
+  return specs;
+};
+
+const runSpecChain = (specs, appName) => {
+  const failures = [];
+  for (const spec of specs) {
+    const result = spawnSync(spec.program, spec.args, { stdio: 'ignore' });
+    if (result.error) {
+      failures.push(`${spec.program}: ${result.error.message}`);
+      continue;
+    }
+    if (result.status === 0) {
+      return;
+    }
+    failures.push(`${spec.program} exited ${result.status}`);
+  }
+  throw new Error(`Failed to open in ${appName}: ${failures.join('; ')}`);
+};
+
 const handleInvoke = async (browserWindow, command, args = {}) => {
   switch (command) {
     case 'desktop_start_window_drag':
@@ -1029,15 +1108,26 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         throw new Error('desktop_open_in_app is only supported on macOS');
       }
       const projectPath = typeof args.projectPath === 'string' ? args.projectPath.trim() : '';
+      const appId = typeof args.appId === 'string' ? args.appId.trim().toLowerCase() : '';
       const appName = typeof args.appName === 'string' ? args.appName.trim() : '';
-      const filePath = typeof args.filePath === 'string' && args.filePath.trim() ? args.filePath.trim() : null;
-      if (!projectPath || !appName) {
-        throw new Error('Project path and app name are required');
+      if (!projectPath || !appId || !appName) {
+        throw new Error('Project path, app id, and app name are required');
       }
-      const openArgs = filePath
-        ? ['-a', appName, filePath]
-        : ['-a', appName, projectPath];
-      spawn('open', openArgs, { detached: true, stdio: 'ignore' }).unref();
+      runSpecChain(buildOpenProjectSpecs({ projectPath, appId, appName }), appName);
+      return null;
+    }
+
+    case 'desktop_open_file_in_app': {
+      if (process.platform !== 'darwin') {
+        throw new Error('desktop_open_file_in_app is only supported on macOS');
+      }
+      const filePath = typeof args.filePath === 'string' ? args.filePath.trim() : '';
+      const appId = typeof args.appId === 'string' ? args.appId.trim().toLowerCase() : '';
+      const appName = typeof args.appName === 'string' ? args.appName.trim() : '';
+      if (!filePath || !appId || !appName) {
+        throw new Error('File path, app id, and app name are required');
+      }
+      runSpecChain(buildOpenFileSpecs({ filePath, appId, appName }), appName);
       return null;
     }
 
