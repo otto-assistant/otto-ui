@@ -336,8 +336,7 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
           <div
             className={cn(
               'pointer-events-none absolute left-0 top-0 z-0 rounded-md bg-[color-mix(in_srgb,var(--interactive-selection)_55%,transparent)]',
-              // tighter, track-safe shadow (fits inside p-1 track padding)
-              'shadow-[0_1px_2px_rgba(14,18,27,0.12),0_2px_4px_-1px_rgba(14,18,27,0.08),0_0_0_1px_rgba(14,18,27,0.12)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.30),0_2px_4px_-1px_rgba(0,0,0,0.20),0_0_0_1px_rgba(255,255,255,0.10)]'
+              'border border-[color-mix(in_srgb,var(--interactive-selection)_35%,transparent)]'
             )}
             style={{
               transform: `translate3d(${pillRect.left}px, ${pillRect.top}px, 0)`,
