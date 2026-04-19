@@ -684,7 +684,7 @@ export const AgentsPage: React.FC = () => {
                 </div>
                 <div className="flex flex-wrap items-center gap-1">
                 <Button
-                  variant="outline"
+                  variant="chip"
                   size="xs"
                   onClick={() => setMode('primary')}
                   className={cn(
@@ -697,7 +697,7 @@ export const AgentsPage: React.FC = () => {
                   Primary
                 </Button>
                 <Button
-                  variant="outline"
+                  variant="chip"
                   size="xs"
                   onClick={() => setMode('subagent')}
                   className={cn(
@@ -710,7 +710,7 @@ export const AgentsPage: React.FC = () => {
                   Subagent
                 </Button>
                 <Button
-                  variant="outline"
+                  variant="chip"
                   size="xs"
                   onClick={() => setMode('all')}
                   className={cn(

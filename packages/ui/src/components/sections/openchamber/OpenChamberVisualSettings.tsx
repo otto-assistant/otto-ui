@@ -520,7 +520,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                         {THEME_MODE_OPTIONS.map((option) => (
                                             <Button
                                                 key={option.value}
-                                                variant="outline"
+                                                variant="chip"
                                                 size="xs"
                                                 className={cn(
                                                     '!font-normal',

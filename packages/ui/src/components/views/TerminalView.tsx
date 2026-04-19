@@ -908,7 +908,7 @@ export const TerminalView: React.FC = () => {
             <Button
                 type="button"
                 size="sm"
-                variant="outline"
+                variant="chip"
                 className={cn(
                     "h-6 w-9 p-0",
                     activeModifier === 'ctrl'
@@ -924,7 +924,7 @@ export const TerminalView: React.FC = () => {
             <Button
                 type="button"
                 size="sm"
-                variant="outline"
+                variant="chip"
                 className={cn(
                     "h-6 w-9 p-0",
                     activeModifier === 'cmd'

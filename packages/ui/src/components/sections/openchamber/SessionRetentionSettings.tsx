@@ -124,7 +124,7 @@ export const SessionRetentionSettings: React.FC = () => {
               <Button
                 key={option.value}
                 type="button"
-                variant="outline"
+                variant="chip"
                 size="xs"
                 className={cn(
                   '!font-normal',

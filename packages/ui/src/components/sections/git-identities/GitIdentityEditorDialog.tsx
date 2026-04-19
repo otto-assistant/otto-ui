@@ -352,7 +352,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                     <div className="flex items-center gap-1">
                       <Button size="sm"
                         type="button"
-                        variant="outline"
+                        variant="chip"
                         onClick={() => setAuthType('ssh')}
                         className={cn(
                           authType === 'ssh'
@@ -364,7 +364,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                       </Button>
                       <Button size="sm"
                         type="button"
-                        variant="outline"
+                        variant="chip"
                         onClick={() => setAuthType('token')}
                         className={cn(
                           authType === 'token'

@@ -457,7 +457,7 @@ export const VoiceSettings: React.FC = () => {
                                     </div>
                                     <div className="flex flex-wrap items-center gap-1">
                                         <Button
-                                            variant="outline"
+                                            variant="chip"
                                             size="xs"
                                             onClick={() => setVoiceProvider('browser')}
                                             className={cn(
@@ -470,7 +470,7 @@ export const VoiceSettings: React.FC = () => {
                                             Browser
                                         </Button>
                                         <Button
-                                            variant="outline"
+                                            variant="chip"
                                             size="xs"
                                             onClick={() => setVoiceProvider('openai')}
                                             className={cn(
@@ -483,7 +483,7 @@ export const VoiceSettings: React.FC = () => {
                                             OpenAI
                                         </Button>
                                         <Button
-                                            variant="outline"
+                                            variant="chip"
                                             size="xs"
                                             onClick={() => setVoiceProvider('openai-compatible')}
                                             className={cn(
@@ -497,7 +497,7 @@ export const VoiceSettings: React.FC = () => {
                                         </Button>
                                         {isSayAvailable && (
                                             <Button
-                                                variant="outline"
+                                                variant="chip"
                                                 size="xs"
                                                 onClick={() => setVoiceProvider('say')}
                                                 className={cn(
@@ -756,7 +756,7 @@ export const VoiceSettings: React.FC = () => {
                                 </div>
                                 <div className="flex flex-wrap items-center gap-1">
                                     <Button
-                                        variant="outline"
+                                        variant="chip"
                                         size="xs"
                                         onClick={() => setSttProvider('browser')}
                                         className={cn(
@@ -769,7 +769,7 @@ export const VoiceSettings: React.FC = () => {
                                         Browser
                                     </Button>
                                     <Button
-                                        variant="outline"
+                                        variant="chip"
                                         size="xs"
                                         onClick={() => setSttProvider('server')}
                                         className={cn(

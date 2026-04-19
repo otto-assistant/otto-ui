@@ -1178,7 +1178,7 @@ export const TunnelSettings: React.FC = () => {
                   <Tooltip key={option.value} delayDuration={700}>
                     <TooltipTrigger asChild>
                       <Button
-                        variant="outline"
+                        variant="chip"
                         size="xs"
                         className={cn(
                           '!font-normal',

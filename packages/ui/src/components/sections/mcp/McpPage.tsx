@@ -617,7 +617,7 @@ export const McpPage: React.FC = () => {
                 <span className="typography-ui-label text-foreground">Transport Mode</span>
                 <div className="flex flex-wrap items-center gap-1">
                   <Button
-                    variant="outline"
+                    variant="chip"
                     size="xs"
                     onClick={() => setMcpType('local')}
                     className={cn(
@@ -630,7 +630,7 @@ export const McpPage: React.FC = () => {
                     Local · stdio
                   </Button>
                   <Button
-                    variant="outline"
+                    variant="chip"
                     size="xs"
                     onClick={() => setMcpType('remote')}
                     className={cn(
