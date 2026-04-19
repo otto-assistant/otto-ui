@@ -19,15 +19,15 @@ const TINT_PRIMARY = [
 ].join(" ");
 
 const TINT_DESTRUCTIVE = [
-  "bg-[color-mix(in_srgb,var(--status-error)_10%,var(--background))]",
+  "bg-[color-mix(in_srgb,var(--status-error)_7%,var(--background))]",
   "text-[var(--status-error)]",
-  "border border-[color-mix(in_srgb,var(--status-error)_12%,transparent)]",
-  "hover:bg-[color-mix(in_srgb,var(--status-error)_16%,var(--background))]",
-  "active:bg-[color-mix(in_srgb,var(--status-error)_22%,var(--background))]",
-  "dark:bg-[color-mix(in_srgb,var(--status-error)_16%,transparent)]",
-  "dark:border-[color-mix(in_srgb,var(--status-error)_20%,transparent)]",
-  "dark:hover:bg-[color-mix(in_srgb,var(--status-error)_22%,transparent)]",
-  "dark:active:bg-[color-mix(in_srgb,var(--status-error)_30%,transparent)]",
+  "border border-[color-mix(in_srgb,var(--status-error)_9%,transparent)]",
+  "hover:bg-[color-mix(in_srgb,var(--status-error)_11%,var(--background))]",
+  "active:bg-[color-mix(in_srgb,var(--status-error)_16%,var(--background))]",
+  "dark:bg-[color-mix(in_srgb,var(--status-error)_9%,transparent)]",
+  "dark:border-[color-mix(in_srgb,var(--status-error)_14%,transparent)]",
+  "dark:hover:bg-[color-mix(in_srgb,var(--status-error)_14%,transparent)]",
+  "dark:active:bg-[color-mix(in_srgb,var(--status-error)_20%,transparent)]",
 ].join(" ");
 
 const fancyButtonRoot = cva(
