@@ -335,7 +335,7 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
         {usesActivePillIndicator && pillRect ? (
           <div
             className={cn(
-              'pointer-events-none absolute left-0 top-0 z-0 rounded-md bg-[var(--interactive-selection)]',
+              'pointer-events-none absolute left-0 top-0 z-0 rounded-md bg-[color-mix(in_srgb,var(--interactive-selection)_55%,transparent)]',
               // tighter, track-safe shadow (fits inside p-1 track padding)
               'shadow-[0_1px_2px_rgba(14,18,27,0.12),0_2px_4px_-1px_rgba(14,18,27,0.08),0_0_0_1px_rgba(14,18,27,0.12)]'
             )}
@@ -355,7 +355,6 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
             style={{
               transform: `translate3d(${pillRect.left}px, 0, 0)`,
               width: `${pillRect.width}px`,
-              transition: 'transform 300ms cubic-bezier(0.65, 0, 0.35, 1), width 300ms cubic-bezier(0.65, 0, 0.35, 1)',
             }}
             aria-hidden
           />
@@ -415,8 +414,8 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
                               ? 'shrink-0 whitespace-nowrap px-3 text-center'
                               : 'px-3 text-center')
                       : isScrollable
-                        ? 'max-w-56 justify-start truncate px-3 text-left transition-colors duration-200 ease-out'
-                        : 'w-full justify-center truncate px-3 text-center transition-colors duration-200 ease-out',
+                        ? 'max-w-56 justify-start truncate px-3 text-left'
+                        : 'w-full justify-center truncate px-3 text-center',
                     usesActivePillIndicator
                       ? (activePillButtonClassName ?? (isActivePillVariant ? (isMobile ? 'h-[34px]' : 'h-[27px]') : 'h-7'))
                       : null,
