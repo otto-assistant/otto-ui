@@ -848,15 +848,20 @@ const switchToHostById = async (rawId) => {
     }
     targetUrl = host.url;
   }
-  if (!targetUrl) return;
+  if (!targetUrl) {
+    log.warn('[electron] deep-link host has no target URL:', id);
+    return;
+  }
   const bootOutcome = id === LOCAL_HOST_ID
     ? { target: 'local', status: 'ok' }
     : { target: 'remote', status: 'ok', hostId: id, url: targetUrl };
+  log.info('[electron] switching to host', { id, bootOutcome });
   await activateMainWindow(targetUrl, state.localOrigin, bootOutcome);
 };
 
 const dispatchDeepLink = (link) => {
   if (!link) return;
+  log.info('[electron] dispatching deep-link', { type: link.type, valueLen: link.value?.length || 0 });
   if (link.type === 'session' && link.value) {
     emitToAllWindows('openchamber:open-session', { sessionId: link.value });
     return;
@@ -1035,11 +1040,14 @@ const createBrowserWindow = ({ label, restoreGeometry, url }) => {
     browserWindow.webContents.setZoomFactor(1);
   });
 
-  browserWindow.webContents.on('did-finish-load', () => {
-    browserWindow.webContents.setZoomFactor(1);
+  browserWindow.webContents.on('dom-ready', () => {
     if (state.initScript) {
       void browserWindow.webContents.executeJavaScript(state.initScript).catch(() => {});
     }
+  });
+
+  browserWindow.webContents.on('did-finish-load', () => {
+    browserWindow.webContents.setZoomFactor(1);
     if (state.mainWindow && browserWindow.id === state.mainWindow.id && pendingDeepLinks.length > 0) {
       const timer = setTimeout(flushPendingDeepLinks, 400);
       if (typeof timer?.unref === 'function') timer.unref();

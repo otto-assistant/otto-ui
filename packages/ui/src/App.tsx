@@ -35,6 +35,7 @@ import { OnboardingScreen } from '@/components/onboarding/OnboardingScreen';
 import type { RecoveryVariant } from '@/components/onboarding/DesktopConnectionRecovery';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { useProjectsStore } from '@/stores/useProjectsStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { SyncProvider, useSessions } from '@/sync/sync-context';
 import { useSync } from '@/sync/use-sync';
@@ -473,7 +474,13 @@ function App({ apis }: AppProps) {
       const detail = (event as CustomEvent<{ projectPath?: string }>).detail;
       const projectPath = typeof detail?.projectPath === 'string' ? detail.projectPath.trim() : '';
       if (!projectPath) return;
-      useDirectoryStore.getState().setDirectory(projectPath, { showOverlay: true });
+      const projectsStore = useProjectsStore.getState();
+      const existing = projectsStore.projects.find((project) => project.path === projectPath);
+      if (existing) {
+        projectsStore.setActiveProject(existing.id);
+      } else {
+        projectsStore.addProject(projectPath);
+      }
     };
 
     window.addEventListener('openchamber:open-project', handler as EventListener);

@@ -15,7 +15,6 @@ const localOrigin = readArgValue('--openchamber-local-origin');
 const homeDirectory = readArgValue('--openchamber-home');
 const macosMajorRaw = readArgValue('--openchamber-macos-major');
 const macosMajor = Number.parseInt(macosMajorRaw, 10);
-const bootOutcomeRaw = readArgValue('--openchamber-boot-outcome');
 
 if (localOrigin) {
   contextBridge.exposeInMainWorld('__OPENCHAMBER_LOCAL_ORIGIN__', localOrigin);
@@ -29,15 +28,10 @@ if (Number.isFinite(macosMajor) && macosMajor > 0) {
   contextBridge.exposeInMainWorld('__OPENCHAMBER_MACOS_MAJOR__', macosMajor);
 }
 
-if (bootOutcomeRaw) {
-  try {
-    const bootOutcome = JSON.parse(bootOutcomeRaw);
-    if (bootOutcome && typeof bootOutcome === 'object') {
-      contextBridge.exposeInMainWorld('__OPENCHAMBER_DESKTOP_BOOT_OUTCOME__', bootOutcome);
-    }
-  } catch {
-  }
-}
+// Note: bootOutcome must stay writable from the main world's initScript so
+// re-navigations (host switch via deep link) can refresh it. contextBridge-
+// exposed globals are read-only, which blocks that update — rely solely on
+// the main-process initScript injection (dispatched on did-finish-load).
 
 const addListener = (event, handler) => {
   const listeners = eventListeners.get(event) || new Set();
