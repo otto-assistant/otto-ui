@@ -1643,7 +1643,7 @@ export const Header: React.FC<HeaderProps> = ({
           </TooltipContent>
         </Tooltip>
       )}
-      <OpenInAppButton directory={openDirectory} activeFilePath={selectedFilePath} className="mr-1" />
+      <OpenInAppButton directory={actionDirectory} activeFilePath={selectedFilePath} className="mr-1" />
       <DesktopServicesMenu
         isDesktopApp={isDesktopApp}
         currentInstanceLabel={currentInstanceLabel}
