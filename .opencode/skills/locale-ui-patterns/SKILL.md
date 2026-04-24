@@ -66,6 +66,38 @@ Use `{name}` placeholders for dynamic values.
 t('toast.language.changed', { language: label(locale) })
 ```
 
+Do not pass grammar fragments as params. Never use params like `{suffix}`, `{plural}`, `{article}`, `{prefix}`, `{dateSuffix}`, or pieces of words/sentences.
+
+Bad:
+```tsx
+t('dialog.delete.description', { count, suffix: count === 1 ? '' : 's' })
+```
+
+Good:
+```tsx
+count === 1
+  ? t('dialog.delete.descriptionSingle', { count })
+  : t('dialog.delete.descriptionPlural', { count })
+```
+
+Plural/count-dependent text must use separate complete-message keys unless all supported locales can use one identical complete sentence. Placeholders are only for real values (`{count}`, `{name}`, `{path}`), not grammar.
+
+Optional clauses must also be complete-message keys. Do not build a sentence by injecting a translated phrase into another translated sentence.
+
+Bad:
+```tsx
+t('dialog.delete.description', {
+  dateLabel: date ? t('dialog.delete.dateSuffix', { date }) : '',
+})
+```
+
+Good:
+```tsx
+date
+  ? t('dialog.delete.descriptionWithDate', { count, date })
+  : t('dialog.delete.description', { count })
+```
+
 ## What Counts As UI Text
 
 - Button and menu labels
