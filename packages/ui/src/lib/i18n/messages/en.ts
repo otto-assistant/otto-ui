@@ -1,4 +1,7 @@
+import { settingsDict } from './en.settings';
+
 export const dict = {
+  ...settingsDict,
   'common.language.english': 'English',
   'common.language.simplifiedChinese': 'Chinese (Simplified)',
   'layout.mainTab.chat': 'Chat',
@@ -11,9 +14,6 @@ export const dict = {
   'layout.rightSidebar.context': 'Context',
   'layout.services.instance': 'Instance',
   'layout.services.usage': 'Usage',
-  'settings.appearance.language.label': 'Language',
-  'settings.appearance.language.description': 'Choose the interface language.',
-  'settings.appearance.language.select': 'Select language',
   'sessions.sidebar.header.actions.closeSessions': 'Close sessions',
   'sessions.sidebar.header.actions.addProject': 'Add project',
   'sessions.sidebar.header.actions.newSession': 'New session',
