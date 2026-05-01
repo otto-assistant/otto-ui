@@ -15,6 +15,8 @@ import { SessionDialogs } from '@/components/session/SessionDialogs';
 import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
 import { MultiRunLauncher } from '@/components/multirun';
 import { DrawerProvider } from '@/contexts/DrawerContext';
+import { MobileTabBar } from './MobileTabBar';
+import { MobileNavSheet } from './MobileNavSheet';
 
 import { useUIStore } from '@/stores/useUIStore';
 import { useUpdateStore } from '@/stores/useUpdateStore';
@@ -111,6 +113,9 @@ export const MainLayout: React.FC = () => {
     const rightSidebarAutoClosedRef = React.useRef(false);
     const bottomTerminalAutoClosedRef = React.useRef(false);
     const leftSidebarAutoClosedByContextRef = React.useRef(false);
+
+    // Mobile nav sheet state
+    const [mobileNavSheetOpen, setMobileNavSheetOpen] = React.useState(false);
 
     // Mobile drawer state
     const [mobileLeftDrawerOpen, setMobileLeftDrawerOpen] = React.useState(false);
@@ -589,7 +594,7 @@ export const MainLayout: React.FC = () => {
                     <div
                         data-page-scroll-lock="true"
                         className={cn(
-                            'flex flex-1 overflow-hidden relative',
+                            'flex flex-1 overflow-hidden relative pb-14',
                             isSettingsDialogOpen && 'hidden'
                         )}
                     >
@@ -637,6 +642,10 @@ export const MainLayout: React.FC = () => {
                             </ErrorBoundary>
                         </div>
                     )}
+
+                    {/* Mobile tab bar */}
+                    <MobileTabBar onMorePress={() => setMobileNavSheetOpen(true)} />
+                    <MobileNavSheet open={mobileNavSheetOpen} onClose={() => setMobileNavSheetOpen(false)} />
                 </DrawerProvider>
             ) : (
                 <>

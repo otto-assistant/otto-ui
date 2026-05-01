@@ -27,7 +27,7 @@ export const ScheduleView: React.FC = () => {
   };
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-auto bg-background p-6">
+    <div className="flex h-full flex-col gap-4 overflow-auto bg-background p-4 md:p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-foreground">Schedule</h1>
