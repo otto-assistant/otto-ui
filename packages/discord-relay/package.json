@@ -3,24 +3,26 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Discord to OpenChamber relay bot",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "type-check": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/index.js",
-    "lint": "node -e \"process.exit(0)\"",
-    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist',{recursive:true,force:true});\""
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
   },
-  "engines": {
-    "node": ">=20.0.0"
+  "scripts": {
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint \"./src/**/*.ts\" --config ../../eslint.config.js"
   },
   "dependencies": {
-    "discord.js": "^14.25.1"
+    "@discordjs/rest": "^2.6.0",
+    "@opencode-ai/sdk": "^1.14.19",
+    "discord-api-types": "^0.38.39"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.8"
   },
   "devDependencies": {
     "@types/node": "^24.3.1",
-    "typescript": "~5.8.3"
+    "eslint": "^9.33.0",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.39.1"
   }
 }
