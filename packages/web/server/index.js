@@ -77,6 +77,8 @@ import { createGracefulShutdownRuntime } from './lib/opencode/shutdown-runtime.j
 import { createProjectConfigRuntime } from './lib/projects/project-config.js';
 import { getAgentConfig, updateAgent } from './lib/opencode/agents.js';
 import { registerOttoApiRoutes } from './lib/otto-api/routes.js';
+import { createDiscordSyncRouter } from './lib/otto-api/discord-sync.js';
+import { broadcast as ottoEventsBroadcast } from './lib/otto-api/websocket.js';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1159,6 +1161,11 @@ async function main(options = {}) {
     getOpenChamberEventClients: () => uiOpenChamberEventClients,
     writeSseEvent,
   });
+
+  // Discord ↔ Web UI sync routes
+  app.use('/api/otto/discord', createDiscordSyncRouter({
+    broadcastEvent: (type, data) => ottoEventsBroadcast(type, data),
+  }));
 
   registerOttoApiRoutes(app, {
     fetchAgentsSnapshot,
