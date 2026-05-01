@@ -1,4 +1,5 @@
 export { ChatView } from './ChatView';
+export { DashboardView } from './dashboard/DashboardView';
 export { PlanView } from './PlanView';
 export { GitView } from './GitView';
 export { DiffView, useDiffFileCount } from './DiffView';
