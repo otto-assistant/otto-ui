@@ -681,6 +681,13 @@ export const settingsDict = {
   'settings.openchamber.desktopNetwork.error.loadFailed': '加载桌面设置失败',
   'settings.openchamber.desktopNetwork.error.saveFailed': '保存桌面设置失败',
   'settings.openchamber.desktopNetwork.error.savedRestartFailed': '已保存，但重启应用失败',
+
+  'settings.openchamber.desktopAutostart.title': '登录时启动',
+  'settings.openchamber.desktopAutostart.field.enabledAria': '登录时自动启动 OpenChamber',
+  'settings.openchamber.desktopAutostart.field.enabled': '登录时启动 OpenChamber',
+  'settings.openchamber.desktopAutostart.field.enabledDescription': '在后台启动以保持本地 Sidecar 可用，且不打开窗口。',
+  'settings.openchamber.desktopAutostart.error.loadFailed': '读取“登录时启动”偏好失败',
+  'settings.openchamber.desktopAutostart.error.saveFailed': '更新“登录时启动”偏好失败',
   'settings.openchamber.opencodeCli.title': 'OpenCode CLI',
   'settings.openchamber.opencodeCli.tooltipPrefix': '可选的',
   'settings.openchamber.opencodeCli.tooltipSuffix': '二进制绝对路径。',

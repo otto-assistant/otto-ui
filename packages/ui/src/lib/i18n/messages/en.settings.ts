@@ -681,6 +681,13 @@ export const settingsDict = {
   'settings.openchamber.desktopNetwork.error.loadFailed': 'Failed to load desktop settings',
   'settings.openchamber.desktopNetwork.error.saveFailed': 'Failed to save desktop settings',
   'settings.openchamber.desktopNetwork.error.savedRestartFailed': 'Saved, but failed to restart app',
+
+  'settings.openchamber.desktopAutostart.title': 'Launch at login',
+  'settings.openchamber.desktopAutostart.field.enabledAria': 'Launch OpenChamber automatically at login',
+  'settings.openchamber.desktopAutostart.field.enabled': 'Start OpenChamber when you log in',
+  'settings.openchamber.desktopAutostart.field.enabledDescription': 'Starts in background mode so the local sidecar stays ready without an open window.',
+  'settings.openchamber.desktopAutostart.error.loadFailed': 'Failed to read launch at login preference',
+  'settings.openchamber.desktopAutostart.error.saveFailed': 'Failed to update launch at login preference',
   'settings.openchamber.opencodeCli.title': 'OpenCode CLI',
   'settings.openchamber.opencodeCli.tooltipPrefix': 'Optional absolute path to the',
   'settings.openchamber.opencodeCli.tooltipSuffix': 'binary.',

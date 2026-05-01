@@ -681,6 +681,13 @@ export const settingsDict = {
   'settings.openchamber.desktopNetwork.error.loadFailed': 'desktop 설정을 로드하지 못했습니다',
   'settings.openchamber.desktopNetwork.error.saveFailed': 'desktop 설정을 저장하지 못했습니다',
   'settings.openchamber.desktopNetwork.error.savedRestartFailed': '저장했지만 앱을 다시 시작하지 못했습니다',
+
+  'settings.openchamber.desktopAutostart.title': '로그인 시 실행',
+  'settings.openchamber.desktopAutostart.field.enabledAria': '로그인할 때 OpenChamber 자동 실행',
+  'settings.openchamber.desktopAutostart.field.enabled': '로그인할 때 OpenChamber 시작',
+  'settings.openchamber.desktopAutostart.field.enabledDescription': '창 없이 로컬 사이드카가 준비되도록 백그라운드에서 시작합니다.',
+  'settings.openchamber.desktopAutostart.error.loadFailed': '로그인 시 실행 설정을 불러오지 못했습니다.',
+  'settings.openchamber.desktopAutostart.error.saveFailed': '로그인 시 실행 설정을 저장하지 못했습니다.',
   'settings.openchamber.opencodeCli.title': 'OpenCode CLI',
   'settings.openchamber.opencodeCli.tooltipPrefix': '선택적 절대 경로:',
   'settings.openchamber.opencodeCli.tooltipSuffix': 'binary.',

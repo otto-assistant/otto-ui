@@ -110,6 +110,26 @@ export const setDesktopWindowTheme = async (
   }
 };
 
+export const getDesktopAutostartEnabled = async (): Promise<boolean | null> => {
+  if (!isDesktopShell() || isElectronDesktop()) {
+    return null;
+  }
+
+  try {
+    return await invokeDesktopCommand<boolean>('get_autostart_enabled');
+  } catch {
+    return null;
+  }
+};
+
+export const setDesktopAutostartEnabled = async (enabled: boolean): Promise<void> => {
+  if (!isDesktopShell() || isElectronDesktop()) {
+    return;
+  }
+
+  await invokeDesktopCommand('set_autostart_enabled', { enabled });
+};
+
 export const getDesktopAppVersion = async (): Promise<string | null> => {
   if (!isDesktopShell()) {
     return null;

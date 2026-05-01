@@ -17,7 +17,7 @@ use std::{
     net::{TcpListener, UdpSocket},
     process::Command,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Mutex,
     },
     time::Duration,
@@ -43,6 +43,8 @@ fn disable_pinch_zoom(_window: &tauri::WebviewWindow) {}
 /// Global counter for generating unique window labels.
 static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+static DESKTOP_DAEMON_MODE: AtomicBool = AtomicBool::new(false);
+
 fn next_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
     loop {
         let n = WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -56,6 +58,15 @@ fn next_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
             return candidate;
         }
     }
+}
+
+fn desktop_daemon_mode() -> bool {
+    DESKTOP_DAEMON_MODE.load(Ordering::Relaxed)
+}
+
+fn refresh_desktop_daemon_mode_from_cli() {
+    let enabled = env::args().any(|arg| arg == "--daemon");
+    DESKTOP_DAEMON_MODE.store(enabled, Ordering::Relaxed);
 }
 
 /// Evaluate a script in all open webview windows.
@@ -103,6 +114,8 @@ fn dispatch_check_for_updates<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 }
 use tauri_plugin_shell::{process::CommandChild, process::CommandEvent, ShellExt};
 use tauri_plugin_updater::UpdaterExt;
+
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 #[cfg(target_os = "macos")]
 const MENU_ITEM_ABOUT_ID: &str = "menu_about";
@@ -3064,6 +3077,23 @@ fn desktop_read_file(path: String) -> Result<FileContent, String> {
 }
 
 #[tauri::command]
+fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|err| err.to_string())
+    } else {
+        manager.disable().map_err(|err| err.to_string())
+    }
+}
+
+#[tauri::command]
 async fn desktop_save_markdown_file(
     app: tauri::AppHandle,
     default_file_name: String,
@@ -3757,6 +3787,8 @@ fn open_new_window(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    refresh_desktop_daemon_mode_from_cli();
+
     // Ensure localhost traffic never routes through a system/VPN proxy.
     for key in ["NO_PROXY", "no_proxy"] {
         let existing = env::var(key).unwrap_or_default();
@@ -3801,6 +3833,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--daemon"]),
+        ))
         .plugin(log_builder.build())
         .on_page_load(|window, _payload| {
             if let Some(state) = window.app_handle().try_state::<DesktopUiInjectionState>() {
@@ -4039,12 +4075,16 @@ fn main() {
             remote_ssh::desktop_ssh_logs,
             remote_ssh::desktop_ssh_logs_clear,
             desktop_read_file,
+            get_autostart_enabled,
+            set_autostart_enabled,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
 
-            if let Err(err) = create_startup_window(&handle, true) {
-                log::error!("[desktop] failed to create startup window: {err}");
+            if !desktop_daemon_mode() {
+                if let Err(err) = create_startup_window(&handle, true) {
+                    log::error!("[desktop] failed to create startup window: {err}");
+                }
             }
 
             tauri::async_runtime::spawn(async move {
@@ -4054,6 +4094,9 @@ fn main() {
                 let handle_for_fallback = handle.clone();
                 let inject_startup_failure = |err: String| {
                     log::error!("[desktop] failed to start local server: {err}");
+                    if desktop_daemon_mode() {
+                        return;
+                    }
                     let cfg = read_desktop_hosts_config_from_disk();
                     let boot_outcome = compute_local_startup_failure_boot_outcome(&cfg);
                     let init_script = build_startup_failure_init_script(&boot_outcome);
@@ -4194,7 +4237,9 @@ fn main() {
                     env_target.as_deref(),
                 );
 
-                if let Err(err) = activate_main_window(
+                if desktop_daemon_mode() {
+                    log::info!("[desktop] daemon mode active; skipping main window activation");
+                } else if let Err(err) = activate_main_window(
                     &handle,
                     &initial_url,
                     &local_origin,
