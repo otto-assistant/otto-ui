@@ -21,6 +21,7 @@ export interface Relation {
 export interface DiaryEntry {
   id: string;
   date: string;
+  timestamp?: string;
   topic: string;
   content: string;
   agent: string;
@@ -54,9 +55,30 @@ const MOCK_RELATIONS: Relation[] = [
 ];
 
 const MOCK_DIARY: DiaryEntry[] = [
-  { id: "d1", date: "2026-05-01", topic: "general", content: "SESSION:2026-05-01|built.memory.browser|graph+list+diary+search", agent: "otto" },
-  { id: "d2", date: "2026-04-30", topic: "coding", content: "SESSION:2026-04-30|wave2.impl.started|4.agents.dispatched", agent: "otto" },
-  { id: "d3", date: "2026-04-29", topic: "general", content: "SESSION:2026-04-29|palace.tunnels.working|kg.queries.fast", agent: "otto" },
+  {
+    id: "d1",
+    date: "2026-05-01",
+    timestamp: "2026-05-01T11:06:43Z",
+    topic: "general",
+    content: "SESSION:2026-05-01|built.memory.browser|graph+list+diary+search",
+    agent: "otto",
+  },
+  {
+    id: "d2",
+    date: "2026-04-30",
+    timestamp: "2026-04-30T09:52:01Z",
+    topic: "coding",
+    content: "SESSION:2026-04-30|wave2.impl.started|4.agents.dispatched",
+    agent: "otto",
+  },
+  {
+    id: "d3",
+    date: "2026-04-29",
+    timestamp: "2026-04-29T07:41:58Z",
+    topic: "general",
+    content: "SESSION:2026-04-29|palace.tunnels.working|kg.queries.fast",
+    agent: "otto",
+  },
 ];
 
 const MOCK_SEARCH_RESULTS: SearchResult[] = [

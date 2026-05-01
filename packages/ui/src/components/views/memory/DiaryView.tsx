@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { useMemoryStore } from "../../../stores/useMemoryStore";
 
+function decodeDiaryContent(raw: string) {
+  if (!raw.includes("|")) return raw;
+  const parts = raw.split("|").map((p) => p.trim()).filter(Boolean);
+  return parts.join("\n");
+}
+
 export const DiaryView: React.FC = () => {
   const { diary, fetchDiary, loading } = useMemoryStore();
   const [topicFilter, setTopicFilter] = useState("");
@@ -43,11 +49,12 @@ export const DiaryView: React.FC = () => {
               <div className="space-y-2">
                 {entries.map((entry) => (
                   <div key={entry.id} className="rounded-md border border-border bg-card p-3">
-                    <div className="mb-1 flex items-center gap-2">
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
                       <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{entry.topic}</span>
-                      <span className="text-[10px] text-muted-foreground">{entry.agent}</span>
+                      <span className="rounded bg-accent/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.agent}</span>
+                      <span className="font-mono text-[10px] text-muted-foreground">{entry.timestamp ?? entry.date}</span>
                     </div>
-                    <p className="font-mono text-xs text-foreground">{entry.content}</p>
+                    <p className="whitespace-pre-wrap font-mono text-xs text-foreground">{decodeDiaryContent(entry.content)}</p>
                   </div>
                 ))}
               </div>

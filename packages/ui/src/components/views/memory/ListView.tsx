@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useMemoryStore } from "../../../stores/useMemoryStore";
 
-type SortKey = "subject" | "predicate" | "object" | "validFrom";
+type SortKey = "subject" | "predicate" | "object" | "validFrom" | "validTo";
 
 export const ListView: React.FC = () => {
   const { relations, addRelation, deleteRelation } = useMemoryStore();
@@ -18,8 +18,8 @@ export const ListView: React.FC = () => {
       return r.subject.toLowerCase().includes(q) || r.predicate.toLowerCase().includes(q) || r.object.toLowerCase().includes(q);
     })
     .sort((a, b) => {
-      const av = a[sortKey] ?? "";
-      const bv = b[sortKey] ?? "";
+      const av = (a[sortKey] ?? "") as string;
+      const bv = (b[sortKey] ?? "") as string;
       return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
     });
 
@@ -74,7 +74,7 @@ export const ListView: React.FC = () => {
               <th className={thClass} onClick={() => handleSort("predicate")}>Predicate {sortKey === "predicate" ? (sortAsc ? "^" : "v") : ""}</th>
               <th className={thClass} onClick={() => handleSort("object")}>Object {sortKey === "object" ? (sortAsc ? "^" : "v") : ""}</th>
               <th className={thClass} onClick={() => handleSort("validFrom")}>Valid From {sortKey === "validFrom" ? (sortAsc ? "^" : "v") : ""}</th>
-              <th className="px-3 py-2 text-xs text-muted-foreground">Valid To</th>
+              <th className={thClass} onClick={() => handleSort("validTo")}>Valid To {sortKey === "validTo" ? (sortAsc ? "^" : "v") : ""}</th>
               <th className="px-3 py-2" />
             </tr>
           </thead>
@@ -87,7 +87,16 @@ export const ListView: React.FC = () => {
                 <td className="px-3 py-2 text-muted-foreground">{r.validFrom ?? "—"}</td>
                 <td className="px-3 py-2 text-muted-foreground">{r.validTo ?? "—"}</td>
                 <td className="px-3 py-2">
-                  <button onClick={() => deleteRelation(r.id)} className="text-xs text-destructive hover:underline">Delete</button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!confirm("Delete this relation?")) return;
+                      deleteRelation(r.id);
+                    }}
+                    className="text-xs text-destructive hover:underline"
+                  >
+                    Delete
+                  </button>
                 </td>
               </tr>
             ))}
