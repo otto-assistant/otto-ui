@@ -1,5 +1,5 @@
 export { ChatView } from './ChatView';
-export { DashboardView } from './DashboardView';
+export { DashboardView } from './dashboard/DashboardView';
 export { ProjectsView } from './ProjectsView';
 export { PersonaView } from './PersonaView';
 export { MemoryView } from './MemoryView';
