@@ -50,6 +50,7 @@ type DashboardStoreState = {
   runningTasks: DashboardRunningTask[];
   recentSessions: DashboardRecentSession[];
   isLoading: boolean;
+  error: string | null;
 };
 
 type DashboardStore = DashboardStoreState & {
@@ -261,9 +262,10 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
   runningTasks: [],
   recentSessions: [],
   isLoading: false,
+  error: null,
 
   fetchDashboard: async () => {
-    set({ isLoading: true });
+    set({ isLoading: true, error: null });
     try {
       const [statusRaw, agentsRaw] = await Promise.all([
         safeFetchJson("/api/otto/status"),
@@ -312,8 +314,9 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
         recentSessions,
         isLoading: false,
       });
-    } catch {
-      set({ ...buildMockState(), isLoading: false });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load dashboard';
+      set({ ...buildMockState(), isLoading: false, error: msg });
     }
   },
 }));

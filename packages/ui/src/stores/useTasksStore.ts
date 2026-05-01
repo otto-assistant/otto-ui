@@ -29,6 +29,7 @@ interface TasksStore {
   tasks: Task[];
   filter: TaskFilter;
   isLoading: boolean;
+  error: string | null;
   selectedTaskId: string | null;
   createDialogOpen: boolean;
   detailDrawerOpen: boolean;
@@ -125,6 +126,7 @@ export const useTasksStore = create<TasksStore>()(
       tasks: MOCK_TASKS,
       filter: 'all',
       isLoading: false,
+      error: null,
       selectedTaskId: null,
       createDialogOpen: false,
       detailDrawerOpen: false,
@@ -166,16 +168,18 @@ export const useTasksStore = create<TasksStore>()(
       },
 
       fetchTasks: async () => {
-        set({ isLoading: true });
+        set({ isLoading: true, error: null });
         try {
           const res = await fetch(API_BASE);
           if (res.ok) {
             const json = await res.json();
             const tasks = Array.isArray(json.tasks) ? json.tasks : Array.isArray(json) ? json : [];
             if (tasks.length > 0) set({ tasks });
+          } else if (res.status >= 500) {
+            set({ error: `Server error (${res.status})` });
           }
-        } catch {
-          // Use mock data on failure
+        } catch (err) {
+          set({ error: err instanceof Error ? err.message : 'Failed to load tasks' });
         } finally {
           set({ isLoading: false });
         }

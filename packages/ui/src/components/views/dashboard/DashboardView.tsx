@@ -1,5 +1,5 @@
 import React from "react";
-import { RiDashboardLine, RiLoader4Line } from "@remixicon/react";
+import { RiDashboardLine } from "@remixicon/react";
 
 import { ActivityTimeline } from "./ActivityTimeline";
 import { AgentStatusCard } from "./AgentStatusCard";
@@ -10,6 +10,9 @@ import { useDashboardStore } from "@/stores/useDashboardStore";
 import { useSessionUIStore } from "@/sync/session-ui-store";
 import { useUIStore } from "@/stores/useUIStore";
 import { cn } from "@/lib/utils";
+import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { EmptyState } from "@/components/ui/EmptyState";
 
 export const DashboardView: React.FC = () => {
   const status = useDashboardStore((state) => state.status);
@@ -19,6 +22,7 @@ export const DashboardView: React.FC = () => {
   const runningTasks = useDashboardStore((state) => state.runningTasks);
   const recentSessions = useDashboardStore((state) => state.recentSessions);
   const isLoading = useDashboardStore((state) => state.isLoading);
+  const error = useDashboardStore((state) => state.error);
   const fetchDashboard = useDashboardStore((state) => state.fetchDashboard);
 
   const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
@@ -27,6 +31,14 @@ export const DashboardView: React.FC = () => {
   React.useEffect(() => {
     void fetchDashboard();
   }, [fetchDashboard]);
+
+  if (isLoading && !status) {
+    return <LoadingSpinner size="lg" text="Loading dashboard…" className="h-full" />;
+  }
+
+  if (error && !status) {
+    return <ErrorState message={error} onRetry={fetchDashboard} variant="full-page" />;
+  }
 
   const statusLabel =
     typeof status?.healthy === "boolean" ? (status.healthy ? "Healthy" : "Degraded") : "Unknown";
@@ -46,13 +58,6 @@ export const DashboardView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            {isLoading ? (
-              <div className="inline-flex items-center gap-2 typography-micro text-muted-foreground">
-                <RiLoader4Line className="animate-spin" size={18} aria-hidden />
-                Loading…
-              </div>
-            ) : null}
-
             <div
               className={cn(
                 "typography-micro inline-flex items-center rounded-full border px-2 py-1",
@@ -77,9 +82,7 @@ export const DashboardView: React.FC = () => {
             <section className="space-y-3">
               <div className="typography-ui font-semibold text-foreground">Agents</div>
               {agents.length === 0 ? (
-                <div className="rounded-lg border border-border bg-[var(--surface-elevated)] p-4 typography-ui text-muted-foreground">
-                  No agents
-                </div>
+                <EmptyState title="No agents" description="Agents will appear here once connected." />
               ) : (
                 <div className="grid grid-cols-1 gap-3">
                   {agents.map((agent) => (
