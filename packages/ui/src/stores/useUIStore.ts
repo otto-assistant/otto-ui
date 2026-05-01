@@ -1,10 +1,13 @@
 import { create } from 'zustand';
 import { devtools, persist, createJSONStorage } from 'zustand/middleware';
 import type { SidebarSection } from '@/constants/sidebar';
+import { isAppActiveView, type AppActiveView } from '@/constants/agentNav';
 import { getSafeStorage } from './utils/safeStorage';
 import { SEMANTIC_TYPOGRAPHY, getTypographyVariable, type SemanticTypographyKey } from '@/lib/typography';
 import type { ShortcutCombo } from '@/lib/shortcuts';
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
+
+export type { AppActiveView };
 
 export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files';
 export type RightSidebarTab = 'git' | 'files' | 'context';
@@ -494,6 +497,7 @@ interface UIStore {
   isSettingsDialogOpen: boolean;
   isModelSelectorOpen: boolean;
   sidebarSection: SidebarSection;
+  activeView: AppActiveView;
 
   // Settings IA (new shell)
   settingsPage: string;
@@ -622,6 +626,7 @@ interface UIStore {
   setModelSelectorOpen: (open: boolean) => void;
   applyTheme: () => void;
   setSidebarSection: (section: SidebarSection) => void;
+  setActiveView: (view: AppActiveView) => void;
   setSettingsPage: (slug: string) => void;
   setSettingsProjectsSelectedId: (projectId: string | null) => void;
   setSettingsRemoteInstancesSelectedId: (instanceId: string | null) => void;
@@ -747,6 +752,7 @@ export const useUIStore = create<UIStore>()(
         isSettingsDialogOpen: false,
         isModelSelectorOpen: false,
         sidebarSection: 'sessions',
+        activeView: 'dashboard',
         settingsPage: 'home',
         settingsHasOpenedOnce: false,
         settingsProjectsSelectedId: null,
@@ -1317,6 +1323,16 @@ export const useUIStore = create<UIStore>()(
           set({ sidebarSection: section });
         },
 
+        setActiveView: (view) => {
+          set((state) => {
+            if (view !== 'settings' && state.activeView === 'settings' && state.isSettingsDialogOpen) {
+              return { activeView: view, isSettingsDialogOpen: false };
+            }
+
+            return { activeView: view };
+          });
+        },
+
         setSettingsPage: (slug) => {
           set({ settingsPage: slug });
         },
@@ -1856,7 +1872,7 @@ export const useUIStore = create<UIStore>()(
       {
         name: 'ui-store',
         storage: createJSONStorage(() => getSafeStorage()),
-        version: 8,
+        version: 9,
         migrate: (persistedState, version) => {
           if (!persistedState || typeof persistedState !== 'object') {
             return persistedState;
@@ -1934,6 +1950,12 @@ export const useUIStore = create<UIStore>()(
             }
           }
 
+          if (version < 9) {
+            if (!isAppActiveView(state.activeView)) {
+              state.activeView = 'dashboard';
+            }
+          }
+
           return state;
         },
         partialize: (state) => ({
@@ -1949,6 +1971,7 @@ export const useUIStore = create<UIStore>()(
           bottomTerminalHeight: state.bottomTerminalHeight,
           isSessionSwitcherOpen: state.isSessionSwitcherOpen,
           activeMainTab: state.activeMainTab,
+          activeView: state.activeView,
           sidebarSection: state.sidebarSection,
           settingsPage: state.settingsPage,
           settingsHasOpenedOnce: state.settingsHasOpenedOnce,

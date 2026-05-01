@@ -1,4 +1,11 @@
 export { ChatView } from './ChatView';
+export { DashboardView } from './DashboardView';
+export { ProjectsView } from './ProjectsView';
+export { PersonaView } from './PersonaView';
+export { MemoryView } from './MemoryView';
+export { TasksView } from './TasksView';
+export { ScheduleView } from './ScheduleView';
+export { SettingsLandingView } from './SettingsLandingView';
 export { PlanView } from './PlanView';
 export { GitView } from './GitView';
 export { DiffView, useDiffFileCount } from './DiffView';
