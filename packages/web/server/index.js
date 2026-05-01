@@ -74,6 +74,8 @@ import { createPushRuntime } from './lib/notifications/push-runtime.js';
 import { createNotificationTemplateRuntime } from './lib/notifications/template-runtime.js';
 import { createGracefulShutdownRuntime } from './lib/opencode/shutdown-runtime.js';
 import { createProjectConfigRuntime } from './lib/projects/project-config.js';
+import { getAgentConfig, updateAgent } from './lib/opencode/agents.js';
+import { registerOttoApiRoutes } from './lib/otto-api/routes.js';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1149,6 +1151,21 @@ async function main(options = {}) {
     scheduledTasksRuntime,
     getOpenChamberEventClients: () => uiOpenChamberEventClients,
     writeSseEvent,
+  });
+
+  registerOttoApiRoutes(app, {
+    fetchAgentsSnapshot,
+    getAgentConfig,
+    updateAgent,
+    refreshOpenCodeAfterConfigChange,
+    clientReloadDelayMs: CLIENT_RELOAD_DELAY_MS,
+    resolveOptionalProjectDirectory,
+    resolveProjectDirectory,
+    openchamberVersion: OPENCHAMBER_VERSION,
+    getRuntimeSlice: () => ({
+      isOpenCodeReady,
+      openCodePort,
+    }),
   });
 
   const startupPipelineResult = await startupPipelineRuntime.run({
