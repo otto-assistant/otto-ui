@@ -26,6 +26,8 @@ import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { isDesktopShell } from '@/lib/desktop';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
+import { parseHashRoute, replaceHashRoute } from '@/lib/router/hashRoutes';
+import { useHashRoute } from '@/hooks/useHashRoute';
 
 import { ChatView } from '@/components/views';
 
@@ -95,6 +97,9 @@ export const MainLayout: React.FC = () => {
 
     const { isMobile } = useDeviceInfo();
     const isDesktopShellRuntime = React.useMemo(() => isDesktopShell(), []);
+
+    // Initialize hash-based routing (syncs URL ↔ activeView)
+    useHashRoute();
     const sidebarWidth = useUIStore((state) => state.sidebarWidth);
     const rightSidebarWidth = useUIStore((state) => state.rightSidebarWidth);
     const [desktopRightSidebarActionsHost, setDesktopRightSidebarActionsHost] = React.useState<HTMLDivElement | null>(null);

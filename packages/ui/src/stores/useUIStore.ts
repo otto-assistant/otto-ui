@@ -1331,6 +1331,18 @@ export const useUIStore = create<UIStore>()(
 
             return { activeView: view };
           });
+
+          // Sync hash route (lazy import to avoid circular deps)
+          if (typeof window !== 'undefined') {
+            import('@/lib/router/hashRoutes').then(({ buildHashRoute }) => {
+              const hash = buildHashRoute(view);
+              const currentHash = window.location.hash || '#/';
+              if (`#${currentHash.slice(1).split('/').slice(0, 2).join('/')}` !== hash.split('/').slice(0, 2).join('/')) {
+                const url = `${window.location.pathname}${window.location.search}${hash}`;
+                window.history.replaceState(window.history.state, '', url);
+              }
+            });
+          }
         },
 
         setSettingsPage: (slug) => {

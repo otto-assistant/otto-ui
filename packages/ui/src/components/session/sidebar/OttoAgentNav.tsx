@@ -12,6 +12,7 @@ import {
 } from '@remixicon/react';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
+import { navigateHash } from '@/lib/router/hashRoutes';
 import type { AppActiveView } from '@/constants/agentNav';
 
 type NavItem = {
@@ -37,7 +38,6 @@ type Props = {
 
 export function OttoAgentNav({ mobileVariant = false }: Props): React.ReactNode {
   const activeView = useUIStore((state) => state.activeView);
-  const setActiveView = useUIStore((state) => state.setActiveView);
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
   const setSettingsDialogOpen = useUIStore((state) => state.setSettingsDialogOpen);
 
@@ -47,13 +47,14 @@ export function OttoAgentNav({ mobileVariant = false }: Props): React.ReactNode 
         setSessionSwitcherOpen(false);
       }
 
-      setActiveView(target);
+      // Use hash-based navigation (updates URL + store)
+      navigateHash(target);
 
       if (target === 'settings') {
         setSettingsDialogOpen(true);
       }
     },
-    [mobileVariant, setActiveView, setSessionSwitcherOpen, setSettingsDialogOpen],
+    [mobileVariant, setSessionSwitcherOpen, setSettingsDialogOpen],
   );
 
   const buttonClasses = (selected: boolean) =>
