@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { ottoFetch } from "../lib/api-base";
 
 export type MemoryTab = "graph" | "list" | "diary" | "search";
 
@@ -98,7 +99,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
   fetchGraph: async () => {
     set({ loading: true });
     try {
-      const res = await fetch("/api/otto/memory/graph");
+      const res = await ottoFetch("/api/otto/memory/graph");
       if (res.ok) {
         const data = await res.json();
         set({ entities: data.entities ?? MOCK_ENTITIES, relations: data.relations ?? MOCK_RELATIONS });
@@ -114,7 +115,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
   fetchDiary: async () => {
     set({ loading: true });
     try {
-      const res = await fetch("/api/otto/memory/diary");
+      const res = await ottoFetch("/api/otto/memory/diary");
       if (res.ok) {
         const data = await res.json();
         set({ diary: data.entries ?? MOCK_DIARY });
@@ -133,7 +134,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
       return;
     }
     try {
-      const res = await fetch(`/api/otto/memory/search?q=${encodeURIComponent(query)}`);
+      const res = await ottoFetch(`/api/otto/memory/search?q=${encodeURIComponent(query)}`);
       if (res.ok) {
         const data = await res.json();
         set({ searchResults: data.results ?? MOCK_SEARCH_RESULTS });

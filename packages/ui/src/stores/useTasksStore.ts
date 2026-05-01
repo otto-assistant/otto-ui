@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
+import { apiUrl } from '../lib/api-base';
 import { useOttoEventsStore } from './useOttoEventsStore';
 
 export type TaskPriority = 'high' | 'medium' | 'low';
@@ -118,7 +119,7 @@ const MOCK_TASKS: Task[] = [
   },
 ];
 
-const API_BASE = '/api/otto/tasks';
+const API_BASE = () => apiUrl('/api/otto/tasks');
 
 export const useTasksStore = create<TasksStore>()(
   devtools(
@@ -170,7 +171,7 @@ export const useTasksStore = create<TasksStore>()(
       fetchTasks: async () => {
         set({ isLoading: true, error: null });
         try {
-          const res = await fetch(API_BASE);
+          const res = await fetch(API_BASE());
           if (res.ok) {
             const json = await res.json();
             const tasks = Array.isArray(json.tasks) ? json.tasks : Array.isArray(json) ? json : [];
@@ -200,7 +201,7 @@ export const useTasksStore = create<TasksStore>()(
         // Optimistic: show immediately
         set((state) => ({ tasks: [newTask, ...state.tasks], createDialogOpen: false }));
         try {
-          const res = await fetch(API_BASE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...task, source: 'web' }) });
+          const res = await fetch(API_BASE(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...task, source: 'web' }) });
           if (res.ok) {
             const json = await res.json();
             if (json.task?.id) {
@@ -223,7 +224,7 @@ export const useTasksStore = create<TasksStore>()(
           ),
         }));
         try {
-          await fetch(`${API_BASE}/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
+          await fetch(`${API_BASE()}/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
         } catch {
           // offline
         }
@@ -232,7 +233,7 @@ export const useTasksStore = create<TasksStore>()(
       deleteTask: async (id) => {
         set((state) => ({ tasks: state.tasks.filter((t) => t.id !== id), detailDrawerOpen: false, selectedTaskId: null }));
         try {
-          await fetch(`${API_BASE}/${id}`, { method: 'DELETE' });
+          await fetch(`${API_BASE()}/${id}`, { method: 'DELETE' });
         } catch {
           // offline
         }

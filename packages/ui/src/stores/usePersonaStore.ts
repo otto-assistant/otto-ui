@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { ottoFetch } from '../lib/api-base';
 
 export interface AgentSkill {
   name: string;
@@ -45,7 +46,7 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
   fetchAgents: async () => {
     set({ isLoading: true, error: null });
     try {
-      const res = await fetch('/api/otto/agents');
+      const res = await ottoFetch('/api/otto/agents');
       if (!res.ok) throw new Error('Failed to fetch agents');
       const data = await res.json();
       const agents = data.agents ?? data;
@@ -61,7 +62,7 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
   selectAgent: async (name: string) => {
     set({ isLoading: true, selectedAgent: name, error: null });
     try {
-      const res = await fetch(`/api/otto/agents/${name}`);
+      const res = await ottoFetch(`/api/otto/agents/${name}`);
       if (!res.ok) throw new Error('Failed to fetch agent config');
       const config: AgentConfig = await res.json();
       set({ config, isLoading: false });
@@ -97,7 +98,7 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
     if (!config || !selectedAgent) return;
     set({ isSaving: true, error: null });
     try {
-      const res = await fetch(`/api/otto/agents/${selectedAgent}`, {
+      const res = await ottoFetch(`/api/otto/agents/${selectedAgent}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
