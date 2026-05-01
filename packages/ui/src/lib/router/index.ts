@@ -29,3 +29,11 @@ export {
   routeMatchesURL,
   updateBrowserURL,
 } from './serializeRoute';
+
+export type { HashRouteState } from './hashRoutes';
+export {
+  parseHashRoute,
+  buildHashRoute,
+  navigateHash,
+  replaceHashRoute,
+} from './hashRoutes';
