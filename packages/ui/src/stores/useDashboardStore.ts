@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { apiUrl } from "../lib/api-base";
 
 export type AgentRunStatus = "Running" | "Idle" | "Error";
 
@@ -178,7 +179,7 @@ function normalizeStats(raw: unknown): DashboardStats {
 }
 
 async function safeFetchJson(url: string): Promise<unknown> {
-  const res = await fetch(url, { credentials: "same-origin" });
+  const res = await fetch(apiUrl(url), { credentials: "same-origin" });
   if (!res.ok) throw new Error(`Request failed (${res.status})`);
   const text = await res.text();
   if (!text.trim()) return null;

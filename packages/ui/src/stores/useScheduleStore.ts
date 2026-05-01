@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { ottoFetch } from "../lib/api-base";
 
 export type ScheduleEventType = "one-time" | "recurring";
 export type ScheduleEventStatus = "active" | "paused" | "completed" | "failed";
@@ -83,7 +84,7 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
   fetchSchedule: async () => {
     set({ loading: true });
     try {
-      const res = await fetch("/api/otto/schedule");
+      const res = await ottoFetch("/api/otto/schedule");
       if (res.ok) {
         const data = await res.json();
         set({ events: data.events ?? data });
@@ -97,7 +98,7 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
 
   createEvent: async (event) => {
     try {
-      const res = await fetch("/api/otto/schedule", {
+      const res = await ottoFetch("/api/otto/schedule", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(event),
@@ -120,7 +121,7 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
 
   deleteEvent: async (id) => {
     try {
-      await fetch(`/api/otto/schedule/${id}`, { method: "DELETE" });
+      await ottoFetch(`/api/otto/schedule/${id}`, { method: "DELETE" });
     } catch {
       // delete locally regardless
     }
