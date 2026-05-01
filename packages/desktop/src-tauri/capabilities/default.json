@@ -12,7 +12,10 @@
       "https://*/*"
     ]
   },
-  "windows": ["main", "main-*"],
+  "windows": [
+    "main",
+    "main-*"
+  ],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -36,6 +39,7 @@
     "notification:allow-notify",
     "updater:default",
     "updater:allow-check",
-    "updater:allow-download-and-install"
+    "updater:allow-download-and-install",
+    "autostart:default"
   ]
 }

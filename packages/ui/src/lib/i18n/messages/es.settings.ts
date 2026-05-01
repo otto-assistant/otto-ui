@@ -681,6 +681,13 @@ export const settingsDict = {
   "settings.openchamber.desktopNetwork.error.loadFailed": "No se pudo cargar la configuración de escritorio",
   "settings.openchamber.desktopNetwork.error.saveFailed": "No se pudo guardar la configuración de escritorio",
   "settings.openchamber.desktopNetwork.error.savedRestartFailed": "Guardado, pero no se pudo reiniciar la aplicación",
+
+  "settings.openchamber.desktopAutostart.title": "Iniciar al iniciar sesión",
+  "settings.openchamber.desktopAutostart.field.enabledAria": "Iniciar OpenChamber automáticamente al iniciar sesión",
+  "settings.openchamber.desktopAutostart.field.enabled": "Iniciar OpenChamber al iniciar sesión",
+  "settings.openchamber.desktopAutostart.field.enabledDescription": "Se inicia en segundo plano para mantener disponible el sidecar local sin abrir ventana.",
+  "settings.openchamber.desktopAutostart.error.loadFailed": "No se pudo leer la preferencia de inicio al iniciar sesión",
+  "settings.openchamber.desktopAutostart.error.saveFailed": "No se pudo actualizar la preferencia de inicio al iniciar sesión",
   "settings.openchamber.opencodeCli.title": "CLI de OpenCode",
   "settings.openchamber.opencodeCli.tooltipPrefix": "Ruta absoluta opcional al",
   "settings.openchamber.opencodeCli.tooltipSuffix": "ejecutable.",

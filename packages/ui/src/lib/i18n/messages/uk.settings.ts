@@ -681,6 +681,13 @@ export const settingsDict = {
   "settings.openchamber.desktopNetwork.error.loadFailed": "Не вдалося завантажити налаштування десктопного застосунку",
   "settings.openchamber.desktopNetwork.error.saveFailed": "Не вдалося зберегти налаштування десктопного застосунку",
   "settings.openchamber.desktopNetwork.error.savedRestartFailed": "Збережено, але не вдалося перезапустити застосунок",
+
+  "settings.openchamber.desktopAutostart.title": "Запуск при вході в систему",
+  "settings.openchamber.desktopAutostart.field.enabledAria": "Запускати OpenChamber автоматично під час входу",
+  "settings.openchamber.desktopAutostart.field.enabled": "Запускати OpenChamber під час входу в систему",
+  "settings.openchamber.desktopAutostart.field.enabledDescription": "Працює у фоні, щоб локальний sidecar залишався доступним без вікна.",
+  "settings.openchamber.desktopAutostart.error.loadFailed": "Не вдалося прочитати налаштування автозапуску",
+  "settings.openchamber.desktopAutostart.error.saveFailed": "Не вдалося оновити налаштування автозапуску",
   "settings.openchamber.opencodeCli.title": "OpenCode CLI",
   "settings.openchamber.opencodeCli.tooltipPrefix": "Додатковий абсолютний шлях до",
   "settings.openchamber.opencodeCli.tooltipSuffix": "бінарного файлу.",
