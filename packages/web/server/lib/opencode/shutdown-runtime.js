@@ -15,6 +15,8 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     setTerminalRuntime,
     getMessageStreamRuntime,
     setMessageStreamRuntime,
+    getOttoEventsWebSocketRuntime,
+    setOttoEventsWebSocketRuntime,
     shouldSkipOpenCodeStop,
     getOpenCodePort,
     getOpenCodeProcess,
@@ -63,6 +65,16 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       } catch {
       } finally {
         setMessageStreamRuntime(null);
+      }
+    }
+
+    const ottoEventsWebSocketRuntime = getOttoEventsWebSocketRuntime();
+    if (ottoEventsWebSocketRuntime) {
+      try {
+        await ottoEventsWebSocketRuntime.close();
+      } catch {
+      } finally {
+        setOttoEventsWebSocketRuntime(null);
       }
     }
 

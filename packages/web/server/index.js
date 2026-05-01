@@ -36,6 +36,7 @@ import {
   createGlobalMessageStreamHub,
   createMessageStreamWsRuntime,
 } from './lib/event-stream/index.js';
+import { createOttoEventsWebSocketRuntime } from './lib/otto-api/websocket.js';
 import { createFsSearchRuntime as createFsSearchRuntimeFactory } from './lib/fs/search.js';
 import { createOpenCodeLifecycleRuntime } from './lib/opencode/lifecycle.js';
 import { createOpenCodeEnvRuntime } from './lib/opencode/env-runtime.js';
@@ -424,6 +425,7 @@ let runtimeManagedRemoteTunnelToken = '';
 let runtimeManagedRemoteTunnelHostname = '';
 let terminalRuntime = null;
 let messageStreamRuntime = null;
+let ottoEventsWebSocketRuntime = null;
 const userProvidedOpenCodePassword = hmrStateRuntime.getUserProvidedOpenCodePassword(hmrState);
 const initialOpenCodeAuthState = hmrStateRuntime.resolveOpenCodeAuthFromState({
   hmrState,
@@ -823,6 +825,7 @@ const tunnelWiringRuntime = createTunnelWiringRuntime({
 const startupPipelineRuntime = createStartupPipelineRuntime({
   createTerminalRuntime,
   createMessageStreamWsRuntime,
+  createOttoEventsWebSocketRuntime,
   createServerStartupRuntime,
 });
 
@@ -967,6 +970,10 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   getMessageStreamRuntime: () => messageStreamRuntime,
   setMessageStreamRuntime: (value) => {
     messageStreamRuntime = value;
+  },
+  getOttoEventsWebSocketRuntime: () => ottoEventsWebSocketRuntime,
+  setOttoEventsWebSocketRuntime: (value) => {
+    ottoEventsWebSocketRuntime = value;
   },
   shouldSkipOpenCodeStop: () => ENV_SKIP_OPENCODE_START || isExternalOpenCode,
   getOpenCodePort: () => openCodePort,
@@ -1217,6 +1224,7 @@ async function main(options = {}) {
   });
   terminalRuntime = startupPipelineResult.terminalRuntime;
   messageStreamRuntime = startupPipelineResult.messageStreamRuntime;
+  ottoEventsWebSocketRuntime = startupPipelineResult.ottoEventsWebSocketRuntime;
 
   try {
     await scheduledTasksRuntime.start();
