@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { AGENT_DIR, readConfigLayers } from '../opencode/shared.js';
 import { parseOttoJsonObject, readOttoCliVersion, runOttoCli, stripOttoLogLines } from './otto-cli.js';
+import { getAllTasks, getTaskById, createTask, updateTask, deleteTask } from './task-store.js';
+import { receiveExternalTask, handleDiscordTaskUpdate } from './task-sync-bridge.js';
 
 const memoryDiary = [];
 const memoryEntities = new Map();
@@ -317,29 +319,8 @@ export const registerOttoApiRoutes = (app, dependencies) => {
     }
   });
 
-  const tasksListHandler = async (req, res) => {
-    const includeTerminal = typeof req.query?.all === 'string'
-      ? ['1', 'true', 'yes'].includes(req.query.all.trim().toLowerCase())
-      : false;
-
-    const args = ['task', 'list'];
-    if (includeTerminal) {
-      args.push('--all');
-    }
-
-    const { combined, code } = runOttoCli(args);
-
-    const payload = parseScheduledTasksPayload(combined);
-
-    if (
-      code !== 0
-      && !(payload.tasks && payload.tasks.length > 0)
-      && !(payload.source && ['otto-text', 'otto-none'].includes(payload.source))
-    ) {
-      return res.status(500).json({ error: stripOttoLogLines(combined) || 'otto task list failed' });
-    }
-
-    return res.json(payload);
+  const tasksListHandler = async (_req, res) => {
+    return res.json({ tasks: getAllTasks(), source: 'task-store' });
   };
 
   router.get('/tasks', tasksListHandler);
@@ -347,48 +328,22 @@ export const registerOttoApiRoutes = (app, dependencies) => {
 
   const enqueueHandler = async (req, res) => {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const prompt = asNonEmptyString(body.prompt);
-    const sendAt = asNonEmptyString(body.sendAt || body.schedule || body.scheduledAt);
-    const channelId =
-      typeof body.channelId === 'string'
-        ? body.channelId.trim()
-        : typeof body.channel === 'string'
-          ? body.channel.trim()
-          : null;
-    const projectDirectory =
-      typeof body.projectDirectory === 'string'
-        ? body.projectDirectory.trim()
-        : typeof body.project === 'string'
-          ? body.project.trim()
-          : null;
-
-    if (!prompt) {
-      return res.status(400).json({ error: 'prompt is required' });
+    const title = asNonEmptyString(body.title || body.prompt);
+    if (!title) {
+      return res.status(400).json({ error: 'title (or prompt) is required' });
     }
 
-    if (!sendAt) {
-      return res.status(400).json({ error: 'sendAt (ISO UTC or cron expression) is required' });
-    }
-
-    const args = buildSendScheduledArgs({ prompt, sendAt, channelId, projectDirectory });
-    const { code, combined } = runOttoCli(args);
-
-    if (code !== 0) {
-      return res.status(500).json({
-        ok: false,
-        error: stripOttoLogLines(combined) || 'otto send failed',
-        raw: combined,
-      });
-    }
-
-    const parsed = parseOttoJsonObject(combined);
-
-    return res.status(202).json({
-      ok: true,
-      ...(parsed ? { result: parsed } : {}),
-      message: stripOttoLogLines(combined) || 'queued via Otto send',
-      raw: combined,
+    const task = createTask({
+      title,
+      description: body.description || '',
+      owner: body.owner || body.ownerName || 'unknown',
+      ownerType: body.ownerType || 'user',
+      priority: body.priority || 'medium',
+      dueAt: body.dueAt || body.dueDate || body.sendAt || null,
+      source: body.source || 'web',
     });
+
+    return res.status(201).json({ ok: true, task });
   };
 
   router.post('/tasks', enqueueHandler);
@@ -401,36 +356,13 @@ export const registerOttoApiRoutes = (app, dependencies) => {
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : null;
-    const sendAtRaw = typeof body.sendAt === 'string' ? body.sendAt.trim() : null;
+    const updated = updateTask(taskId, body);
 
-    if (!prompt && !sendAtRaw) {
-      return res.status(400).json({ error: 'At least one of prompt or sendAt must be supplied' });
+    if (!updated) {
+      return res.status(404).json({ error: `Task "${taskId}" not found` });
     }
 
-    const args = ['task', 'edit', taskId];
-    if (prompt) {
-      args.push('--prompt', prompt);
-    }
-
-    if (sendAtRaw) {
-      args.push('--send-at', sendAtRaw);
-    }
-
-    const { code, combined } = runOttoCli(args);
-
-    if (code !== 0) {
-      return res.status(400).json({
-        error: stripOttoLogLines(combined) || 'otto task edit failed',
-        raw: combined,
-      });
-    }
-
-    return res.json({
-      ok: true,
-      id: taskId,
-      raw: stripOttoLogLines(combined),
-    });
+    return res.json({ ok: true, task: updated });
   };
 
   router.put('/tasks/:id', updateTaskHandler);
@@ -442,13 +374,9 @@ export const registerOttoApiRoutes = (app, dependencies) => {
       return res.status(400).json({ error: 'task id is required' });
     }
 
-    const { code, combined } = runOttoCli(['task', 'delete', taskId]);
-
-    if (code !== 0) {
-      return res.status(400).json({
-        error: stripOttoLogLines(combined) || 'otto task delete failed',
-        raw: combined,
-      });
+    const removed = deleteTask(taskId);
+    if (!removed) {
+      return res.status(404).json({ error: `Task "${taskId}" not found` });
     }
 
     return res.json({ ok: true, id: taskId });
@@ -456,6 +384,21 @@ export const registerOttoApiRoutes = (app, dependencies) => {
 
   router.delete('/tasks/:id', deleteTaskHandler);
   router.delete('/schedule/:id', deleteTaskHandler);
+
+  // Discord relay bridge endpoint
+  router.post('/tasks/sync', (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    if (body.action === 'create') {
+      const task = receiveExternalTask(body);
+      return res.status(201).json({ ok: true, task });
+    }
+    if (body.action === 'update' && body.id) {
+      const updated = handleDiscordTaskUpdate(body.id, body);
+      if (!updated) return res.status(404).json({ error: 'Task not found' });
+      return res.json({ ok: true, task: updated });
+    }
+    return res.status(400).json({ error: 'action (create|update) required' });
+  });
 
   router.get('/memory/search', (req, res) => {
     const query = asNonEmptyString(typeof req.query?.q === 'string' ? req.query.q : null);
