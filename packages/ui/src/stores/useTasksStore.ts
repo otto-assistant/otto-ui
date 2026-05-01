@@ -1,10 +1,12 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
+import { useOttoEventsStore } from './useOttoEventsStore';
 
 export type TaskPriority = 'high' | 'medium' | 'low';
 export type TaskStatus = 'pending' | 'in_progress' | 'done' | 'cancelled';
 export type TaskOwnerType = 'user' | 'agent' | 'cron';
 export type TaskFilter = 'all' | 'my_tasks' | 'agent' | 'scheduled' | 'done';
+export type TaskSource = 'web' | 'discord' | 'cli';
 
 export interface Task {
   id: string;
@@ -14,9 +16,12 @@ export interface Task {
   status: TaskStatus;
   ownerType: TaskOwnerType;
   ownerName: string;
+  owner?: string;
   dueDate: string | null;
+  dueAt?: string | null;
   createdAt: string;
   updatedAt: string;
+  source?: TaskSource;
   history: { timestamp: string; action: string }[];
 }
 
@@ -27,6 +32,7 @@ interface TasksStore {
   selectedTaskId: string | null;
   createDialogOpen: boolean;
   detailDrawerOpen: boolean;
+  _wsSubscribed: boolean;
 
   setFilter: (filter: TaskFilter) => void;
   setSelectedTaskId: (id: string | null) => void;
@@ -36,6 +42,8 @@ interface TasksStore {
   createTask: (task: Omit<Task, 'id' | 'createdAt' | 'updatedAt' | 'history' | 'status'>) => Promise<void>;
   updateTask: (id: string, updates: Partial<Task>) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
+  subscribeToWebSocket: () => void;
+  _applyRemoteTask: (eventType: string, data: Task) => void;
 }
 
 const MOCK_TASKS: Task[] = [
@@ -120,25 +128,59 @@ export const useTasksStore = create<TasksStore>()(
       selectedTaskId: null,
       createDialogOpen: false,
       detailDrawerOpen: false,
+      _wsSubscribed: false,
 
       setFilter: (filter) => set({ filter }),
       setSelectedTaskId: (id) => set({ selectedTaskId: id }),
       setCreateDialogOpen: (open) => set({ createDialogOpen: open }),
       setDetailDrawerOpen: (open) => set({ detailDrawerOpen: open }),
 
+      _applyRemoteTask: (eventType, data) => {
+        if (!data?.id) return;
+        set((state) => {
+          if (eventType === 'task.create') {
+            const exists = state.tasks.some((t) => t.id === data.id);
+            if (exists) return state;
+            return { tasks: [data, ...state.tasks] };
+          }
+          if (eventType === 'task.update' || eventType === 'task.complete') {
+            return { tasks: state.tasks.map((t) => (t.id === data.id ? { ...t, ...data } : t)) };
+          }
+          if (eventType === 'task.delete') {
+            return { tasks: state.tasks.filter((t) => t.id !== data.id) };
+          }
+          return state;
+        });
+      },
+
+      subscribeToWebSocket: () => {
+        if (get()._wsSubscribed) return;
+        set({ _wsSubscribed: true });
+
+        const eventsStore = useOttoEventsStore.getState();
+        if (typeof eventsStore.subscribe === 'function') {
+          eventsStore.subscribe('task.*', (event: { eventType: string; data: Task }) => {
+            get()._applyRemoteTask(event.eventType, event.data);
+          });
+        }
+      },
+
       fetchTasks: async () => {
         set({ isLoading: true });
         try {
           const res = await fetch(API_BASE);
           if (res.ok) {
-            const tasks = await res.json();
-            set({ tasks });
+            const json = await res.json();
+            const tasks = Array.isArray(json.tasks) ? json.tasks : Array.isArray(json) ? json : [];
+            if (tasks.length > 0) set({ tasks });
           }
         } catch {
           // Use mock data on failure
         } finally {
           set({ isLoading: false });
         }
+        // Subscribe to real-time updates after first fetch
+        get().subscribeToWebSocket();
       },
 
       createTask: async (task) => {
@@ -148,14 +190,23 @@ export const useTasksStore = create<TasksStore>()(
           status: 'pending',
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
+          source: 'web',
           history: [{ timestamp: new Date().toISOString(), action: 'Created' }],
         };
-        try {
-          await fetch(API_BASE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newTask) });
-        } catch {
-          // offline — still add locally
-        }
+        // Optimistic: show immediately
         set((state) => ({ tasks: [newTask, ...state.tasks], createDialogOpen: false }));
+        try {
+          const res = await fetch(API_BASE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...task, source: 'web' }) });
+          if (res.ok) {
+            const json = await res.json();
+            if (json.task?.id) {
+              // Replace optimistic with server-confirmed
+              set((state) => ({ tasks: state.tasks.map((t) => (t.id === newTask.id ? { ...t, ...json.task } : t)) }));
+            }
+          }
+        } catch {
+          // offline — keep optimistic
+        }
       },
 
       updateTask: async (id, updates) => {
