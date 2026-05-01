@@ -19,57 +19,41 @@ export function useOttoSync() {
     // Connection state
     unsubs.push(client.onConnection(setConnectionState));
 
-    // Task events → useTasksStore
+    // Task events → useTasksStore (refetch on any task event)
     unsubs.push(
-      client.on('task.*', (event: SyncEvent) => {
+      client.on('task.*', (_event: SyncEvent) => {
         const store = useTasksStore.getState();
-        switch (event.type) {
-          case 'task.created':
-            store.addTask?.(event.payload as never);
-            break;
-          case 'task.updated':
-            store.updateTask?.(event.payload as never);
-            break;
-          case 'task.deleted': {
-            const { id } = event.payload as { id: string };
-            store.deleteTask?.(id);
-            break;
-          }
-        }
+        store.fetchTasks();
       }),
     );
 
-    // Agent events → useDashboardStore
+    // Agent events → useDashboardStore (refetch dashboard)
     unsubs.push(
-      client.on('agent.*', (event: SyncEvent) => {
+      client.on('agent.*', (_event: SyncEvent) => {
         const store = useDashboardStore.getState();
-        if (event.type === 'agent.status_changed' && store.updateAgentStatus) {
-          store.updateAgentStatus(event.payload as never);
-        }
+        store.fetchDashboard();
       }),
     );
 
-    // Memory events → useMemoryStore
+    // Memory events → useMemoryStore (refetch graph)
     unsubs.push(
-      client.on('memory.*', (event: SyncEvent) => {
+      client.on('memory.*', (_event: SyncEvent) => {
         const store = useMemoryStore.getState();
-        if (event.type === 'memory.updated' && store.refresh) {
-          store.refresh();
-        }
+        store.fetchGraph();
       }),
     );
 
     // Persona events
     unsubs.push(
       client.on('persona.*', (_event: SyncEvent) => {
-        // Persona store refresh will be wired when usePersonaStore exists
+        // Persona store refresh will be wired when needed
       }),
     );
 
     // Schedule events
     unsubs.push(
       client.on('schedule.*', (_event: SyncEvent) => {
-        // Schedule store refresh will be wired when useScheduleStore exists
+        // Schedule store refresh will be wired when needed
       }),
     );
 

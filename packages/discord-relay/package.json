@@ -14,7 +14,8 @@
   "dependencies": {
     "@discordjs/rest": "^2.6.0",
     "@opencode-ai/sdk": "^1.14.19",
-    "discord-api-types": "^0.38.39"
+    "discord-api-types": "^0.38.39",
+    "discord.js": "^14.26.3"
   },
   "peerDependencies": {
     "typescript": ">=5.8"

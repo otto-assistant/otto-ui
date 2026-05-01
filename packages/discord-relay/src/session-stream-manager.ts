@@ -284,7 +284,7 @@ export class SessionStreamManager {
       await patchStreamingMessage({
         rest: this.rest,
         channelId,
-        messageId,
+        messageId: messageId!,
         patch: {
           content: composed.contentOrStub,
           embeds: composed.embeds,

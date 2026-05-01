@@ -22,7 +22,7 @@ export function getBaseUrl(): string {
   }
 
   // Environment variable via Vite
-  const envUrl = (import.meta as Record<string, Record<string, string>>).env?.VITE_OTTO_API_URL;
+  const envUrl = (import.meta as unknown as Record<string, Record<string, string>>).env?.VITE_OTTO_API_URL;
   if (typeof envUrl === "string" && envUrl) {
     _baseUrl = envUrl.replace(/\/$/, "");
     return _baseUrl;

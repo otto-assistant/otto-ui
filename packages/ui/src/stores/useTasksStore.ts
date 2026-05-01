@@ -161,9 +161,11 @@ export const useTasksStore = create<TasksStore>()(
         set({ _wsSubscribed: true });
 
         const eventsStore = useOttoEventsStore.getState();
-        if (typeof eventsStore.subscribe === 'function') {
-          eventsStore.subscribe('task.*', (event: { eventType: string; data: Task }) => {
-            get()._applyRemoteTask(event.eventType, event.data);
+        if (typeof eventsStore.subscribeToEvents === 'function') {
+          eventsStore.subscribeToEvents((event) => {
+            if (event.eventType.startsWith('task.')) {
+              get()._applyRemoteTask(event.eventType, event.data as Task);
+            }
           });
         }
       },
