@@ -26,7 +26,6 @@ import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { isDesktopShell } from '@/lib/desktop';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
-import { parseHashRoute, replaceHashRoute } from '@/lib/router/hashRoutes';
 import { useRoute } from '@/hooks/useHashRoute';
 
 import { ChatView } from '@/components/views';

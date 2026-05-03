@@ -1,5 +1,4 @@
 import type { AppActiveView } from '@/constants/agentNav';
-import { isAppActiveView } from '@/constants/agentNav';
 
 /**
  * Hash-based routing for Otto UI agent views.

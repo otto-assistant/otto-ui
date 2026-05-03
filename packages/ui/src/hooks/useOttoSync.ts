@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { type ConnectionState, type SyncEvent, getOttoSyncClient } from '../lib/otto-sync';
+import { type ConnectionState, getOttoSyncClient } from '../lib/otto-sync';
 import { useTasksStore } from '../stores/useTasksStore';
 import { useDashboardStore } from '../stores/useDashboardStore';
 import { useMemoryStore } from '../stores/useMemoryStore';
@@ -21,7 +21,7 @@ export function useOttoSync() {
 
     // Task events → useTasksStore (refetch on any task event)
     unsubs.push(
-      client.on('task.*', (_event: SyncEvent) => {
+      client.on('task.*', () => {
         const store = useTasksStore.getState();
         store.fetchTasks();
       }),
@@ -29,7 +29,7 @@ export function useOttoSync() {
 
     // Agent events → useDashboardStore (refetch dashboard)
     unsubs.push(
-      client.on('agent.*', (_event: SyncEvent) => {
+      client.on('agent.*', () => {
         const store = useDashboardStore.getState();
         store.fetchDashboard();
       }),
@@ -37,7 +37,7 @@ export function useOttoSync() {
 
     // Memory events → useMemoryStore (refetch graph)
     unsubs.push(
-      client.on('memory.*', (_event: SyncEvent) => {
+      client.on('memory.*', () => {
         const store = useMemoryStore.getState();
         store.fetchGraph();
       }),
@@ -45,14 +45,14 @@ export function useOttoSync() {
 
     // Persona events
     unsubs.push(
-      client.on('persona.*', (_event: SyncEvent) => {
+      client.on('persona.*', () => {
         // Persona store refresh will be wired when needed
       }),
     );
 
     // Schedule events
     unsubs.push(
-      client.on('schedule.*', (_event: SyncEvent) => {
+      client.on('schedule.*', () => {
         // Schedule store refresh will be wired when needed
       }),
     );

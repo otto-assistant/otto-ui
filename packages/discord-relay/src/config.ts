@@ -185,13 +185,6 @@ const mergeRelaySliceIntoState = (
 };
 
 export function loadDiscordRelayConfig(): LoadedRelayConfig {
-  let sessionIdJson: string | undefined;
-  let channelIdsJson: Set<string> | undefined;
-  let userIdsJson: Set<string> | undefined;
-  let workspaceDirectoryJson: string | undefined;
-  let baseUrlJson: string | undefined;
-  let authorizationJson: string | undefined;
-
   let mergedJson: JsonMergeSnapshot = {};
 
   for (const filePath of relayJsonCandidates()) {
@@ -204,12 +197,12 @@ export function loadDiscordRelayConfig(): LoadedRelayConfig {
     mergedJson = mergeRelaySliceIntoState(slice, mergedJson);
   }
 
-  sessionIdJson = mergedJson.sessionId;
-  channelIdsJson = mergedJson.channelIds;
-  userIdsJson = mergedJson.userIds;
-  workspaceDirectoryJson = mergedJson.workspaceDirectory;
-  baseUrlJson = mergedJson.openchamberBaseUrl;
-  authorizationJson = mergedJson.authorization;
+  const sessionIdJson = mergedJson.sessionId;
+  const channelIdsJson = mergedJson.channelIds;
+  const userIdsJson = mergedJson.userIds;
+  const workspaceDirectoryJson = mergedJson.workspaceDirectory;
+  const baseUrlJson = mergedJson.openchamberBaseUrl;
+  const authorizationJson = mergedJson.authorization;
 
   const discordBotToken = trimEnv('DISCORD_BOT_TOKEN');
   const sessionEnv = trimEnv('DISCORD_RELAY_SESSION_ID');

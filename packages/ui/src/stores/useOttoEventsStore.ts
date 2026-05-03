@@ -20,6 +20,7 @@ const notifyRealtimeListeners = (event: OttoUiRealtimeEvent) => {
     try {
       listener(event);
     } catch {
+      void 0;
     }
   }
 };

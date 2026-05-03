@@ -83,7 +83,7 @@ interface MemoryState {
   deleteRelation: (id: string) => void;
 }
 
-export const useMemoryStore = create<MemoryState>((set, get) => ({
+export const useMemoryStore = create<MemoryState>((set) => ({
   activeTab: "graph",
   entities: MOCK_ENTITIES,
   relations: MOCK_RELATIONS,

@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { useMemoryStore, type Entity } from "../../../stores/useMemoryStore";
+import { useMemoryStore } from "../../../stores/useMemoryStore";
 
 const TYPE_COLORS: Record<string, string> = {
   agent: "hsl(var(--chart-1))",
