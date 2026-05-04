@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -27,7 +27,13 @@ jobs:
         run: bun run build
 
       - name: Type check
-        run: bun run type-check
+        run: bun run type-check:ci
 
       - name: Lint
         run: bun run lint
+
+      - name: Install Playwright (Chromium)
+        run: bun run playwright:install
+
+      - name: Playwright smoke
+        run: bun run playwright:smoke
