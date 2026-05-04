@@ -36,7 +36,11 @@ const nodeVersionOk = (bin) => {
   const v = spawnSync(bin, ['-p', 'process.versions.node'], { encoding: 'utf-8' });
   if (v.status !== 0 || typeof v.stdout !== 'string') return false;
   const major = Number.parseInt(v.stdout.trim().split('.')[0] ?? '', 10);
-  return Number.isFinite(major) && major >= 22;
+  if (!Number.isFinite(major) || major < 22) return false;
+  // `bun run` may put a `node` shim on PATH that is Bun; `node --check` then loads
+  // `electron` and fails. Require a real Node.js binary.
+  const notBun = spawnSync(bin, ['-e', 'process.exit(process.versions.bun ? 1 : 0)']);
+  return notBun.status === 0;
 };
 
 const resolveNodeForBundledCheck = () => {
