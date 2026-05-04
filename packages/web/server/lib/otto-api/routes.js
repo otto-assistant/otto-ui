@@ -4,7 +4,7 @@ import path from 'path';
 import { AGENT_DIR, readConfigLayers } from '../opencode/shared.js';
 import { parseOttoJsonObject, readOttoCliVersion, runOttoCli, stripOttoLogLines } from './otto-cli.js';
 import { getAllTasks, getTaskById, createTask, updateTask, deleteTask } from './task-store.js';
-import { receiveExternalTask, handleDiscordTaskUpdate } from './task-sync-bridge.js';
+import { receiveExternalTask, handleDiscordTaskUpdate, notifyDiscordRelay } from './task-sync-bridge.js';
 
 const memoryDiary = [];
 const memoryEntities = new Map();
@@ -343,6 +343,8 @@ export const registerOttoApiRoutes = (app, dependencies) => {
       source: body.source || 'web',
     });
 
+    notifyDiscordRelay(task.id, 'task.create');
+
     return res.status(201).json({ ok: true, task });
   };
 
@@ -361,6 +363,8 @@ export const registerOttoApiRoutes = (app, dependencies) => {
     if (!updated) {
       return res.status(404).json({ error: `Task "${taskId}" not found` });
     }
+
+    notifyDiscordRelay(updated.id, updated.status === 'done' ? 'task.complete' : 'task.update');
 
     return res.json({ ok: true, task: updated });
   };
