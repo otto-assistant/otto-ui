@@ -39,7 +39,9 @@ const FilesView = lazyWithChunkRecovery(() => import('@/components/views/FilesVi
 const SettingsView = lazyWithChunkRecovery(() => import('@/components/views/SettingsView').then(m => ({ default: m.SettingsView })));
 const SettingsWindow = lazyWithChunkRecovery(() => import('@/components/views/SettingsWindow').then(m => ({ default: m.SettingsWindow })));
 const MultiRunWindow = lazyWithChunkRecovery(() => import('@/components/views/MultiRunWindow').then(m => ({ default: m.MultiRunWindow })));
-const DashboardView = lazyWithChunkRecovery(() => import('@/components/views/DashboardView').then(m => ({ default: m.DashboardView })));
+const DashboardView = lazyWithChunkRecovery(() =>
+  import('@/components/views/dashboard/DashboardView').then((m) => ({ default: m.DashboardView })),
+);
 const ProjectsView = lazyWithChunkRecovery(() => import('@/components/views/ProjectsView').then(m => ({ default: m.ProjectsView })));
 const PersonaView = lazyWithChunkRecovery(() => import('@/components/views/PersonaView').then(m => ({ default: m.PersonaView })));
 const MemoryView = lazyWithChunkRecovery(() => import('@/components/views/MemoryView').then(m => ({ default: m.MemoryView })));

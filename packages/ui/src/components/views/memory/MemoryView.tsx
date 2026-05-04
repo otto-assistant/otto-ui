@@ -18,7 +18,9 @@ export const MemoryView: React.FC = () => {
   return (
     <div className="flex h-full flex-col gap-4 overflow-hidden bg-background p-6">
       <div className="flex items-center gap-4">
-        <h1 className="text-lg font-semibold text-foreground">Memory</h1>
+        <h1 className="text-lg font-semibold text-foreground" data-testid="view-memory-heading">
+          Memory
+        </h1>
         <div className="flex gap-1 rounded-lg border border-border bg-muted p-0.5">
           {TABS.map((tab) => (
             <button
