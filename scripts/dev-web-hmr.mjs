@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -61,6 +62,21 @@ function signalChild(child, signal) {
   }
 }
 
+function listLanIpv4Addresses() {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const entry of nets[name] ?? []) {
+      const fam = typeof entry.family === 'string' ? entry.family : `IPv${entry.family}`;
+      const isIpv4 = fam === 'IPv4' || entry.family === 4;
+      if (entry && isIpv4 && entry.internal !== true && entry.address) {
+        ips.push(entry.address);
+      }
+    }
+  }
+  return ips;
+}
+
 async function stopChildTree(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) {
     return;
@@ -80,8 +96,14 @@ async function stopChildTree(child) {
   }
 }
 
-const uiPort = process.env.OPENCHAMBER_HMR_UI_PORT || '5180';
-const backendPort = process.env.OPENCHAMBER_HMR_API_PORT || '3902';
+const uiPort =
+  process.env.OPENCHAMBER_HMR_UI_PORT || process.env.OPENCHAMBER_UI_PORT || '5173';
+const backendPort =
+  process.env.OPENCHAMBER_HMR_API_PORT || process.env.OPENCHAMBER_PORT || '3001';
+const listenHost =
+  typeof process.env.OPENCHAMBER_HOST === 'string' && process.env.OPENCHAMBER_HOST.trim().length > 0
+    ? process.env.OPENCHAMBER_HOST.trim()
+    : '0.0.0.0';
 
 function clearViteCache() {
   const cacheDirs = [
@@ -99,21 +121,31 @@ clearViteCache();
 
 const api = run('api', 'bun', ['run', '--cwd', 'packages/web', 'dev:server:watch'], {
   OPENCHAMBER_PORT: backendPort,
+  OPENCHAMBER_HOST: listenHost,
 });
 const vite = run(
   'vite',
   'bun',
-  ['x', 'vite', '--force', '--host', '127.0.0.1', '--port', uiPort, '--strictPort'],
+  ['x', 'vite', '--force', '--host', listenHost, '--port', uiPort, '--strictPort'],
   {
     OPENCHAMBER_PORT: backendPort,
+    OPENCHAMBER_HOST: listenHost,
     OPENCHAMBER_DISABLE_PWA_DEV: '1',
   },
   { cwd: webRoot },
 );
 
-console.log(`[dev:web:hmr] UI with HMR: http://127.0.0.1:${uiPort}`);
-console.log(`[dev:web:hmr] API: http://127.0.0.1:${backendPort}`);
-console.log('[dev:web:hmr] IMPORTANT: open UI URL above for HMR; backend URL has no HMR');
+const loopbackUi = `http://127.0.0.1:${uiPort}`;
+console.log(`[dev:web:hmr] UI listening on ${listenHost}:${uiPort} (same machine: ${loopbackUi})`);
+
+if (listenHost === '0.0.0.0' || listenHost === '::') {
+  for (const ip of listLanIpv4Addresses()) {
+    console.log(`[dev:web:hmr] LAN UI hint: http://${ip}:${uiPort}`);
+  }
+}
+
+console.log(`[dev:web:hmr] API listening on ${listenHost}:${backendPort}`);
+console.log('[dev:web:hmr] IMPORTANT: browse the UI port for HMR; /api is proxied from the UI dev server from any host');
 
 let shuttingDown = false;
 
