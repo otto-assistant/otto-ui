@@ -12,6 +12,10 @@ const pwaDevEnabled = process.env.OPENCHAMBER_DISABLE_PWA_DEV !== '1';
 const reactScanToggle = (process.env.VITE_ENABLE_REACT_SCAN ?? '').toLowerCase();
 const enableReactScan = reactScanToggle === '1' || reactScanToggle === 'true' || reactScanToggle === 'on' || reactScanToggle === 'yes';
 
+const PLAYWRIGHT_STUB_PORT = Number.parseInt(process.env.PLAYWRIGHT_STUB_API_PORT ?? '0', 10) || undefined;
+const backendPort = process.env.OPENCHAMBER_PORT || '3001';
+const proxyBackendTarget = `http://127.0.0.1:${PLAYWRIGHT_STUB_PORT ?? backendPort}`;
+
 export default defineConfig({
   root: path.resolve(__dirname, '.'),
   plugins: [
@@ -82,15 +86,15 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/auth': {
-        target: `http://127.0.0.1:${process.env.OPENCHAMBER_PORT || 3001}`,
+        target: proxyBackendTarget,
         changeOrigin: true,
       },
       '/health': {
-        target: `http://127.0.0.1:${process.env.OPENCHAMBER_PORT || 3001}`,
+        target: proxyBackendTarget,
         changeOrigin: true,
       },
       '/api': {
-        target: `http://127.0.0.1:${process.env.OPENCHAMBER_PORT || 3001}`,
+        target: proxyBackendTarget,
         changeOrigin: true,
         ws: true,
       },

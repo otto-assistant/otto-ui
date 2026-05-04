@@ -38,6 +38,7 @@ build/
 # Built webview assets (generated during build)
 src/main/resources/webview/
 
+
 # IDE
 *.iml
 *.ipr
@@ -52,6 +53,12 @@ packages/intellij/
 
 # OS
 Thumbs.db
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
 
 # Local runtime state (docker/dev)
 data/

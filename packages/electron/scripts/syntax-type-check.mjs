@@ -1,10 +1,14 @@
 /**
  * Validates Electron main/preload entrypoints without executing them.
  *
- * Plain `node --check` still parses `import … from 'electron'`. On Linux the
- * `electron` package resolves to the CLI path string, not the API surface, so
- * parsing fails with "Export named 'BrowserWindow' not found". macOS/Windows
- * installs expose a loadable module for tooling.
+ * Plain `node --check` on the TypeScript-free sources still parses
+ * `import … from 'electron'`. On Linux the `electron` package resolves to the
+ * CLI path, so Node fails with "Export named 'BrowserWindow' not found".
+ *
+ * Linux: run `bun ./scripts/bundle-main.mjs` + `bun ./scripts/bundle-preload.mjs`,
+ * then `node --check` on `dist-bundle/*.mjs` (electron stays external).
+ *
+ * Other platforms: `node --check` on the repo sources (fast).
  *
  * Set SKIP_ELECTRON_TYPECHECK=1 to skip entirely.
  */
@@ -28,17 +32,30 @@ for (const rel of ['main.mjs', 'preload.mjs']) {
   }
 }
 
-if (process.platform === 'linux') {
-  console.warn(
-    '[electron] syntax type-check skipped on Linux: Node cannot parse static `electron` imports (electron resolves to the binary path). ' +
-      'Use macOS/Windows with Node for full syntax check, or SKIP_ELECTRON_TYPECHECK=1.',
-  );
-  process.exit(0);
-}
+const nodeVersionOk = (bin) => {
+  const v = spawnSync(bin, ['-p', 'process.versions.node'], { encoding: 'utf-8' });
+  if (v.status !== 0 || typeof v.stdout !== 'string') return false;
+  const major = Number.parseInt(v.stdout.trim().split('.')[0] ?? '', 10);
+  return Number.isFinite(major) && major >= 22;
+};
 
-const nodeBin = process.env.NODE_BINARY || 'node';
-for (const rel of ['main.mjs', 'preload.mjs']) {
-  const file = path.join(root, rel);
+const resolveNodeForBundledCheck = () => {
+  const fromEnv = process.env.NODE_BINARY;
+  if (fromEnv && nodeVersionOk(fromEnv)) {
+    return fromEnv;
+  }
+  const candidates = ['node', '/usr/local/bin/node', '/opt/hostedtoolcache/node/22/x64/bin/node'];
+  for (const bin of candidates) {
+    if (nodeVersionOk(bin)) {
+      return bin;
+    }
+  }
+  return null;
+};
+
+let nodeBin = process.env.NODE_BINARY || 'node';
+
+const runNodeCheck = (file) => {
   const result = spawnSync(nodeBin, ['--check', file], { stdio: 'inherit', env: process.env });
   if (result.error?.code === 'ENOENT') {
     console.error(`[electron] type-check: '${nodeBin}' not found (set NODE_BINARY or install Node)`);
@@ -47,4 +64,44 @@ for (const rel of ['main.mjs', 'preload.mjs']) {
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
+};
+
+if (process.platform === 'linux') {
+  const resolvedNode = resolveNodeForBundledCheck();
+  if (!resolvedNode) {
+    console.error(
+      '[electron] type-check: need Node.js 22+ on PATH for `node --check` of dist-bundle (Bun --check still resolves `electron`). ' +
+        'Install Node 22+ in CI or set NODE_BINARY.',
+    );
+    process.exit(1);
+  }
+  nodeBin = resolvedNode;
+
+  const bunBin = process.env.BUN_BINARY || 'bun';
+  const runBun = (scriptName) => {
+    const script = path.join(root, 'scripts', scriptName);
+    const r = spawnSync(bunBin, [script], { stdio: 'inherit', cwd: root, env: process.env });
+    if (r.error?.code === 'ENOENT') {
+      console.error(`[electron] type-check: failed to spawn '${bunBin}'`);
+      process.exit(1);
+    }
+    if (r.status !== 0) {
+      process.exit(r.status ?? 1);
+    }
+  };
+  runBun('bundle-main.mjs');
+  runBun('bundle-preload.mjs');
+  for (const rel of ['main.mjs', 'preload.mjs']) {
+    const file = path.join(root, 'dist-bundle', rel);
+    if (!fs.existsSync(file)) {
+      console.error(`[electron] type-check: missing bundled ${rel} (run bundle:main / bundle:preload)`);
+      process.exit(1);
+    }
+    runNodeCheck(file);
+  }
+  process.exit(0);
+}
+
+for (const rel of ['main.mjs', 'preload.mjs']) {
+  runNodeCheck(path.join(root, rel));
 }

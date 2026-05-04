@@ -30,6 +30,7 @@
     "build:desktop": "bun run --cwd packages/desktop build",
     "build:electron": "bun run --cwd packages/electron build",
     "type-check": "bun run --filter '*' type-check",
+    "type-check:ci": "bun run type-check",
     "type-check:web": "bun run --cwd packages/web type-check",
     "type-check:ui": "bun run --cwd packages/ui type-check",
     "type-check:desktop": "bun run --cwd packages/desktop type-check",
@@ -66,7 +67,9 @@
     "release:prepare": "bun run build && bun run type-check && bun run lint",
     "release:test": "./scripts/test-release-build.sh",
     "release:test:intel": "./scripts/test-release-build.sh x86_64",
-    "release:test:arm": "./scripts/test-release-build.sh aarch64"
+    "release:test:arm": "./scripts/test-release-build.sh aarch64",
+    "playwright:install": "bunx playwright install --with-deps chromium",
+    "playwright:smoke": "cross-env PLAYWRIGHT_SMOKE=1 bunx playwright test"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.0",
@@ -158,6 +161,7 @@
     "tw-animate-css": "^1.3.8",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.39.1",
-    "vite": "^7.1.2"
+    "vite": "^7.1.2",
+    "@playwright/test": "^1.56.1"
   }
 }

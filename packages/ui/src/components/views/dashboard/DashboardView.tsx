@@ -48,7 +48,10 @@ export const DashboardView: React.FC = () => {
       <div className="mx-auto w-full max-w-6xl px-4 py-6 md:px-8">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-1">
-            <div className="flex items-center gap-2 typography-ui-header font-semibold text-foreground">
+            <div
+              className="flex items-center gap-2 typography-ui-header font-semibold text-foreground"
+              data-testid="view-dashboard-heading"
+            >
               <RiDashboardLine size={22} aria-hidden />
               Dashboard
             </div>

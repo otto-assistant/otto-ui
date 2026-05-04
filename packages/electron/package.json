@@ -27,6 +27,7 @@
     "build:web-assets": "node ./scripts/build-web-assets.mjs",
     "build": "bun -e \"process.exit(0)\"",
     "bundle:main": "bun ./scripts/bundle-main.mjs",
+    "bundle:preload": "bun ./scripts/bundle-preload.mjs",
     "rebuild:native": "node ./scripts/rebuild-native.mjs",
     "package": "bun run build:web-assets && bun run bundle:main && bun run rebuild:native && electron-builder",
     "finalize:latest-yml": "node ./scripts/finalize-latest-yml.mjs",
