@@ -28,7 +28,7 @@ import { isDesktopShell } from '@/lib/desktop';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { useRoute } from '@/hooks/useHashRoute';
 
-import { ChatView } from '@/components/views';
+import { ChatView } from '@/components/views/ChatView';
 
 // Heavy views loaded on-demand to reduce initial bundle parse time.
 const PlanView = lazyWithChunkRecovery(() => import('@/components/views/PlanView').then(m => ({ default: m.PlanView })));

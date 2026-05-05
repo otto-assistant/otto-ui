@@ -1,16 +1,2 @@
+/** Entry-level views only — avoid barrel re-exports that force heavy modules into `main`. */
 export { ChatView } from './ChatView';
-export { DashboardView } from './dashboard/DashboardView';
-export { ProjectsView } from './ProjectsView';
-export { PersonaView } from './PersonaView';
-export { MemoryView } from './MemoryView';
-export { TasksView } from './TasksView';
-export { ScheduleView } from './ScheduleView';
-export { SettingsLandingView } from './SettingsLandingView';
-export { PlanView } from './PlanView';
-export { GitView } from './GitView';
-export { DiffView, useDiffFileCount } from './DiffView';
-export { TerminalView } from './TerminalView';
-export { FilesView } from './FilesView';
-export { SettingsView } from './SettingsView';
-export { SettingsWindow } from './SettingsWindow';
-export { MultiRunWindow } from './MultiRunWindow';
