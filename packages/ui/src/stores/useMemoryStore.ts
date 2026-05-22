@@ -170,10 +170,17 @@ export const useMemoryStore = create<MemoryState>((set) => ({
 
   addRelation: (relation) => {
     const id = `r${Date.now()}`;
-    set((s) => ({ relations: [...s.relations, { ...relation, id }] }));
+    const newRelation = { ...relation, id };
+    set((s) => ({ relations: [...s.relations, newRelation] }));
+    ottoFetch("/api/otto/memory/relations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newRelation),
+    }).catch(() => { /* persisted locally */ });
   },
 
   deleteRelation: (id) => {
     set((s) => ({ relations: s.relations.filter((r) => r.id !== id) }));
+    ottoFetch(`/api/otto/memory/relations/${id}`, { method: "DELETE" }).catch(() => { /* removed locally */ });
   },
 }));

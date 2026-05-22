@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import type { ScheduleEvent } from "@/stores/useScheduleStore";
 import { CronHumanizer } from "./CronHumanizer";
 
@@ -16,6 +16,8 @@ interface ScheduleEventCardProps {
 }
 
 export const ScheduleEventCard: React.FC<ScheduleEventCardProps> = ({ event, compact, onDelete }) => {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   if (compact) {
     return (
       <div className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs bg-muted/50 hover:bg-muted transition-colors">
@@ -25,12 +27,20 @@ export const ScheduleEventCard: React.FC<ScheduleEventCardProps> = ({ event, com
     );
   }
 
+  const handleDelete = () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      setTimeout(() => setConfirmDelete(false), 3000);
+      return;
+    }
+    onDelete?.(event.id);
+  };
+
   return (
     <div className="group flex flex-col gap-1 rounded-lg border border-border bg-card p-3 hover:bg-muted/30 transition-colors">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className={`h-2 w-2 rounded-full shrink-0 ${statusColors[event.status]}`} />
-          {/* Type icon */}
           <span className="text-muted-foreground" title={event.type}>
             {event.type === "recurring" ? "🔄" : "⏱"}
           </span>
@@ -38,10 +48,10 @@ export const ScheduleEventCard: React.FC<ScheduleEventCardProps> = ({ event, com
         </div>
         {onDelete && (
           <button
-            onClick={() => onDelete(event.id)}
-            className="opacity-0 group-hover:opacity-100 text-xs text-muted-foreground hover:text-destructive transition-opacity"
+            onClick={handleDelete}
+            className={`text-xs transition-opacity ${confirmDelete ? 'opacity-100 text-destructive font-medium' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive'}`}
           >
-            ✕
+            {confirmDelete ? 'Confirm?' : '✕'}
           </button>
         )}
       </div>

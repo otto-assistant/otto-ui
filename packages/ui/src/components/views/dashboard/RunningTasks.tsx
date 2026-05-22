@@ -1,24 +1,35 @@
 import React from "react";
 
 import type { DashboardRunningTask } from "@/stores/useDashboardStore";
+import { useUIStore } from "@/stores/useUIStore";
 
 export interface RunningTasksProps {
   tasks: DashboardRunningTask[];
 }
 
 export const RunningTasks: React.FC<RunningTasksProps> = ({ tasks }) => {
+  const setActiveView = useUIStore((s) => s.setActiveView);
+
   if (tasks.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-[var(--surface-elevated)] p-4 typography-ui text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => setActiveView('tasks')}
+        className="w-full rounded-lg border border-border bg-[var(--surface-elevated)] p-4 typography-ui text-muted-foreground text-left transition-colors hover:border-primary/30"
+      >
         No running tasks
-      </div>
+      </button>
     );
   }
 
   return (
     <div className="space-y-2">
       <div className="typography-ui font-semibold text-foreground">Running tasks</div>
-      <div className="space-y-3 rounded-lg border border-border bg-[var(--surface-elevated)] p-4">
+      <button
+        type="button"
+        onClick={() => setActiveView('tasks')}
+        className="w-full space-y-3 rounded-lg border border-border bg-[var(--surface-elevated)] p-4 text-left transition-colors hover:border-primary/30"
+      >
         {tasks.map((task) => (
           <div key={task.id} className="space-y-2">
             <div className="flex items-start justify-between gap-3">
@@ -34,7 +45,7 @@ export const RunningTasks: React.FC<RunningTasksProps> = ({ tasks }) => {
             </div>
           </div>
         ))}
-      </div>
+      </button>
     </div>
   );
 };

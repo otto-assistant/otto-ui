@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
 import { useTasksStore, type TaskPriority, type TaskOwnerType } from '@/stores/useTasksStore';
+import { useUIStore } from '@/stores/useUIStore';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 
 export const TaskCreateDialog: React.FC = () => {
   const open = useTasksStore((s) => s.createDialogOpen);
   const setOpen = useTasksStore((s) => s.setCreateDialogOpen);
   const createTask = useTasksStore((s) => s.createTask);
+  const setActiveView = useUIStore((s) => s.setActiveView);
+  const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -18,14 +22,21 @@ export const TaskCreateDialog: React.FC = () => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+    const taskTitle = title.trim();
     createTask({
-      title: title.trim(),
+      title: taskTitle,
       description,
       priority,
       ownerType,
       ownerName,
       dueDate: dueDate ? new Date(dueDate).toISOString() : null,
     });
+
+    if (ownerType === 'agent') {
+      setActiveView('chat');
+      openNewSessionDraft({ title: `Task: ${taskTitle}` });
+    }
+
     setTitle('');
     setDescription('');
     setPriority('medium');
@@ -88,6 +99,11 @@ export const TaskCreateDialog: React.FC = () => {
             <option value="agent">Assign to: Agent</option>
             <option value="cron">Assign to: Scheduled</option>
           </select>
+          {ownerType === 'agent' && (
+            <p className="text-xs text-muted-foreground">
+              A new chat session will be opened for the agent to work on this task.
+            </p>
+          )}
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
@@ -99,7 +115,7 @@ export const TaskCreateDialog: React.FC = () => {
             disabled={!title.trim()}
             className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
           >
-            Create
+            {ownerType === 'agent' ? 'Create & Start Session' : 'Create'}
           </button>
         </div>
       </form>

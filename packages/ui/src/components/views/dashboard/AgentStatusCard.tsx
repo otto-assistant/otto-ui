@@ -1,6 +1,7 @@
 import React from "react";
 import { cn } from "@/lib/utils";
 import type { AgentRunStatus, DashboardAgentCard } from "@/stores/useDashboardStore";
+import { useUIStore } from "@/stores/useUIStore";
 
 const statusPresentation: Record<
   AgentRunStatus,
@@ -43,9 +44,14 @@ export interface AgentStatusCardProps {
 
 export const AgentStatusCard: React.FC<AgentStatusCardProps> = ({ agent }) => {
   const preset = statusPresentation[agent.status];
+  const setActiveView = useUIStore((s) => s.setActiveView);
 
   return (
-    <div className={cn("rounded-lg border border-border bg-[var(--surface-elevated)] p-4")}>
+    <button
+      type="button"
+      onClick={() => setActiveView('persona')}
+      className={cn("w-full rounded-lg border border-border bg-[var(--surface-elevated)] p-4 text-left transition-colors hover:border-primary/30")}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <div className="truncate typography-ui font-semibold text-foreground">{agent.name}</div>
@@ -73,6 +79,6 @@ export const AgentStatusCard: React.FC<AgentStatusCardProps> = ({ agent }) => {
           <span className="opacity-80">:</span> {formatUptime(agent.uptimeMs)}
         </span>
       </div>
-    </div>
+    </button>
   );
 };

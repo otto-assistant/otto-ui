@@ -1,5 +1,7 @@
 import React from 'react';
 import { useTasksStore, type TaskStatus } from '@/stores/useTasksStore';
+import { useUIStore } from '@/stores/useUIStore';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 
 const STATUS_OPTIONS: TaskStatus[] = ['pending', 'in_progress', 'done', 'cancelled'];
 
@@ -10,10 +12,19 @@ export const TaskDetailDrawer: React.FC = () => {
   const tasks = useTasksStore((s) => s.tasks);
   const updateTask = useTasksStore((s) => s.updateTask);
   const deleteTask = useTasksStore((s) => s.deleteTask);
+  const setActiveView = useUIStore((s) => s.setActiveView);
+  const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
 
   const task = tasks.find((t) => t.id === selectedId);
 
   if (!open || !task) return null;
+
+  const handleStartSession = () => {
+    setOpen(false);
+    updateTask(task.id, { status: 'in_progress' });
+    setActiveView('chat');
+    openNewSessionDraft({ title: `Task: ${task.title}` });
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setOpen(false)}>
@@ -73,6 +84,14 @@ export const TaskDetailDrawer: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
+          {task.status !== 'done' && task.status !== 'cancelled' && (
+            <button
+              onClick={handleStartSession}
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              Start Agent Session
+            </button>
+          )}
           <button
             onClick={() => deleteTask(task.id)}
             className="rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10"
