@@ -306,15 +306,25 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
         .map((e) => normalizeAgent(e))
         .filter((a): a is DashboardAgentCard => Boolean(a));
 
-      set({
-        status: normalizeStatus(statusObj),
-        agents: agentsFromApi,
-        activity,
-        stats,
-        runningTasks,
-        recentSessions,
-        isLoading: false,
-      });
+      const hasData = agentsFromApi.length > 0 || activity.length > 0 || runningTasks.length > 0 || recentSessions.length > 0;
+      if (hasData) {
+        set({
+          status: normalizeStatus(statusObj),
+          agents: agentsFromApi,
+          activity,
+          stats,
+          runningTasks,
+          recentSessions,
+          isLoading: false,
+        });
+      } else {
+        const mock = buildMockState();
+        set({
+          ...mock,
+          status: normalizeStatus(statusObj) ?? mock.status,
+          isLoading: false,
+        });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load dashboard';
       set({ ...buildMockState(), isLoading: false, error: msg });

@@ -10,7 +10,7 @@ const sliders = [
 export const BehaviorSliders: React.FC = () => {
   const { config, updateBehavior } = usePersonaStore();
 
-  if (!config) return null;
+  if (!config?.behavior) return null;
 
   return (
     <div className="flex flex-col gap-4">

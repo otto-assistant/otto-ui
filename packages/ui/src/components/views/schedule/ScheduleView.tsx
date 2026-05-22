@@ -6,8 +6,9 @@ import { ScheduleEventCard } from "./ScheduleEventCard";
 import { CreateScheduleDialog } from "./CreateScheduleDialog";
 
 export const ScheduleView: React.FC = () => {
-  const { events, viewMode, currentDate, setViewMode, setCurrentDate, createEvent, deleteEvent, fetchSchedule } =
-    useScheduleStore();
+  const store = useScheduleStore();
+  const { viewMode, currentDate, setViewMode, setCurrentDate, createEvent, deleteEvent, fetchSchedule } = store;
+  const events = Array.isArray(store.events) ? store.events : [];
   const [dialogOpen, setDialogOpen] = useState(false);
 
   useEffect(() => {

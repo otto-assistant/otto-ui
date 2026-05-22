@@ -607,7 +607,7 @@ export const MainLayout: React.FC = () => {
                         <main className="w-full h-full overflow-hidden bg-background relative" data-page-scroll-lock="true">
                             {activeView !== 'chat' ? (
                                 <div className="absolute inset-0 overflow-hidden">
-                                    <ErrorBoundary>{agentShellView}</ErrorBoundary>
+                                    <ErrorBoundary key={activeView}>{agentShellView}</ErrorBoundary>
                                 </div>
                             ) : (
                                 <>
@@ -748,7 +748,7 @@ export const MainLayout: React.FC = () => {
                                         <main className="flex-1 overflow-hidden bg-background relative" data-page-scroll-lock="true">
                                             {activeView !== 'chat' ? (
                                                 <div className="absolute inset-0 overflow-hidden">
-                                                    <ErrorBoundary>{agentShellView}</ErrorBoundary>
+                                                    <ErrorBoundary key={activeView}>{agentShellView}</ErrorBoundary>
                                                 </div>
                                             ) : (
                                                 <>

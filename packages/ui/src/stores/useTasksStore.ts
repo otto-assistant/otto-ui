@@ -181,8 +181,8 @@ export const useTasksStore = create<TasksStore>()(
           } else if (res.status >= 500) {
             set({ error: `Server error (${res.status})` });
           }
-        } catch (err) {
-          set({ error: err instanceof Error ? err.message : 'Failed to load tasks' });
+        } catch {
+          // keep existing tasks (mock or previously loaded) on network failure
         } finally {
           set({ isLoading: false });
         }

@@ -87,7 +87,8 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
       const res = await ottoFetch("/api/otto/schedule");
       if (res.ok) {
         const data = await res.json();
-        set({ events: data.events ?? data });
+        const arr = Array.isArray(data.events) ? data.events : Array.isArray(data) ? data : [];
+        set({ events: arr });
       }
     } catch {
       // Use mock data on failure

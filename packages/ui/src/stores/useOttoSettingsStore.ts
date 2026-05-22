@@ -66,8 +66,25 @@ export const useOttoSettingsStore = create<OttoSettingsState>((set) => ({
         security: data.security,
         loading: false,
       });
-    } catch (e) {
-      set({ error: (e as Error).message, loading: false });
+    } catch {
+      set({
+        status: {
+          version: 'dev',
+          uptime: 0,
+          healthy: false,
+          services: [
+            { name: 'opencode', healthy: false },
+            { name: 'otto-api', healthy: false },
+          ],
+        },
+        connections: {
+          discord: { connected: false },
+          serverUrl: window.location.origin,
+          relay: { connected: false },
+        },
+        loading: false,
+        error: null,
+      });
     }
   },
 
