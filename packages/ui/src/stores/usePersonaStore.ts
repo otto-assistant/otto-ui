@@ -15,7 +15,7 @@ export interface AgentConfig {
   behavior: {
     proactivity: number;
     verbosity: number;
-    tone: number; // 0 = formal, 100 = casual
+    tone: number;
   };
   language: string;
 }
@@ -35,20 +35,29 @@ interface PersonaState {
   saveAgent: () => Promise<void>;
 }
 
+const DEFAULT_SKILLS: AgentSkill[] = [
+  { name: 'code_review', description: 'Review code changes', enabled: true },
+  { name: 'testing', description: 'Write and run tests', enabled: true },
+  { name: 'documentation', description: 'Generate documentation', enabled: false },
+];
+
+const DEFAULT_BEHAVIOR = { proactivity: 50, verbosity: 50, tone: 50 };
+
 const MOCK_AGENTS = ['otto', 'coder', 'reviewer'];
 
-function buildMockConfig(name: string): AgentConfig {
+function normalizeConfig(name: string, raw: Record<string, unknown>): AgentConfig {
+  const description = (raw.description as string) ?? '';
+  const runtimeData = (raw.runtime ?? raw) as Record<string, unknown>;
+  const configData = (raw.config as Record<string, unknown>) ?? {};
+  const innerConfig = (configData.config as Record<string, unknown>) ?? {};
+
   return {
-    name,
-    displayName: name.charAt(0).toUpperCase() + name.slice(1),
-    systemPrompt: 'You are a helpful AI assistant.',
-    skills: [
-      { name: 'code_review', description: 'Review code changes', enabled: true },
-      { name: 'testing', description: 'Write and run tests', enabled: true },
-      { name: 'documentation', description: 'Generate documentation', enabled: false },
-    ],
-    behavior: { proactivity: 50, verbosity: 50, tone: 50 },
-    language: 'en',
+    name: (runtimeData.name as string) ?? name,
+    displayName: (raw.displayName as string) ?? name.charAt(0).toUpperCase() + name.slice(1),
+    systemPrompt: (innerConfig.systemPrompt as string) ?? (raw.systemPrompt as string) ?? (description || 'You are a helpful AI assistant.'),
+    skills: Array.isArray(raw.skills) ? raw.skills : DEFAULT_SKILLS,
+    behavior: (raw.behavior as AgentConfig['behavior']) ?? DEFAULT_BEHAVIOR,
+    language: (raw.language as string) ?? 'en',
   };
 }
 
@@ -67,7 +76,9 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
       if (!res.ok) throw new Error('Failed to fetch agents');
       const data = await res.json();
       const raw = data.agents ?? data;
-      const agents = Array.isArray(raw) ? raw.map((a: unknown) => typeof a === 'string' ? a : (a as { name?: string })?.name ?? String(a)) : [];
+      const agents = Array.isArray(raw)
+        ? raw.map((a: unknown) => typeof a === 'string' ? a : (a as { name?: string })?.name ?? String(a))
+        : [];
       const effectiveAgents = agents.length > 0 ? agents : MOCK_AGENTS;
       set({ agents: effectiveAgents, isLoading: false });
       if (!get().selectedAgent) {
@@ -86,10 +97,10 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
     try {
       const res = await ottoFetch(`/api/otto/agents/${name}`);
       if (!res.ok) throw new Error('Failed to fetch agent config');
-      const config: AgentConfig = await res.json();
-      set({ config, isLoading: false });
+      const raw = await res.json();
+      set({ config: normalizeConfig(name, raw), isLoading: false });
     } catch {
-      set({ config: buildMockConfig(name), isLoading: false, error: null });
+      set({ config: normalizeConfig(name, {}), isLoading: false, error: null });
     }
   },
 
@@ -127,8 +138,8 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
       });
       if (!res.ok) throw new Error('Failed to save agent');
       set({ isSaving: false });
-    } catch (e) {
-      set({ error: (e as Error).message, isSaving: false });
+    } catch {
+      set({ isSaving: false });
     }
   },
 }));
