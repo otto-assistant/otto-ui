@@ -41,6 +41,7 @@ import { SessionGroupSection } from './sidebar/SessionGroupSection';
 import { SidebarHeader } from './sidebar/SidebarHeader';
 import { SidebarActivitySections } from './sidebar/SidebarActivitySections';
 import { SidebarFooter } from './sidebar/SidebarFooter';
+import { OttoAgentNav } from './sidebar/OttoAgentNav';
 import { SidebarProjectsList } from './sidebar/SidebarProjectsList';
 import { SessionNodeItem } from './sidebar/SessionNodeItem';
 import { useUpdateStore } from '@/stores/useUpdateStore';
@@ -1612,6 +1613,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           </Tooltip>
         </div>
       ) : null}
+
+      <OttoAgentNav mobileVariant={mobileVariant} />
 
       <SidebarHeader
         hideDirectoryControls={hideDirectoryControls}
