@@ -270,7 +270,7 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
   fetchDashboard: async () => {
     const STALE_MS = 30_000;
     const state = get();
-    if (state.status && state._lastFetchedAt && Date.now() - state._lastFetchedAt < STALE_MS) {
+    if (state._lastFetchedAt > 0 && Date.now() - state._lastFetchedAt < STALE_MS) {
       return;
     }
     set({ isLoading: true, error: null });
@@ -314,14 +314,16 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
         .filter((a): a is DashboardAgentCard => Boolean(a));
 
       const hasData = agentsFromApi.length > 0 || activity.length > 0 || runningTasks.length > 0 || recentSessions.length > 0;
+      const prevState = get();
       if (hasData) {
+        const hasRealStats = stats.messagesToday > 0 || stats.tasksCompleted > 0 || stats.activeSessions > 0 || stats.memoryFacts > 0;
         set({
           status: normalizeStatus(statusObj),
-          agents: agentsFromApi,
-          activity,
-          stats,
-          runningTasks,
-          recentSessions,
+          agents: agentsFromApi.length > 0 ? agentsFromApi : prevState.agents,
+          activity: activity.length > 0 ? activity : prevState.activity,
+          stats: hasRealStats ? stats : prevState.stats,
+          runningTasks: runningTasks.length > 0 ? runningTasks : prevState.runningTasks,
+          recentSessions: recentSessions.length > 0 ? recentSessions : prevState.recentSessions,
           isLoading: false,
           _lastFetchedAt: Date.now(),
         });
@@ -330,6 +332,7 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
         set({
           ...mock,
           status: normalizeStatus(statusObj) ?? mock.status,
+          stats: prevState.stats.messagesToday > 0 ? prevState.stats : mock.stats,
           isLoading: false,
           _lastFetchedAt: Date.now(),
         });

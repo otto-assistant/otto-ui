@@ -130,7 +130,9 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
       const res = await ottoFetch("/api/otto/memory/graph");
       if (res.ok) {
         const data = await res.json();
-        set({ entities: data.entities ?? MOCK_ENTITIES, relations: data.relations ?? MOCK_RELATIONS });
+        const entities = Array.isArray(data.entities) && data.entities.length > 0 ? data.entities : get().entities;
+        const relations = Array.isArray(data.relations) && data.relations.length > 0 ? data.relations : get().relations;
+        set({ entities, relations });
       }
     } catch {
       // Use mock data on failure
