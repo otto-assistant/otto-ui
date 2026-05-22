@@ -23,6 +23,11 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   source?: TaskSource;
+  projectId?: string | null;
+  projectPath?: string | null;
+  agentName?: string | null;
+  modelId?: string | null;
+  providerId?: string | null;
   history: { timestamp: string; action: string }[];
 }
 

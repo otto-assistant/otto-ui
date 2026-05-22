@@ -2,6 +2,8 @@ import React from 'react';
 import { useTasksStore, type TaskStatus } from '@/stores/useTasksStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useConfigStore } from '@/stores/useConfigStore';
 
 const STATUS_OPTIONS: TaskStatus[] = ['pending', 'in_progress', 'done', 'cancelled'];
 
@@ -14,20 +16,29 @@ export const TaskDetailDrawer: React.FC = () => {
   const deleteTask = useTasksStore((s) => s.deleteTask);
   const setActiveView = useUIStore((s) => s.setActiveView);
   const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
+  const projects = useProjectsStore((s) => s.projects);
 
   const task = tasks.find((t) => t.id === selectedId);
 
   if (!open || !task) return null;
 
+  const taskProject = task.projectId ? projects.find(p => p.id === task.projectId) : null;
+
   const handleStartSession = () => {
     setOpen(false);
     updateTask(task.id, { status: 'in_progress' });
+
+    if (task.agentName) {
+      useConfigStore.getState().setAgent(task.agentName);
+    }
+
     setActiveView('chat');
     openNewSessionDraft({
       title: `Task: ${task.title}`,
       initialPrompt: `Work on task: ${task.title}`,
+      directoryOverride: task.projectPath ?? taskProject?.path ?? undefined,
       syntheticParts: task.description
-        ? [{ text: `Task details:\n${task.description}\n\nPriority: ${task.priority}\nOwner: ${task.ownerName}`, synthetic: true }]
+        ? [{ text: `Task details:\n${task.description}\n\nPriority: ${task.priority}\nOwner: ${task.ownerName}${task.agentName ? `\nAgent: ${task.agentName}` : ''}${task.modelId ? `\nModel: ${task.modelId}` : ''}`, synthetic: true }]
         : undefined,
     });
   };
@@ -68,6 +79,24 @@ export const TaskDetailDrawer: React.FC = () => {
             <span className="text-muted-foreground">Owner</span>
             <span className="text-foreground">{task.ownerName}</span>
           </div>
+          {(taskProject || task.projectPath) && (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Project</span>
+              <span className="text-foreground">{taskProject?.label || task.projectPath?.split('/').pop()}</span>
+            </div>
+          )}
+          {task.agentName && (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Agent</span>
+              <span className="text-foreground">{task.agentName}</span>
+            </div>
+          )}
+          {task.modelId && (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Model</span>
+              <span className="text-foreground">{task.modelId}</span>
+            </div>
+          )}
           {task.dueDate && (
             <div className="flex justify-between">
               <span className="text-muted-foreground">Due</span>
