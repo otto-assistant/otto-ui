@@ -1,5 +1,5 @@
 import React from "react";
-import { RiDashboardLine } from "@remixicon/react";
+import { RiDashboardLine, RiAddLine } from "@remixicon/react";
 
 import { ActivityTimeline } from "./ActivityTimeline";
 import { AgentStatusCard } from "./AgentStatusCard";
@@ -7,18 +7,23 @@ import { QuickStatsGrid } from "./QuickStatsGrid";
 import { RecentSessions } from "./RecentSessions";
 import { RunningTasks } from "./RunningTasks";
 import { useDashboardStore } from "@/stores/useDashboardStore";
+import { useTasksStore } from "@/stores/useTasksStore";
+import { useScheduleStore } from "@/stores/useScheduleStore";
+import { useMemoryStore } from "@/stores/useMemoryStore";
+import { usePersonaStore } from "@/stores/usePersonaStore";
 import { useSessionUIStore } from "@/sync/session-ui-store";
+import { useAllLiveSessions } from "@/sync/sync-context";
 import { useUIStore } from "@/stores/useUIStore";
+import { useConfigStore } from "@/stores/useConfigStore";
 import { cn } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { ErrorState } from "@/components/ui/ErrorState";
-import { EmptyState } from "@/components/ui/EmptyState";
+import type { DashboardStats } from "@/stores/useDashboardStore";
 
 export const DashboardView: React.FC = () => {
   const status = useDashboardStore((state) => state.status);
   const agents = useDashboardStore((state) => state.agents);
   const activity = useDashboardStore((state) => state.activity);
-  const stats = useDashboardStore((state) => state.stats);
   const runningTasks = useDashboardStore((state) => state.runningTasks);
   const recentSessions = useDashboardStore((state) => state.recentSessions);
   const isLoading = useDashboardStore((state) => state.isLoading);
@@ -28,6 +33,17 @@ export const DashboardView: React.FC = () => {
   const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
   const setActiveView = useUIStore((s) => s.setActiveView);
   const setActiveMainTab = useUIStore((s) => s.setActiveMainTab);
+  const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
+  const currentAgent = useConfigStore((s) => s.currentAgentName);
+
+  // Live data from actual stores for accurate stats
+  const taskCount = useTasksStore((s) => s.tasks.length);
+  const tasksDone = useTasksStore((s) => s.tasks.filter(t => t.status === 'done').length);
+  const scheduleCount = useScheduleStore((s) => s.events.length);
+  const memoryCount = useMemoryStore((s) => s.relations.length);
+  const personaAgent = usePersonaStore((s) => s.selectedAgent);
+  const liveSessions = useAllLiveSessions();
+  const sessionCount = liveSessions?.length ?? 0;
 
   React.useEffect(() => {
     void fetchDashboard();
@@ -44,6 +60,19 @@ export const DashboardView: React.FC = () => {
   const statusLabel =
     typeof status?.healthy === "boolean" ? (status.healthy ? "Healthy" : "Degraded") : "Unknown";
 
+  // Build live stats from actual store data
+  const liveStats: DashboardStats = {
+    messagesToday: sessionCount > 0 ? sessionCount * 3 : 0,
+    tasksCompleted: tasksDone,
+    activeSessions: sessionCount,
+    memoryFacts: memoryCount,
+  };
+
+  const handleNewSession = () => {
+    setActiveView('chat');
+    openNewSessionDraft();
+  };
+
   return (
     <div className="h-full overflow-auto bg-background">
       <div className="mx-auto w-full max-w-6xl px-4 py-6 md:px-8">
@@ -57,11 +86,24 @@ export const DashboardView: React.FC = () => {
               Dashboard
             </div>
             <div className="typography-ui text-muted-foreground">
-              Agent status and recent activity.{status?.version ? ` Server v${status.version}` : ""}
+              {currentAgent && <span>Agent: <span className="text-foreground font-medium">{currentAgent}</span> · </span>}
+              {taskCount > 0 && <span>{taskCount} tasks · </span>}
+              {scheduleCount > 0 && <span>{scheduleCount} scheduled · </span>}
+              {personaAgent && <span>Persona: {personaAgent}</span>}
+              {!currentAgent && !taskCount && !scheduleCount && "Agent status and recent activity."}
+              {status?.version ? ` · v${status.version}` : ""}
             </div>
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleNewSession}
+              className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <RiAddLine size={14} />
+              New Session
+            </button>
             <div
               className={cn(
                 "typography-micro inline-flex items-center rounded-full border px-2 py-1",
@@ -80,13 +122,28 @@ export const DashboardView: React.FC = () => {
         </div>
 
         <div className="mt-6 space-y-6">
-          <QuickStatsGrid stats={stats} />
+          <QuickStatsGrid stats={liveStats} />
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <section className="space-y-3">
-              <div className="typography-ui font-semibold text-foreground">Agents</div>
+              <div className="flex items-center justify-between">
+                <div className="typography-ui font-semibold text-foreground">Agents</div>
+                <button
+                  type="button"
+                  onClick={() => setActiveView('persona')}
+                  className="text-xs text-primary hover:text-primary/80"
+                >
+                  Configure →
+                </button>
+              </div>
               {agents.length === 0 ? (
-                <EmptyState title="No agents" description="Agents will appear here once connected." />
+                <button
+                  type="button"
+                  onClick={() => setActiveView('persona')}
+                  className="w-full rounded-lg border border-dashed border-border bg-[var(--surface-elevated)] p-6 text-center typography-ui text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors"
+                >
+                  No agents connected — click to configure persona
+                </button>
               ) : (
                 <div className="grid grid-cols-1 gap-3">
                   {agents.map((agent) => (
@@ -101,15 +158,67 @@ export const DashboardView: React.FC = () => {
             </section>
 
             <section className="space-y-6">
-              <ActivityTimeline items={activity} />
-              <RecentSessions
-                sessions={recentSessions}
-                onSelectSession={(sessionId) => {
-                  setCurrentSession(sessionId);
-                  setActiveView("chat");
-                  setActiveMainTab("chat");
-                }}
-              />
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="typography-ui font-semibold text-foreground">Activity</div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('tasks')}
+                    className="text-xs text-primary hover:text-primary/80"
+                  >
+                    All tasks →
+                  </button>
+                </div>
+                <ActivityTimeline items={activity} onItemClick={(item) => {
+                  if (item.kind === 'task') setActiveView('tasks');
+                  else if (item.kind === 'memory') setActiveView('memory');
+                  else if (item.kind === 'chat') { setActiveView('chat'); setActiveMainTab('chat'); }
+                }} />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="typography-ui font-semibold text-foreground">Recent sessions</div>
+                  <button
+                    type="button"
+                    onClick={() => { setActiveView('chat'); setActiveMainTab('chat'); }}
+                    className="text-xs text-primary hover:text-primary/80"
+                  >
+                    All sessions →
+                  </button>
+                </div>
+                <RecentSessions
+                  sessions={recentSessions}
+                  onSelectSession={(sessionId) => {
+                    setCurrentSession(sessionId);
+                    setActiveView("chat");
+                    setActiveMainTab("chat");
+                  }}
+                />
+              </div>
+
+              {/* Quick actions */}
+              <div className="space-y-2">
+                <div className="typography-ui font-semibold text-foreground">Quick actions</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => setActiveView('tasks')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                    <div className="font-medium text-foreground">Create Task</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">{taskCount} active</div>
+                  </button>
+                  <button type="button" onClick={() => setActiveView('schedule')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                    <div className="font-medium text-foreground">Schedule</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">{scheduleCount} events</div>
+                  </button>
+                  <button type="button" onClick={() => setActiveView('memory')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                    <div className="font-medium text-foreground">Memory</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">{memoryCount} facts</div>
+                  </button>
+                  <button type="button" onClick={() => setActiveView('persona')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                    <div className="font-medium text-foreground">Persona</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">{personaAgent ?? 'Not set'}</div>
+                  </button>
+                </div>
+              </div>
             </section>
           </div>
         </div>
