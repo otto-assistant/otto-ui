@@ -26,6 +26,7 @@ export const DashboardView: React.FC = () => {
   const fetchDashboard = useDashboardStore((state) => state.fetchDashboard);
 
   const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
+  const setActiveView = useUIStore((s) => s.setActiveView);
   const setActiveMainTab = useUIStore((s) => s.setActiveMainTab);
 
   React.useEffect(() => {
@@ -105,6 +106,7 @@ export const DashboardView: React.FC = () => {
                 sessions={recentSessions}
                 onSelectSession={(sessionId) => {
                   setCurrentSession(sessionId);
+                  setActiveView("chat");
                   setActiveMainTab("chat");
                 }}
               />
