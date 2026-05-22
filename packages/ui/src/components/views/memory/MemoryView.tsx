@@ -1,9 +1,11 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useMemoryStore, type MemoryTab } from "../../../stores/useMemoryStore";
+import { ottoFetch } from "../../../lib/api-base";
 import { GraphView } from "./GraphView";
 import { ListView } from "./ListView";
 import { DiaryView } from "./DiaryView";
 import { SearchView } from "./SearchView";
+import { RiBrainLine } from "@remixicon/react";
 
 const TABS: { id: MemoryTab; label: string }[] = [
   { id: "graph", label: "Graph" },
@@ -12,12 +14,35 @@ const TABS: { id: MemoryTab; label: string }[] = [
   { id: "search", label: "Search" },
 ];
 
+function MempalaceStatus() {
+  const [status, setStatus] = useState<{ available: boolean; path?: string; stats?: Record<string, unknown> } | null>(null);
+
+  useEffect(() => {
+    ottoFetch("/api/otto/mempalace/status")
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setStatus(d))
+      .catch(() => setStatus({ available: false }));
+  }, []);
+
+  if (!status) return null;
+
+  return (
+    <div className="flex items-center gap-1.5 text-[10px]">
+      <span className={`inline-block h-1.5 w-1.5 rounded-full ${status.available ? 'bg-green-500' : 'bg-muted-foreground'}`} />
+      <span className="text-muted-foreground">
+        MemPalace {status.available ? 'connected' : 'not configured'}
+      </span>
+    </div>
+  );
+}
+
 export const MemoryView: React.FC = () => {
-  const { activeTab, setActiveTab } = useMemoryStore();
+  const { activeTab, setActiveTab, entities, relations } = useMemoryStore();
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-hidden bg-background p-6">
       <div className="flex items-center gap-4">
+        <RiBrainLine className="size-5 text-foreground" />
         <h1 className="text-lg font-semibold text-foreground" data-testid="view-memory-heading">
           Memory
         </h1>
@@ -35,6 +60,11 @@ export const MemoryView: React.FC = () => {
               {tab.label}
             </button>
           ))}
+        </div>
+        <div className="flex items-center gap-3 ml-auto text-xs text-muted-foreground">
+          <span>{entities.length} entities</span>
+          <span>{relations.length} relations</span>
+          <MempalaceStatus />
         </div>
       </div>
 

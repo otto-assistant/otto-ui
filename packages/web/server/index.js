@@ -79,6 +79,7 @@ import { getAgentConfig, updateAgent } from './lib/opencode/agents.js';
 import { registerOttoApiRoutes } from './lib/otto-api/routes.js';
 import { createDiscordSyncRouter } from './lib/otto-api/discord-sync.js';
 import { createMessengerSyncRouter } from './lib/otto-api/messenger-sync.js';
+import { createMempalaceBridgeRouter } from './lib/otto-api/mempalace-bridge.js';
 import { broadcast as ottoEventsBroadcast } from './lib/otto-api/websocket.js';
 import webPush from 'web-push';
 
@@ -1164,6 +1165,9 @@ async function main(options = {}) {
   });
 
   // Discord ↔ Web UI sync routes
+  // MemPalace memory bridge
+  app.use('/api/otto/mempalace', createMempalaceBridgeRouter());
+
   // Messenger sync routes (Discord + Telegram)
   app.use('/api/otto/messenger', createMessengerSyncRouter({
     broadcastEvent: (type, data) => ottoEventsBroadcast(type, data),
