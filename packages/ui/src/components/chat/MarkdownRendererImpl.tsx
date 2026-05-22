@@ -1,6 +1,8 @@
 import React from 'react';
 import 'katex/dist/katex.min.css';
 import { renderMermaidASCII, renderMermaidSVG } from 'beautiful-mermaid';
+import { renderWidget } from './widgets/renderWidget';
+import { WIDGET_LANGUAGES } from './widgets/widgetLanguages';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -831,6 +833,20 @@ const buildMarkdownComponents = ({
     const code = normalizeCodeBlockText(extractCodeText(child.props.children).replace(/\n$/, ''), language);
     if (language === 'mermaid') {
       return <MermaidBlock source={code} mode={useUIStore.getState().mermaidRenderingMode} />;
+    }
+    if (WIDGET_LANGUAGES.has(language)) {
+      const widget = renderWidget(language, code);
+      if (widget) return <>{widget}</>;
+    }
+    if (language === 'json' && code.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(code);
+        if (parsed.labels && parsed.datasets) return <>{renderWidget('chart', code)}</>;
+        if (parsed.sliders) return <>{renderWidget('slider', code)}</>;
+        if (parsed.metrics) return <>{renderWidget('dashboard', code)}</>;
+        if (parsed.columns && parsed.rows) return <>{renderWidget('table-interactive', code)}</>;
+        if (parsed.items && parsed.items[0]?.value !== undefined) return <>{renderWidget('progress', code)}</>;
+      } catch { /* not valid JSON widget, render as code */ }
     }
     return <MarkdownCodeBlock code={code} language={language} syntaxTheme={syntaxTheme} {...props} />;
   },
