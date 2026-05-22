@@ -5,6 +5,7 @@ import {
   UpgradeSection,
   SecuritySection,
 } from '@/components/sections/otto-settings';
+import { MessengerSection } from '@/components/sections/otto-settings/MessengerSection';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { usePersonaStore } from '@/stores/usePersonaStore';
 import { useUIStore } from '@/stores/useUIStore';
@@ -63,6 +64,10 @@ export const SettingsLandingView: React.FC = () => (
         <ConnectionsSection />
         <UpgradeSection />
         <SecuritySection />
+      </div>
+
+      <div className="mt-6">
+        <MessengerSection />
       </div>
     </div>
   </div>
