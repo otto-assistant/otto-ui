@@ -62,3 +62,35 @@ bun run lint         # ESLint
 - **Repo:** `otto-ui`
 - **License:** MIT (inherited from OpenChamber)
 - **Attribution:** Based on [OpenChamber](https://github.com/openchamber/openchamber) by Bohdan Triapitsyn
+
+## Cursor Cloud specific instructions
+
+### Runtime
+
+- **Bun** is the package manager and runtime (`bun@1.3.5`). The update script installs it if missing.
+- Node.js >= 20 is also available via nvm (`lts`).
+
+### Running the dev servers
+
+The main dev command is `bun run dev:web:hmr`, which starts:
+- **Vite HMR dev server** on port `5173` (browse this for frontend development)
+- **Express API server** on port `3001` (proxied from the Vite dev server at `/api`)
+
+Since there is no OpenCode backend in the Cloud Agent environment, start the server with:
+```bash
+OPENCODE_SKIP_START=true OPENCODE_PORT=4096 bun run dev:web:hmr
+```
+This puts the server in "skip-start mode" — the UI loads fully, but AI/chat features that depend on a live OpenCode backend will show connection errors. This is expected.
+
+### Validation commands
+
+See `AGENTS.openchamber.md` and root `package.json` for the full list. Key commands:
+- `bun run type-check` — TypeScript validation across all packages
+- `bun run lint` — ESLint across all packages
+- `bun run build` — production build of all packages
+
+### Gotchas
+
+- The `bun run dev` script (as opposed to `bun run dev:web:hmr`) also starts the UI type-check watcher via `concurrently`. Both work, but `dev:web:hmr` is sufficient for most development.
+- Port `5173` is the Vite HMR port; port `3001` is the API port. Browse `http://localhost:5173` for HMR — not `http://localhost:3001`.
+- If ports are occupied from a previous run, find and kill the processes before restarting (`lsof -ti:5173 -ti:3001 | xargs kill -9`).
