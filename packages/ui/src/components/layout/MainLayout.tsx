@@ -49,6 +49,29 @@ const TasksView = lazyWithChunkRecovery(() => import('@/components/views/TasksVi
 const ScheduleView = lazyWithChunkRecovery(() => import('@/components/views/ScheduleView').then(m => ({ default: m.ScheduleView })));
 const SettingsLandingView = lazyWithChunkRecovery(() => import('@/components/views/SettingsLandingView').then(m => ({ default: m.SettingsLandingView })));
 
+// Preload all view chunks on idle so navigation is instant
+const VIEW_CHUNK_PRELOADERS = [
+    () => import('@/components/views/dashboard/DashboardView'),
+    () => import('@/components/views/ProjectsView'),
+    () => import('@/components/views/PersonaView'),
+    () => import('@/components/views/MemoryView'),
+    () => import('@/components/views/TasksView'),
+    () => import('@/components/views/ScheduleView'),
+    () => import('@/components/views/SettingsLandingView'),
+];
+
+let _chunksPreloaded = false;
+function preloadAllViewChunks() {
+    if (_chunksPreloaded) return;
+    _chunksPreloaded = true;
+    const load = () => { for (const loader of VIEW_CHUNK_PRELOADERS) loader().catch(() => {}); };
+    if ('requestIdleCallback' in window) {
+        (window as unknown as { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(load);
+    } else {
+        setTimeout(load, 1000);
+    }
+}
+
 // Mobile drawer width as screen percentage
 const MOBILE_DRAWER_WIDTH_PERCENT = 85;
 const DESKTOP_SIDEBAR_MIN_WIDTH = 250;
@@ -101,6 +124,9 @@ export const MainLayout: React.FC = () => {
 
     // Initialize hash-based routing (syncs URL ↔ activeView)
     useRoute();
+
+    // Preload all view chunks after first render for instant view switching
+    React.useEffect(() => { preloadAllViewChunks(); }, []);
     const sidebarWidth = useUIStore((state) => state.sidebarWidth);
     const rightSidebarWidth = useUIStore((state) => state.rightSidebarWidth);
     const [desktopRightSidebarActionsHost, setDesktopRightSidebarActionsHost] = React.useState<HTMLDivElement | null>(null);

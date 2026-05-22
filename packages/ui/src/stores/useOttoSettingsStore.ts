@@ -40,21 +40,28 @@ interface OttoSettingsState {
   availableUpdate: AvailableUpdate | null;
   loading: boolean;
   error: string | null;
+  _lastFetchedAt: number;
 
   fetchStatus: () => Promise<void>;
   checkForUpdates: () => Promise<void>;
   triggerUpgrade: () => Promise<void>;
 }
 
-export const useOttoSettingsStore = create<OttoSettingsState>((set) => ({
+export const useOttoSettingsStore = create<OttoSettingsState>((set, get) => ({
   status: null,
   connections: null,
   security: null,
   availableUpdate: null,
   loading: false,
   error: null,
+  _lastFetchedAt: 0,
 
   fetchStatus: async () => {
+    const STALE_MS = 30_000;
+    const cur = get();
+    if (cur.status && cur._lastFetchedAt && Date.now() - cur._lastFetchedAt < STALE_MS) {
+      return;
+    }
     set({ loading: true, error: null });
     try {
       const res = await fetch("/api/otto/status");
@@ -65,6 +72,7 @@ export const useOttoSettingsStore = create<OttoSettingsState>((set) => ({
         connections: data.connections,
         security: data.security,
         loading: false,
+        _lastFetchedAt: Date.now(),
       });
     } catch {
       set({

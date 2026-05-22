@@ -55,6 +55,7 @@ type DashboardStoreState = {
 };
 
 type DashboardStore = DashboardStoreState & {
+  _lastFetchedAt: number;
   fetchDashboard: () => Promise<void>;
 };
 
@@ -255,7 +256,7 @@ function buildMockState(): Pick<
   };
 }
 
-export const useDashboardStore = create<DashboardStore>((set) => ({
+export const useDashboardStore = create<DashboardStore>((set, get) => ({
   status: null,
   agents: [],
   activity: [],
@@ -264,8 +265,14 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
   recentSessions: [],
   isLoading: false,
   error: null,
+  _lastFetchedAt: 0,
 
   fetchDashboard: async () => {
+    const STALE_MS = 30_000;
+    const state = get();
+    if (state.status && state._lastFetchedAt && Date.now() - state._lastFetchedAt < STALE_MS) {
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       const [statusRaw, agentsRaw] = await Promise.all([
@@ -316,6 +323,7 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
           runningTasks,
           recentSessions,
           isLoading: false,
+          _lastFetchedAt: Date.now(),
         });
       } else {
         const mock = buildMockState();
@@ -323,6 +331,7 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
           ...mock,
           status: normalizeStatus(statusObj) ?? mock.status,
           isLoading: false,
+          _lastFetchedAt: Date.now(),
         });
       }
     } catch (err) {

@@ -103,9 +103,11 @@ interface MemoryState {
   searchMemory: (query: string) => Promise<void>;
   addRelation: (relation: Omit<Relation, "id">) => void;
   deleteRelation: (id: string) => void;
+  _lastGraphFetch: number;
+  _lastDiaryFetch: number;
 }
 
-export const useMemoryStore = create<MemoryState>((set) => ({
+export const useMemoryStore = create<MemoryState>((set, get) => ({
   activeTab: "graph",
   entities: MOCK_ENTITIES,
   relations: MOCK_RELATIONS,
@@ -114,11 +116,15 @@ export const useMemoryStore = create<MemoryState>((set) => ({
   searchQuery: "",
   selectedEntity: null,
   loading: false,
+  _lastGraphFetch: 0,
+  _lastDiaryFetch: 0,
 
   setActiveTab: (tab) => set({ activeTab: tab }),
   setSelectedEntity: (entity) => set({ selectedEntity: entity }),
 
   fetchGraph: async () => {
+    const STALE_MS = 30_000;
+    if (get()._lastGraphFetch && Date.now() - get()._lastGraphFetch < STALE_MS) return;
     set({ loading: true });
     try {
       const res = await ottoFetch("/api/otto/memory/graph");
@@ -130,11 +136,13 @@ export const useMemoryStore = create<MemoryState>((set) => ({
       // Use mock data on failure
       set({ entities: MOCK_ENTITIES, relations: MOCK_RELATIONS });
     } finally {
-      set({ loading: false });
+      set({ loading: false, _lastGraphFetch: Date.now() });
     }
   },
 
   fetchDiary: async () => {
+    const STALE_MS = 30_000;
+    if (get()._lastDiaryFetch && Date.now() - get()._lastDiaryFetch < STALE_MS) return;
     set({ loading: true });
     try {
       const res = await ottoFetch("/api/otto/memory/diary");
@@ -145,7 +153,7 @@ export const useMemoryStore = create<MemoryState>((set) => ({
     } catch {
       set({ diary: MOCK_DIARY });
     } finally {
-      set({ loading: false });
+      set({ loading: false, _lastDiaryFetch: Date.now() });
     }
   },
 

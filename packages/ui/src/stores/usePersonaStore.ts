@@ -27,6 +27,7 @@ interface PersonaState {
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
+  _lastFetchedAt: number;
   fetchAgents: () => Promise<void>;
   selectAgent: (name: string) => Promise<void>;
   updateConfig: (partial: Partial<AgentConfig>) => void;
@@ -68,8 +69,14 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
   isLoading: false,
   isSaving: false,
   error: null,
+  _lastFetchedAt: 0,
 
   fetchAgents: async () => {
+    const STALE_MS = 30_000;
+    const cur = get();
+    if (cur.agents.length > 0 && cur.config && cur._lastFetchedAt && Date.now() - cur._lastFetchedAt < STALE_MS) {
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       const res = await ottoFetch('/api/otto/agents');
@@ -98,9 +105,9 @@ export const usePersonaStore = create<PersonaState>((set, get) => ({
       const res = await ottoFetch(`/api/otto/agents/${name}`);
       if (!res.ok) throw new Error('Failed to fetch agent config');
       const raw = await res.json();
-      set({ config: normalizeConfig(name, raw), isLoading: false });
+      set({ config: normalizeConfig(name, raw), isLoading: false, _lastFetchedAt: Date.now() });
     } catch {
-      set({ config: normalizeConfig(name, {}), isLoading: false, error: null });
+      set({ config: normalizeConfig(name, {}), isLoading: false, error: null, _lastFetchedAt: Date.now() });
     }
   },
 

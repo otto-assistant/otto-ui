@@ -32,6 +32,15 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'settings', label: 'Settings', icon: RiSettings3Line },
 ];
 
+const PREFETCH_MAP: Partial<Record<AppActiveView, () => void>> = {
+  dashboard: () => { import('@/stores/useDashboardStore').then(m => m.useDashboardStore.getState().fetchDashboard()); },
+  tasks: () => { import('@/stores/useTasksStore').then(m => m.useTasksStore.getState().fetchTasks()); },
+  persona: () => { import('@/stores/usePersonaStore').then(m => m.usePersonaStore.getState().fetchAgents()); },
+  schedule: () => { import('@/stores/useScheduleStore').then(m => m.useScheduleStore.getState().fetchSchedule()); },
+  memory: () => { import('@/stores/useMemoryStore').then(m => m.useMemoryStore.getState().fetchGraph()); },
+  settings: () => { import('@/stores/useOttoSettingsStore').then(m => m.useOttoSettingsStore.getState().fetchStatus()); },
+};
+
 type Props = {
   mobileVariant?: boolean;
 };
@@ -47,7 +56,6 @@ export function OttoAgentNav({ mobileVariant = false }: Props): React.ReactNode 
         setSessionSwitcherOpen(false);
       }
 
-      // Use hash-based navigation (updates URL + store)
       navigateHash(target);
 
       if (target === 'settings') {
@@ -56,6 +64,10 @@ export function OttoAgentNav({ mobileVariant = false }: Props): React.ReactNode 
     },
     [mobileVariant, setSessionSwitcherOpen, setSettingsDialogOpen],
   );
+
+  const handleHover = React.useCallback((target: AppActiveView) => {
+    PREFETCH_MAP[target]?.();
+  }, []);
 
   const buttonClasses = (selected: boolean) =>
     cn(
@@ -78,6 +90,7 @@ export function OttoAgentNav({ mobileVariant = false }: Props): React.ReactNode 
               key={item.id}
               type="button"
               onClick={() => handleNavigate(item.id)}
+              onMouseEnter={() => handleHover(item.id)}
               className={cn(buttonClasses(Boolean(selected)), 'min-w-0')}
             >
               <Icon className={cn('h-4 w-4 shrink-0', selected ? 'text-foreground' : 'text-muted-foreground')} aria-hidden />
