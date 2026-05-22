@@ -23,7 +23,13 @@ export const TaskDetailDrawer: React.FC = () => {
     setOpen(false);
     updateTask(task.id, { status: 'in_progress' });
     setActiveView('chat');
-    openNewSessionDraft({ title: `Task: ${task.title}` });
+    openNewSessionDraft({
+      title: `Task: ${task.title}`,
+      initialPrompt: `Work on task: ${task.title}`,
+      syntheticParts: task.description
+        ? [{ text: `Task details:\n${task.description}\n\nPriority: ${task.priority}\nOwner: ${task.ownerName}`, synthetic: true }]
+        : undefined,
+    });
   };
 
   return (
@@ -70,7 +76,6 @@ export const TaskDetailDrawer: React.FC = () => {
           )}
         </div>
 
-        {/* History */}
         <div className="mb-6">
           <h3 className="mb-2 text-xs font-medium text-muted-foreground">History</h3>
           <div className="flex flex-col gap-1">

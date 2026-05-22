@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { usePersonaStore } from '@/stores/usePersonaStore';
+import { useConfigStore } from '@/stores/useConfigStore';
 import { AgentSelector } from './AgentSelector';
 import { SystemPromptEditor } from './SystemPromptEditor';
 import { SkillsToggles } from './SkillsToggles';
@@ -8,12 +9,21 @@ import { LanguageSelector } from './LanguageSelector';
 import { RiRobot2Line, RiCheckLine } from '@remixicon/react';
 
 export const PersonaView: React.FC = () => {
-  const { fetchAgents, isLoading, error, config, isSaving, saveAgent } = usePersonaStore();
+  const { fetchAgents, isLoading, error, config, selectedAgent, isSaving, saveAgent } = usePersonaStore();
+  const configAgent = useConfigStore((s) => s.currentAgentName);
+  const setConfigAgent = useConfigStore((s) => s.setAgent);
   const [saved, setSaved] = React.useState(false);
 
   useEffect(() => {
     fetchAgents();
   }, [fetchAgents]);
+
+  // Sync persona agent selection → chat agent
+  useEffect(() => {
+    if (selectedAgent && selectedAgent !== configAgent) {
+      setConfigAgent(selectedAgent);
+    }
+  }, [selectedAgent, configAgent, setConfigAgent]);
 
   const handleSaveAll = async () => {
     await saveAgent();
@@ -58,7 +68,10 @@ export const PersonaView: React.FC = () => {
         </div>
 
         <p className="mt-1 text-sm text-muted-foreground">
-          Configure agent personality and behavior. Changes are applied to new conversations.
+          Configure agent personality. The selected agent is used for new conversations.
+          {selectedAgent && (
+            <span className="ml-1 font-medium text-foreground">Active: {selectedAgent}</span>
+          )}
         </p>
 
         <div className="mt-6">

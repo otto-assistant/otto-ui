@@ -23,9 +23,10 @@ export const TaskCreateDialog: React.FC = () => {
     e.preventDefault();
     if (!title.trim()) return;
     const taskTitle = title.trim();
+    const taskDesc = description.trim();
     createTask({
       title: taskTitle,
-      description,
+      description: taskDesc,
       priority,
       ownerType,
       ownerName,
@@ -34,7 +35,11 @@ export const TaskCreateDialog: React.FC = () => {
 
     if (ownerType === 'agent') {
       setActiveView('chat');
-      openNewSessionDraft({ title: `Task: ${taskTitle}` });
+      openNewSessionDraft({
+        title: `Task: ${taskTitle}`,
+        initialPrompt: `Work on task: ${taskTitle}`,
+        syntheticParts: taskDesc ? [{ text: `Task details:\n${taskDesc}`, synthetic: true }] : undefined,
+      });
     }
 
     setTitle('');
@@ -101,7 +106,7 @@ export const TaskCreateDialog: React.FC = () => {
           </select>
           {ownerType === 'agent' && (
             <p className="text-xs text-muted-foreground">
-              A new chat session will be opened for the agent to work on this task.
+              A chat session will open with the task context so the agent can start working.
             </p>
           )}
         </div>
