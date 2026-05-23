@@ -25,6 +25,7 @@ interface ScheduleState {
   viewMode: ViewMode;
   currentDate: Date;
   loading: boolean;
+  _lastFetchedAt: number;
   setViewMode: (mode: ViewMode) => void;
   setCurrentDate: (date: Date) => void;
   fetchSchedule: () => Promise<void>;
@@ -77,22 +78,33 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
   viewMode: "month",
   currentDate: new Date(),
   loading: false,
+  _lastFetchedAt: 0,
 
   setViewMode: (mode) => set({ viewMode: mode }),
   setCurrentDate: (date) => set({ currentDate: date }),
 
   fetchSchedule: async () => {
+    const STALE_MS = 30_000;
+    const cur = get();
+    if (cur.events.length > 0 && cur._lastFetchedAt && Date.now() - cur._lastFetchedAt < STALE_MS) {
+      return;
+    }
     set({ loading: true });
     try {
       const res = await ottoFetch("/api/otto/schedule");
       if (res.ok) {
         const data = await res.json();
-        set({ events: data.events ?? data });
+        const arr = Array.isArray(data.events) ? data.events
+          : Array.isArray(data.tasks) ? data.tasks
+          : Array.isArray(data) ? data : [];
+        if (arr.length > 0) {
+          set({ events: arr });
+        }
       }
     } catch {
       // Use mock data on failure
     } finally {
-      set({ loading: false });
+      set({ loading: false, _lastFetchedAt: Date.now() });
     }
   },
 

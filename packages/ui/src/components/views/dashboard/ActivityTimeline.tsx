@@ -55,9 +55,10 @@ function pickIcon(kind: string) {
 
 export interface ActivityTimelineProps {
   items: DashboardActivity[];
+  onItemClick?: (item: DashboardActivity) => void;
 }
 
-export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({ items }) => {
+export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({ items, onItemClick }) => {
   if (items.length === 0) {
     return (
       <div className="rounded-lg border border-border bg-[var(--surface-elevated)] p-4 typography-ui text-muted-foreground">
@@ -67,24 +68,26 @@ export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({ items }) => 
   }
 
   return (
-    <div className="space-y-2">
-      <div className="typography-ui font-semibold text-foreground">Activity</div>
-      <div className="divide-y divide-border rounded-lg border border-border bg-[var(--surface-elevated)] overflow-hidden">
-        {items.slice(0, 10).map((item) => {
-          const Icon = pickIcon(item.kind);
-          return (
-            <div key={item.id} className="flex gap-3 p-4">
-              <div className="mt-0.5 text-muted-foreground">
-                <Icon size={18} aria-hidden />
-              </div>
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="typography-ui text-foreground">{item.description}</div>
-                <div className="typography-micro text-muted-foreground">{formatRelative(item.at)}</div>
-              </div>
+    <div className="divide-y divide-border rounded-lg border border-border bg-[var(--surface-elevated)] overflow-hidden">
+      {items.slice(0, 10).map((item) => {
+        const Icon = pickIcon(item.kind);
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onItemClick?.(item)}
+            className="flex w-full gap-3 p-4 text-left hover:bg-[var(--interactive-hover)] transition-colors"
+          >
+            <div className="mt-0.5 text-muted-foreground">
+              <Icon size={18} aria-hidden />
             </div>
-          );
-        })}
-      </div>
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="typography-ui text-foreground">{item.description}</div>
+              <div className="typography-micro text-muted-foreground">{formatRelative(item.at)}</div>
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 };

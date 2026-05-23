@@ -333,7 +333,7 @@ function App({ apis }: AppProps) {
     }
   }, [isDesktopRuntime, bootInjectionStatus]);
 
-  // Non-desktop fallback: remove splash after 5 seconds even if init stalls.
+  // Non-desktop fallback: remove splash promptly even if init stalls.
   React.useEffect(() => {
     if (isDesktopRuntime) {
       return;
@@ -347,7 +347,7 @@ function App({ apis }: AppProps) {
           loadingElement.remove();
         }, 300);
       }
-    }, 5000);
+    }, 1500);
 
     return () => clearTimeout(fallbackTimer);
   }, [isDesktopRuntime, isInitialized]);

@@ -103,9 +103,11 @@ interface MemoryState {
   searchMemory: (query: string) => Promise<void>;
   addRelation: (relation: Omit<Relation, "id">) => void;
   deleteRelation: (id: string) => void;
+  _lastGraphFetch: number;
+  _lastDiaryFetch: number;
 }
 
-export const useMemoryStore = create<MemoryState>((set) => ({
+export const useMemoryStore = create<MemoryState>((set, get) => ({
   activeTab: "graph",
   entities: MOCK_ENTITIES,
   relations: MOCK_RELATIONS,
@@ -114,38 +116,61 @@ export const useMemoryStore = create<MemoryState>((set) => ({
   searchQuery: "",
   selectedEntity: null,
   loading: false,
+  _lastGraphFetch: 0,
+  _lastDiaryFetch: 0,
 
   setActiveTab: (tab) => set({ activeTab: tab }),
   setSelectedEntity: (entity) => set({ selectedEntity: entity }),
 
   fetchGraph: async () => {
+    const STALE_MS = 30_000;
+    if (get()._lastGraphFetch && Date.now() - get()._lastGraphFetch < STALE_MS) return;
     set({ loading: true });
     try {
-      const res = await ottoFetch("/api/otto/memory/graph");
-      if (res.ok) {
-        const data = await res.json();
-        set({ entities: data.entities ?? MOCK_ENTITIES, relations: data.relations ?? MOCK_RELATIONS });
+      // Try mempalace bridge first, fall back to Otto memory API
+      let data = null;
+      const mpRes = await ottoFetch("/api/otto/mempalace/graph").catch(() => null);
+      if (mpRes?.ok) {
+        data = await mpRes.json();
+      }
+      if (!data || (!data.entities?.length && !data.relations?.length)) {
+        const res = await ottoFetch("/api/otto/memory/graph");
+        if (res.ok) data = await res.json();
+      }
+      if (data) {
+        const entities = Array.isArray(data.entities) && data.entities.length > 0 ? data.entities : get().entities;
+        const relations = Array.isArray(data.relations) && data.relations.length > 0 ? data.relations : get().relations;
+        set({ entities, relations });
       }
     } catch {
       // Use mock data on failure
       set({ entities: MOCK_ENTITIES, relations: MOCK_RELATIONS });
     } finally {
-      set({ loading: false });
+      set({ loading: false, _lastGraphFetch: Date.now() });
     }
   },
 
   fetchDiary: async () => {
+    const STALE_MS = 30_000;
+    if (get()._lastDiaryFetch && Date.now() - get()._lastDiaryFetch < STALE_MS) return;
     set({ loading: true });
     try {
-      const res = await ottoFetch("/api/otto/memory/diary");
-      if (res.ok) {
-        const data = await res.json();
-        set({ diary: data.entries ?? MOCK_DIARY });
+      let data = null;
+      const mpRes = await ottoFetch("/api/otto/mempalace/diary").catch(() => null);
+      if (mpRes?.ok) {
+        data = await mpRes.json();
+      }
+      if (!data || !data.entries?.length) {
+        const res = await ottoFetch("/api/otto/memory/diary");
+        if (res.ok) data = await res.json();
+      }
+      if (data) {
+        set({ diary: data.entries?.length ? data.entries : MOCK_DIARY });
       }
     } catch {
       set({ diary: MOCK_DIARY });
     } finally {
-      set({ loading: false });
+      set({ loading: false, _lastDiaryFetch: Date.now() });
     }
   },
 
@@ -156,10 +181,17 @@ export const useMemoryStore = create<MemoryState>((set) => ({
       return;
     }
     try {
-      const res = await ottoFetch(`/api/otto/memory/search?q=${encodeURIComponent(query)}`);
-      if (res.ok) {
-        const data = await res.json();
-        set({ searchResults: data.results ?? MOCK_SEARCH_RESULTS });
+      let data = null;
+      const mpRes = await ottoFetch(`/api/otto/mempalace/search?q=${encodeURIComponent(query)}`).catch(() => null);
+      if (mpRes?.ok) {
+        data = await mpRes.json();
+      }
+      if (!data || !data.results?.length) {
+        const res = await ottoFetch(`/api/otto/memory/search?q=${encodeURIComponent(query)}`);
+        if (res.ok) data = await res.json();
+      }
+      if (data) {
+        set({ searchResults: data.results?.length ? data.results : MOCK_SEARCH_RESULTS });
       }
     } catch {
       set({ searchResults: MOCK_SEARCH_RESULTS });
@@ -170,10 +202,23 @@ export const useMemoryStore = create<MemoryState>((set) => ({
 
   addRelation: (relation) => {
     const id = `r${Date.now()}`;
-    set((s) => ({ relations: [...s.relations, { ...relation, id }] }));
+    const newRelation = { ...relation, id };
+    set((s) => ({ relations: [...s.relations, newRelation] }));
+    ottoFetch("/api/otto/mempalace/fact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subject: relation.subject, predicate: relation.predicate, object: relation.object }),
+    }).catch(() => {
+      ottoFetch("/api/otto/memory/relations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newRelation),
+      }).catch(() => { /* persisted locally */ });
+    });
   },
 
   deleteRelation: (id) => {
     set((s) => ({ relations: s.relations.filter((r) => r.id !== id) }));
+    ottoFetch(`/api/otto/memory/relations/${id}`, { method: "DELETE" }).catch(() => { /* removed locally */ });
   },
 }));

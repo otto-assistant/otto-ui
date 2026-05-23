@@ -1930,7 +1930,7 @@ export const useConfigStore = create<ConfigStore>()(
                 },
 
                 checkConnection: async () => {
-                    const maxAttempts = 5;
+                    const maxAttempts = 2;
                     let attempt = 0;
                     let lastError: unknown = null;
 
@@ -1992,17 +1992,17 @@ export const useConfigStore = create<ConfigStore>()(
                             await opencodeClient.initApp();
 
                             if (debug) console.log("Loading providers...");
-                            await get().loadProviders();
+                            try { await get().loadProviders(); } catch { /* providers unavailable */ }
 
                             if (debug) console.log("Loading agents...");
-                            await get().loadAgents();
+                            try { await get().loadAgents(); } catch { /* agents unavailable */ }
 
                             set({ isInitialized: true, isConnected: true, hasEverConnected: true, connectionPhase: "connected" });
                             if (debug) console.log("App initialized successfully");
                         } catch (error) {
                             console.error("Failed to initialize app:", error);
                             set({
-                                isInitialized: false,
+                                isInitialized: true,
                                 isConnected: false,
                                 connectionPhase: get().hasEverConnected ? "reconnecting" : "connecting",
                                 lastDisconnectReason: 'init_error',

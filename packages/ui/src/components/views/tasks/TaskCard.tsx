@@ -59,6 +59,12 @@ export const TaskCard: React.FC<{ task: Task }> = ({ task }) => {
           {task.dueDate && (
             <span className="text-[10px] text-muted-foreground">{relativeDate(task.dueDate)}</span>
           )}
+          {task.agentName && (
+            <span className="text-[10px] text-muted-foreground">🤖 {task.agentName}</span>
+          )}
+          {task.projectPath && (
+            <span className="text-[10px] text-muted-foreground">📁 {task.projectPath.split('/').pop()}</span>
+          )}
         </div>
       </div>
 

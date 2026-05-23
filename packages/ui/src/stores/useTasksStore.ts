@@ -23,6 +23,11 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   source?: TaskSource;
+  projectId?: string | null;
+  projectPath?: string | null;
+  agentName?: string | null;
+  modelId?: string | null;
+  providerId?: string | null;
   history: { timestamp: string; action: string }[];
 }
 
@@ -35,6 +40,7 @@ interface TasksStore {
   createDialogOpen: boolean;
   detailDrawerOpen: boolean;
   _wsSubscribed: boolean;
+  _lastFetchedAt: number;
 
   setFilter: (filter: TaskFilter) => void;
   setSelectedTaskId: (id: string | null) => void;
@@ -132,6 +138,7 @@ export const useTasksStore = create<TasksStore>()(
       createDialogOpen: false,
       detailDrawerOpen: false,
       _wsSubscribed: false,
+      _lastFetchedAt: 0,
 
       setFilter: (filter) => set({ filter }),
       setSelectedTaskId: (id) => set({ selectedTaskId: id }),
@@ -171,6 +178,11 @@ export const useTasksStore = create<TasksStore>()(
       },
 
       fetchTasks: async () => {
+        const STALE_MS = 30_000;
+        const cur = get();
+        if (cur.tasks.length > 0 && cur._lastFetchedAt && Date.now() - cur._lastFetchedAt < STALE_MS) {
+          return;
+        }
         set({ isLoading: true, error: null });
         try {
           const res = await fetch(API_BASE());
@@ -181,10 +193,10 @@ export const useTasksStore = create<TasksStore>()(
           } else if (res.status >= 500) {
             set({ error: `Server error (${res.status})` });
           }
-        } catch (err) {
-          set({ error: err instanceof Error ? err.message : 'Failed to load tasks' });
+        } catch {
+          // keep existing tasks (mock or previously loaded) on network failure
         } finally {
-          set({ isLoading: false });
+          set({ isLoading: false, _lastFetchedAt: Date.now() });
         }
         // Subscribe to real-time updates after first fetch
         get().subscribeToWebSocket();

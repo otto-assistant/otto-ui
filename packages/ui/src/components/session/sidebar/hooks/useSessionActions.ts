@@ -3,6 +3,7 @@ import type { Session } from '@opencode-ai/sdk/v2';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { useI18n } from '@/lib/i18n';
+import { useUIStore } from '@/stores/useUIStore';
 
 type DeleteSessionConfirmSetter = React.Dispatch<React.SetStateAction<{
   session: Session;
@@ -78,8 +79,9 @@ export const useSessionActions = (args: Args) => {
         args.setDirectory(sessionDirectory, { showOverlay: false });
       }
 
+      useUIStore.getState().setActiveView('chat');
+      args.setActiveMainTab('chat');
       if (args.mobileVariant) {
-        args.setActiveMainTab('chat');
         args.setSessionSwitcherOpen(false);
       }
 

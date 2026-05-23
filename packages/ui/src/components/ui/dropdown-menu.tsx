@@ -71,9 +71,11 @@ function DropdownMenuTrigger({
   }, [portalContext]);
 
   const r = renderFromAsChild(asChild, children);
+  const childIsNativeButton = !asChild || (React.isValidElement(children) && children.type === 'button');
   return (
     <BaseMenu.Trigger
       data-slot="dropdown-menu-trigger"
+      nativeButton={childIsNativeButton}
       onPointerDownCapture={(event) => {
         syncPortalContainer(event.currentTarget);
         onPointerDownCapture?.(event);

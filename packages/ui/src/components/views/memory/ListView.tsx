@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemoryStore } from "../../../stores/useMemoryStore";
 
 type SortKey = "subject" | "predicate" | "object" | "validFrom" | "validTo";
@@ -10,8 +11,9 @@ export const ListView: React.FC = () => {
   const [filter, setFilter] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [newRel, setNewRel] = useState({ subject: "", predicate: "", object: "", validFrom: "" });
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const filtered = relations
+  const filtered = React.useMemo(() => relations
     .filter((r) => {
       if (!filter) return true;
       const q = filter.toLowerCase();
@@ -21,7 +23,14 @@ export const ListView: React.FC = () => {
       const av = (a[sortKey] ?? "") as string;
       const bv = (b[sortKey] ?? "") as string;
       return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-    });
+    }), [relations, filter, sortKey, sortAsc]);
+
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 40,
+    overscan: 20,
+  });
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortAsc(!sortAsc);
@@ -54,6 +63,7 @@ export const ListView: React.FC = () => {
         >
           + Add
         </button>
+        <span className="text-xs text-muted-foreground">{filtered.length} items</span>
       </div>
 
       {showAdd && (
@@ -66,40 +76,36 @@ export const ListView: React.FC = () => {
         </div>
       )}
 
-      <div className="flex-1 overflow-auto rounded-lg border border-border">
+      <div ref={scrollRef} className="flex-1 overflow-auto rounded-lg border border-border">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 border-b border-border bg-muted">
+          <thead className="sticky top-0 border-b border-border bg-muted z-10">
             <tr>
-              <th className={thClass} onClick={() => handleSort("subject")}>Entity {sortKey === "subject" ? (sortAsc ? "^" : "v") : ""}</th>
-              <th className={thClass} onClick={() => handleSort("predicate")}>Predicate {sortKey === "predicate" ? (sortAsc ? "^" : "v") : ""}</th>
-              <th className={thClass} onClick={() => handleSort("object")}>Object {sortKey === "object" ? (sortAsc ? "^" : "v") : ""}</th>
-              <th className={thClass} onClick={() => handleSort("validFrom")}>Valid From {sortKey === "validFrom" ? (sortAsc ? "^" : "v") : ""}</th>
-              <th className={thClass} onClick={() => handleSort("validTo")}>Valid To {sortKey === "validTo" ? (sortAsc ? "^" : "v") : ""}</th>
+              <th className={thClass} onClick={() => handleSort("subject")}>Entity {sortKey === "subject" ? (sortAsc ? "↑" : "↓") : ""}</th>
+              <th className={thClass} onClick={() => handleSort("predicate")}>Predicate {sortKey === "predicate" ? (sortAsc ? "↑" : "↓") : ""}</th>
+              <th className={thClass} onClick={() => handleSort("object")}>Object {sortKey === "object" ? (sortAsc ? "↑" : "↓") : ""}</th>
+              <th className={thClass} onClick={() => handleSort("validFrom")}>Valid From {sortKey === "validFrom" ? (sortAsc ? "↑" : "↓") : ""}</th>
+              <th className={thClass} onClick={() => handleSort("validTo")}>Valid To {sortKey === "validTo" ? (sortAsc ? "↑" : "↓") : ""}</th>
               <th className="px-3 py-2" />
             </tr>
           </thead>
           <tbody>
-            {filtered.map((r) => (
-              <tr key={r.id} className="border-b border-border last:border-0 hover:bg-muted/50">
-                <td className="px-3 py-2 text-foreground">{r.subject}</td>
-                <td className="px-3 py-2 text-muted-foreground">{r.predicate}</td>
-                <td className="px-3 py-2 text-foreground">{r.object}</td>
-                <td className="px-3 py-2 text-muted-foreground">{r.validFrom ?? "—"}</td>
-                <td className="px-3 py-2 text-muted-foreground">{r.validTo ?? "—"}</td>
-                <td className="px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!confirm("Delete this relation?")) return;
-                      deleteRelation(r.id);
-                    }}
-                    className="text-xs text-destructive hover:underline"
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
+            <tr><td colSpan={6} className="p-0"><div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}>
+              {virtualizer.getVirtualItems().map((vRow) => {
+                const r = filtered[vRow.index];
+                return (
+                  <div key={vRow.key} className="absolute left-0 right-0 flex border-b border-border hover:bg-muted/50" style={{ top: `${vRow.start}px`, height: `${vRow.size}px` }}>
+                    <div className="flex-1 px-3 py-2 text-foreground truncate">{r.subject}</div>
+                    <div className="flex-1 px-3 py-2 text-muted-foreground truncate">{r.predicate}</div>
+                    <div className="flex-1 px-3 py-2 text-foreground truncate">{r.object}</div>
+                    <div className="w-24 px-3 py-2 text-muted-foreground">{r.validFrom ?? "—"}</div>
+                    <div className="w-24 px-3 py-2 text-muted-foreground">{r.validTo ?? "—"}</div>
+                    <div className="w-16 px-3 py-2">
+                      <button type="button" onClick={() => deleteRelation(r.id)} className="text-xs text-destructive hover:underline">Del</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div></td></tr>
           </tbody>
         </table>
       </div>

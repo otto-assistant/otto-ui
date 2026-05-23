@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTasksStore } from '@/stores/useTasksStore';
 import { TaskCard } from './TaskCard';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
@@ -12,8 +13,9 @@ export const TaskList: React.FC = () => {
   const isLoading = useTasksStore((s) => s.isLoading);
   const error = useTasksStore((s) => s.error);
   const fetchTasks = useTasksStore((s) => s.fetchTasks);
+  const parentRef = useRef<HTMLDivElement>(null);
 
-  const filtered = tasks.filter((t) => {
+  const filtered = React.useMemo(() => tasks.filter((t) => {
     switch (filter) {
       case 'all': return true;
       case 'my_tasks': return t.ownerType === 'user';
@@ -21,6 +23,13 @@ export const TaskList: React.FC = () => {
       case 'scheduled': return t.ownerType === 'cron';
       case 'done': return t.status === 'done';
     }
+  }), [tasks, filter]);
+
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 72,
+    overscan: 10,
   });
 
   if (isLoading) {
@@ -42,10 +51,18 @@ export const TaskList: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col gap-2 overflow-y-auto">
-      {filtered.map((task) => (
-        <TaskCard key={task.id} task={task} />
-      ))}
+    <div ref={parentRef} className="h-full overflow-y-auto">
+      <div className="relative" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => (
+          <div
+            key={virtualRow.key}
+            className="absolute left-0 right-0 px-0.5"
+            style={{ top: `${virtualRow.start}px`, height: `${virtualRow.size}px` }}
+          >
+            <TaskCard task={filtered[virtualRow.index]} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 };
