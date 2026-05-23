@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Session } from '@opencode-ai/sdk/v2';
 import { opencodeClient } from '@/lib/opencode/client';
-import { listGlobalSessionPages } from '@/stores/globalSessions';
+import { listGlobalSessionPages, type GlobalSessionRecord } from '@/stores/globalSessions';
 
 type GlobalSessionsStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -13,7 +13,6 @@ type LoadResult = {
 type GlobalSessionsState = {
   activeSessions: Session[];
   archivedSessions: Session[];
-  sessionsByDirectory: Map<string, Session[]>;
   hasLoaded: boolean;
   status: GlobalSessionsStatus;
   loadSessions: (fallbackActive?: Session[]) => Promise<LoadResult>;
@@ -50,23 +49,6 @@ export const resolveGlobalSessionDirectory = (session: Session): string | null =
 
   return normalizePath(record.directory ?? null)
     ?? normalizePath(record.project?.worktree ?? null);
-};
-
-const buildSessionsByDirectory = (sessions: Session[]): Map<string, Session[]> => {
-  const next = new Map<string, Session[]>();
-  for (const session of sessions) {
-    const directory = resolveGlobalSessionDirectory(session);
-    if (!directory) {
-      continue;
-    }
-    const existing = next.get(directory);
-    if (existing) {
-      existing.push(session);
-      continue;
-    }
-    next.set(directory, [session]);
-  }
-  return next;
 };
 
 const getSessionSignature = (session: Session): string => {
@@ -161,14 +143,10 @@ const applySnapshot = (
   const nextArchivedSessions = sameSessionList(state.archivedSessions, archivedSessions)
     ? state.archivedSessions
     : archivedSessions;
-  const nextSessionsByDirectory = nextActiveSessions === state.activeSessions
-    ? state.sessionsByDirectory
-    : buildSessionsByDirectory(nextActiveSessions);
 
   if (
     nextActiveSessions === state.activeSessions
     && nextArchivedSessions === state.archivedSessions
-    && nextSessionsByDirectory === state.sessionsByDirectory
     && state.hasLoaded
     && state.status === status
   ) {
@@ -178,7 +156,6 @@ const applySnapshot = (
   return {
     activeSessions: nextActiveSessions,
     archivedSessions: nextArchivedSessions,
-    sessionsByDirectory: nextSessionsByDirectory,
     hasLoaded: true,
     status,
   };
@@ -187,7 +164,6 @@ const applySnapshot = (
 export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => ({
   activeSessions: [],
   archivedSessions: [],
-  sessionsByDirectory: new Map(),
   hasLoaded: false,
   status: 'idle',
 
@@ -205,11 +181,48 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
     inflightLoad = (async () => {
       const current = get();
 
+      // Stream pages into state as they arrive so the UI can render
+      // sessions progressively rather than waiting for the full pagination
+      // to finish. This is the difference between "feels instant with 50
+      // sessions visible" vs "blank UI for several seconds while 2000
+      // sessions paginate".
+      const accumulateInto = (
+        bucket: 'activeSessions' | 'archivedSessions',
+        page: GlobalSessionRecord[],
+      ) => {
+        if (page.length === 0) return;
+        set((state) => {
+          const existing = state[bucket];
+          const byId = new Map(existing.map((session) => [session.id, session]));
+          let changed = false;
+          for (const session of page) {
+            if (!session?.id) continue;
+            const prior = byId.get(session.id);
+            byId.set(session.id, session);
+            if (!prior) changed = true;
+          }
+          if (!changed && existing.length === byId.size) {
+            // No new ids and identical length — skip the resort.
+            return state;
+          }
+          const next = Array.from(byId.values());
+          return { [bucket]: next } as Partial<GlobalSessionsState>;
+        });
+      };
+
       try {
         const sdk = opencodeClient.getSdkClient();
         const [activeResult, archivedResult] = await Promise.allSettled([
-          listGlobalSessionPages(sdk, { archived: false, pageSize: PAGE_SIZE }),
-          listGlobalSessionPages(sdk, { archived: true, pageSize: PAGE_SIZE }),
+          listGlobalSessionPages(sdk, {
+            archived: false,
+            pageSize: PAGE_SIZE,
+            onPage: (page) => accumulateInto('activeSessions', page),
+          }),
+          listGlobalSessionPages(sdk, {
+            archived: true,
+            pageSize: PAGE_SIZE,
+            onPage: (page) => accumulateInto('archivedSessions', page),
+          }),
         ]);
 
         const fallbackSnapshot = mergeSessionLists(current.activeSessions, fallbackActive);
@@ -263,9 +276,6 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: nextArchivedSessions,
-        sessionsByDirectory: nextActiveSessions === state.activeSessions
-          ? state.sessionsByDirectory
-          : buildSessionsByDirectory(nextActiveSessions),
       };
     });
   },
@@ -290,7 +300,6 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: nextArchivedSessions,
-        sessionsByDirectory: buildSessionsByDirectory(nextActiveSessions),
       };
     });
   },
@@ -327,7 +336,6 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: [...movedSessions, ...remainingArchivedSessions],
-        sessionsByDirectory: buildSessionsByDirectory(nextActiveSessions),
       };
     });
   },

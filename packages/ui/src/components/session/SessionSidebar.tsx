@@ -349,21 +349,19 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return merged.filter((session) => isKnownActiveSessionDirectory(session, knownSessionDirectories));
   }, [globalActiveSessions, knownSessionDirectories, liveSessions]);
 
-  const syncSessionStructureSignature = React.useMemo(
-    () => liveSessions
-      .map((session) => {
-        const directory = normalizePath((session as Session & { directory?: string | null }).directory ?? null) ?? '';
-        return `${session.id}:${session.title ?? ''}:${session.time?.archived ? 1 : 0}:${directory}`;
-      })
-      .join('|'),
-    [liveSessions],
-  );
-
+  // Keep a ref of the latest live sessions so async helpers can read it
+  // without re-running expensive effects on every session SSE event.
+  // Using a subscription instead of a render-time signature avoids
+  // allocating an O(N) string on every render when many threads exist.
   const syncSessionsSnapshotRef = React.useRef<Session[]>(liveSessions);
-  React.useEffect(() => {
-    syncSessionsSnapshotRef.current = liveSessions;
-  }, [syncSessionStructureSignature, liveSessions]);
+  syncSessionsSnapshotRef.current = liveSessions;
 
+  // Discover worktrees and refresh global sessions when the project set
+  // or active directory changes — not on every per-session SSE update.
+  // Live session changes are already reflected via useAllLiveSessions and
+  // merged into the displayed list above, so there's no need to refetch
+  // global sessions for every session event (which used to thrash with
+  // many projects + many threads).
   React.useEffect(() => {
     let cancelled = false;
 
@@ -407,7 +405,22 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [currentDirectory, syncSessionStructureSignature, projects]);
+  }, [currentDirectory, projects]);
+
+  // Backstop: periodically resync the global session list so sessions
+  // created/archived in other projects eventually show up even if no
+  // SSE event for them reaches this client. Cheap because the request
+  // is debounced server-side and only one in-flight load runs at a time.
+  React.useEffect(() => {
+    const PERIODIC_REFRESH_MS = 60_000;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      void refreshGlobalSessions(syncSessionsSnapshotRef.current);
+    }, PERIODIC_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, []);
 
   React.useEffect(() => {
     let refreshTimeout: ReturnType<typeof setTimeout> | null = null;
