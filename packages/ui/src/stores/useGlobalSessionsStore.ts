@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Session } from '@opencode-ai/sdk/v2';
 import { opencodeClient } from '@/lib/opencode/client';
-import { listGlobalSessionPages, type GlobalSessionRecord } from '@/stores/globalSessions';
+import { listGlobalSessionPages, type GlobalSessionRecord, type InitialSessionPage } from '@/stores/globalSessions';
 
 type GlobalSessionsStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -22,9 +22,42 @@ type GlobalSessionsState = {
   archiveSessions: (ids: Iterable<string>, archivedAt?: number) => void;
 };
 
-const PAGE_SIZE = 200;
+// Large page size to minimize per-request overhead. The OpenCode server
+// resolves the list in ~10ms regardless of size; the bottleneck is the
+// per-request round-trip through the Vite dev proxy / browser stack
+// (~500ms each). 1500 typically collapses pagination to a single request
+// for installations with up to ~1500 active sessions, and bounds response
+// size to under ~1MB even at the cap.
+const PAGE_SIZE = 1500;
 
 let inflightLoad: Promise<LoadResult> | null = null;
+let inflightArchivedLoad: Promise<Session[]> | null = null;
+
+type PrefetchResource = {
+  data: GlobalSessionRecord[];
+  nextCursor: string | null;
+};
+
+type SessionsPrefetch = {
+  startedAt: number;
+  pageSize: number;
+  active: Promise<PrefetchResource | null>;
+  archived: Promise<PrefetchResource | null>;
+};
+
+const consumePrefetch = (
+  archived: boolean,
+): Promise<PrefetchResource | null> | null => {
+  if (typeof window === 'undefined') return null;
+  const slot = (window as unknown as { __OPENCHAMBER_SESSIONS_PREFETCH__?: SessionsPrefetch }).__OPENCHAMBER_SESSIONS_PREFETCH__;
+  if (!slot || slot.pageSize !== PAGE_SIZE) return null;
+  const key = archived ? 'archived' : 'active';
+  const promise = slot[key];
+  // Single-use: clear immediately so subsequent loadSessions() calls go
+  // through the SDK and pick up fresh data instead of stale prefetch.
+  slot[key] = Promise.resolve(null);
+  return promise ?? null;
+};
 
 const normalizePath = (value?: string | null): string | null => {
   if (typeof value !== 'string') {
@@ -178,79 +211,113 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
 
     set((state) => (state.status === 'loading' ? state : { status: 'loading' }));
 
+    // Stream pages into state as they arrive so the UI can render
+    // sessions progressively rather than waiting for the full pagination
+    // to finish. This is the difference between "feels instant with the
+    // first batch visible" vs "blank UI for several seconds while
+    // thousands of sessions paginate".
+    const accumulateInto = (
+      bucket: 'activeSessions' | 'archivedSessions',
+      page: GlobalSessionRecord[],
+    ) => {
+      if (page.length === 0) return;
+      set((state) => {
+        const existing = state[bucket];
+        const byId = new Map(existing.map((session) => [session.id, session]));
+        let changed = false;
+        for (const session of page) {
+          if (!session?.id) continue;
+          const prior = byId.get(session.id);
+          byId.set(session.id, session);
+          if (!prior) changed = true;
+        }
+        if (!changed && existing.length === byId.size) {
+          return state;
+        }
+        const next = Array.from(byId.values());
+        return { [bucket]: next } as Partial<GlobalSessionsState>;
+      });
+    };
+
+    const sdk = opencodeClient.getSdkClient();
+
+    // Adopt prefetched first-page responses kicked off by index.html
+    // during HTML parse. These complete well before the JS bundle finishes
+    // parsing, eliminating the initial network round-trip from the
+    // critical path of "time to first sessions visible."
+    const activePrefetchPromise = consumePrefetch(false);
+    const archivedPrefetchPromise = consumePrefetch(true);
+
+    const resolveInitialPage = async (
+      promise: Promise<PrefetchResource | null> | null,
+    ): Promise<InitialSessionPage | undefined> => {
+      if (!promise) return undefined;
+      try {
+        const result = await promise;
+        if (!result) return undefined;
+        const nextCursor = result.nextCursor === null ? null : Number(result.nextCursor);
+        return {
+          data: result.data,
+          nextCursor: Number.isFinite(nextCursor) ? (nextCursor as number) : null,
+        };
+      } catch {
+        return undefined;
+      }
+    };
+
+    // Archived sessions are off the critical path — the sidebar's
+    // archived group is collapsed by default and the user only needs
+    // them when they expand it. Load them in the background so the
+    // active list (which IS visible) doesn't wait. De-duplicate
+    // concurrent archived loads so multiple refresh callers share.
+    if (!inflightArchivedLoad) {
+      inflightArchivedLoad = (async () => {
+        const initialPage = await resolveInitialPage(archivedPrefetchPromise);
+        return listGlobalSessionPages(sdk, {
+          archived: true,
+          pageSize: PAGE_SIZE,
+          initialPage,
+          onPage: (page) => accumulateInto('archivedSessions', page),
+        });
+      })()
+        .then((archived) => {
+          set((state) => applySnapshot(state, state.activeSessions, archived, state.status));
+          return archived;
+        })
+        .catch((error) => {
+          console.warn('[GlobalSessions] Failed to load archived sessions, preserving current snapshot:', error);
+          return get().archivedSessions;
+        })
+        .finally(() => {
+          inflightArchivedLoad = null;
+        });
+    }
+
     inflightLoad = (async () => {
       const current = get();
 
-      // Stream pages into state as they arrive so the UI can render
-      // sessions progressively rather than waiting for the full pagination
-      // to finish. This is the difference between "feels instant with 50
-      // sessions visible" vs "blank UI for several seconds while 2000
-      // sessions paginate".
-      const accumulateInto = (
-        bucket: 'activeSessions' | 'archivedSessions',
-        page: GlobalSessionRecord[],
-      ) => {
-        if (page.length === 0) return;
-        set((state) => {
-          const existing = state[bucket];
-          const byId = new Map(existing.map((session) => [session.id, session]));
-          let changed = false;
-          for (const session of page) {
-            if (!session?.id) continue;
-            const prior = byId.get(session.id);
-            byId.set(session.id, session);
-            if (!prior) changed = true;
-          }
-          if (!changed && existing.length === byId.size) {
-            // No new ids and identical length — skip the resort.
-            return state;
-          }
-          const next = Array.from(byId.values());
-          return { [bucket]: next } as Partial<GlobalSessionsState>;
-        });
-      };
-
+      let nextActiveSessions: Session[];
       try {
-        const sdk = opencodeClient.getSdkClient();
-        const [activeResult, archivedResult] = await Promise.allSettled([
-          listGlobalSessionPages(sdk, {
-            archived: false,
-            pageSize: PAGE_SIZE,
-            onPage: (page) => accumulateInto('activeSessions', page),
-          }),
-          listGlobalSessionPages(sdk, {
-            archived: true,
-            pageSize: PAGE_SIZE,
-            onPage: (page) => accumulateInto('archivedSessions', page),
-          }),
-        ]);
-
-        const fallbackSnapshot = mergeSessionLists(current.activeSessions, fallbackActive);
-        const nextActiveSessions = activeResult.status === 'fulfilled'
-          ? activeResult.value
-          : fallbackSnapshot;
-        const nextArchivedSessions = archivedResult.status === 'fulfilled'
-          ? archivedResult.value
-          : current.archivedSessions;
-
-        if (activeResult.status === 'rejected') {
-          console.warn('[GlobalSessions] Failed to load active sessions, preserving existing snapshot with fallback merge:', activeResult.reason);
-        }
-        if (archivedResult.status === 'rejected') {
-          console.warn('[GlobalSessions] Failed to load archived sessions, preserving current snapshot:', archivedResult.reason);
-        }
-
-        set((state) => applySnapshot(state, nextActiveSessions, nextArchivedSessions, 'ready'));
-        return { activeSessions: nextActiveSessions, archivedSessions: nextArchivedSessions };
+        const initialPage = await resolveInitialPage(activePrefetchPromise);
+        nextActiveSessions = await listGlobalSessionPages(sdk, {
+          archived: false,
+          pageSize: PAGE_SIZE,
+          initialPage,
+          onPage: (page) => accumulateInto('activeSessions', page),
+        });
+        set((state) => applySnapshot(state, nextActiveSessions, state.archivedSessions, 'ready'));
       } catch (error) {
-        const nextActiveSessions = mergeSessionLists(current.activeSessions, fallbackActive);
-        const nextArchivedSessions = current.archivedSessions;
-        console.warn('[GlobalSessions] Failed to load sessions, using fallback snapshot:', error);
-        set((state) => applySnapshot(state, nextActiveSessions, nextArchivedSessions, 'error'));
-        return { activeSessions: nextActiveSessions, archivedSessions: nextArchivedSessions };
+        console.warn('[GlobalSessions] Failed to load active sessions, preserving existing snapshot with fallback merge:', error);
+        nextActiveSessions = mergeSessionLists(current.activeSessions, fallbackActive);
+        set((state) => applySnapshot(state, nextActiveSessions, state.archivedSessions, 'error'));
       } finally {
         inflightLoad = null;
       }
+
+      return {
+        activeSessions: nextActiveSessions,
+        archivedSessions: get().archivedSessions,
+      };
     })();
 
     return inflightLoad;

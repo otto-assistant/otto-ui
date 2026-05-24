@@ -74,7 +74,7 @@ import {
   formatProjectLabel,
   normalizePath,
 } from './sidebar/utils';
-import { refreshGlobalSessions, resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { ensureGlobalSessionsLoaded, refreshGlobalSessions, resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
@@ -356,12 +356,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const syncSessionsSnapshotRef = React.useRef<Session[]>(liveSessions);
   syncSessionsSnapshotRef.current = liveSessions;
 
-  // Discover worktrees and refresh global sessions when the project set
-  // or active directory changes — not on every per-session SSE update.
-  // Live session changes are already reflected via useAllLiveSessions and
-  // merged into the displayed list above, so there's no need to refetch
-  // global sessions for every session event (which used to thrash with
-  // many projects + many threads).
+  // Discover worktrees when the project set or active directory changes —
+  // not on every per-session SSE update. Live session changes are already
+  // reflected via useAllLiveSessions and merged into the displayed list
+  // above, so worktree discovery is the only project-scoped side effect
+  // that really needs to fire here.
   React.useEffect(() => {
     let cancelled = false;
 
@@ -399,7 +398,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       });
     };
 
-    void refreshGlobalSessions(syncSessionsSnapshotRef.current);
+    // Cheap on warm mounts: ensureGlobalSessionsLoaded short-circuits when
+    // the store already has data (e.g. populated by the index.html
+    // prefetch + main.tsx loadSessions). The periodic backstop below
+    // handles drift after that.
+    void ensureGlobalSessionsLoaded(syncSessionsSnapshotRef.current);
     void discoverWorktrees();
 
     return () => {

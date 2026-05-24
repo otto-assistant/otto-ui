@@ -599,6 +599,74 @@
       }
     </script>
 
+    <!--
+      Prefetch the global session list as early as possible — during HTML parse,
+      before the JS bundle has even started downloading. Stash the promises on
+      `window` so `useGlobalSessionsStore.loadSessions` can adopt them later
+      instead of issuing a duplicate request. On a cold reload this can shave
+      hundreds of milliseconds of time-to-first-session because the network
+      round-trip overlaps fully with bundle download + parse + React mount.
+
+      Limit must match `PAGE_SIZE` in `useGlobalSessionsStore`. Both buckets
+      are fetched in parallel; archived is off the visible critical path but
+      we prime it too so it's ready by the time anyone expands the archived
+      group.
+    -->
+    <script>
+      (function () {
+        try {
+          if (typeof window === 'undefined' || typeof fetch !== 'function') {
+            return;
+          }
+
+          // Bail out for desktop runtimes that use a custom base URL or for
+          // non-loopback hosts where the API may not be co-located.
+          var baseUrl = '/api';
+
+          var pageSize = 1500;
+          var buildUrl = function (archived) {
+            return baseUrl + '/experimental/session?archived=' + archived + '&limit=' + pageSize;
+          };
+
+          var asResource = function (url) {
+            return fetch(url, {
+              credentials: 'include',
+              headers: { Accept: 'application/json' },
+              cache: 'no-store',
+            }).then(function (response) {
+              if (!response.ok) {
+                throw new Error('prefetch ' + url + ' failed: ' + response.status);
+              }
+              var cursor = response.headers.get('x-next-cursor');
+              return response.json().then(function (data) {
+                return {
+                  data: Array.isArray(data) ? data : [],
+                  nextCursor: cursor && cursor.length > 0 ? cursor : null,
+                };
+              });
+            }).catch(function (error) {
+              // Swallow — the store will fall through to a normal SDK fetch.
+              if (typeof console !== 'undefined') {
+                console.warn('[prefetch] global session prefetch failed:', error);
+              }
+              return null;
+            });
+          };
+
+          window.__OPENCHAMBER_SESSIONS_PREFETCH__ = {
+            startedAt: Date.now(),
+            pageSize: pageSize,
+            active: asResource(buildUrl('false')),
+            archived: asResource(buildUrl('true')),
+          };
+        } catch (error) {
+          if (typeof console !== 'undefined') {
+            console.warn('[prefetch] failed to schedule session prefetch:', error);
+          }
+        }
+      })();
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
