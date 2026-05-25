@@ -110,6 +110,42 @@ export function useAllSessionStatuses(): Record<string, SessionStatus> {
   )
 }
 
+const EMPTY_PERMISSION_LIST: PermissionRequest[] = []
+
+const arePermissionListsEquivalent = (a: PermissionRequest[], b: PermissionRequest[]): boolean => {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].id !== b[i].id) return false
+  }
+  return true
+}
+
+/**
+ * Read a session's pending permission requests by scanning every already-
+ * loaded child store. Unlike `useSessionPermissions`, this does NOT
+ * create or bootstrap a child store for the session's directory — making
+ * it safe to call from sidebar list items, where hundreds of instances
+ * may be rendered at once for projects/worktrees that we don't yet (and
+ * may never) need to fully bootstrap.
+ *
+ * Returns an empty array when the session's directory has not been
+ * bootstrapped yet. SSE events / explicit navigation will eventually
+ * populate it.
+ */
+export function useGlobalSessionPermissions(sessionId: string): PermissionRequest[] {
+  return useLiveSyncSelector(
+    useCallback((states) => {
+      for (const state of states) {
+        const list = state.permission?.[sessionId]
+        if (list && list.length > 0) return list
+      }
+      return EMPTY_PERMISSION_LIST
+    }, [sessionId]),
+    arePermissionListsEquivalent,
+  )
+}
+
 export function useAllLiveSessions(): Session[] {
   return useLiveSyncSelector(
     useCallback((states) => aggregateLiveSessions(states), []),
@@ -1276,6 +1312,11 @@ export function SyncProvider(props: {
   const messageStreamTransport = useConfigStore((state) => state.settingsMessageStreamTransport)
   const childStoresRef = useRef<ChildStoreManager | null>(null)
   if (!childStoresRef.current) childStoresRef.current = new ChildStoreManager()
+  // Track the current active directory in a ref so onBootstrap (created
+  // once via useEffect) can read the *current* value at retry-time
+  // without re-binding on every directory change.
+  const activeDirectoryRef = useRef(props.directory)
+  activeDirectoryRef.current = props.directory
   const childStores = childStoresRef.current
   const routingIndexRef = useRef<EventRoutingIndex | null>(null)
   if (!routingIndexRef.current) routingIndexRef.current = createEventRoutingIndex()
@@ -1360,15 +1401,24 @@ export function SyncProvider(props: {
           })
 
           // VS Code race: if sessions are still empty after bootstrap, OpenCode
-          // wasn't ready yet (bridge returned 503). Retry a few times.
+          // wasn't ready yet (bridge returned 503). Retry — but ONLY for the
+          // currently-active directory and ONLY once.
+          //
+          // The previous "always retry up to 5 times" logic was a denial of
+          // service when many projects/worktrees were registered: the
+          // sidebar would mount a row per session, each ensure+bootstrap a
+          // child store for its directory, each retry 5× × 2s = 10s of
+          // background SDK polling. With 50 directories that fans out to
+          // 50 × 5 = 250 bootstrap rounds, ≈3000 SDK calls in waves, and a
+          // CPU-pegged tab. An empty session list is the legitimate state
+          // for a brand new project — it does not deserve a retry storm.
           const state = store.getState()
-          if (state.session.length === 0 && attempt < 5) {
+          const isActiveDirectory = directory === activeDirectoryRef.current
+          if (state.session.length === 0 && attempt < 1 && isActiveDirectory) {
             console.warn(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
             await new Promise((r) => setTimeout(r, 2000))
             store.setState({ status: "loading" as const })
             await runBootstrap(attempt + 1)
-          } else if (state.session.length === 0) {
-            console.warn(`[bootstrap] sessions empty for ${directory} after ${attempt + 1} attempts; giving up`)
           }
         }
 
