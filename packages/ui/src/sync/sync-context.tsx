@@ -156,7 +156,16 @@ export function useAllLiveSessions(): Session[] {
 // Boot debounce — suppresses redundant refresh/re-bootstrap events during startup.
 let bootingRoot = false
 let bootedAt = 0
-const BOOT_DEBOUNCE_MS = 1500
+// Wide enough to cover OpenCode's typical warmup window. The first
+// `server.connected` SSE event on each page load is the normal handshake
+// (not a real OpenCode restart) and we MUST NOT treat it as a signal to
+// re-bootstrap every child directory — that doubles the request volume
+// on every page load.
+const BOOT_DEBOUNCE_MS = 30_000
+// Tracks whether we have already observed a `server.connected` event since
+// page boot. The very first one is the SSE/WS handshake completing; only
+// subsequent ones indicate a real server restart and warrant re-bootstrap.
+let serverConnectedSeen = false
 const RECONNECT_MESSAGE_LIMIT = 200
 const RECONNECT_SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 const requestSignature = (items: Array<{ id: string }> | undefined): string => {
@@ -1051,7 +1060,17 @@ function handleEvent(
     // On server.connected / global.disposed, re-bootstrap all directories
     // but only if not during recent boot
     if (payload.type === "server.connected" || payload.type === "global.disposed") {
-      if (!recent) {
+      // The first `server.connected` after page load is just the normal SSE
+      // handshake completing — it does NOT indicate an OpenCode restart and
+      // must not trigger a re-bootstrap (which previously doubled the API
+      // request volume on every page load). Only subsequent
+      // `server.connected` events represent a real server restart.
+      const isFirstServerConnected =
+        payload.type === "server.connected" && !serverConnectedSeen
+      if (payload.type === "server.connected") {
+        serverConnectedSeen = true
+      }
+      if (!recent && !isFirstServerConnected) {
         for (const dir of childStores.children.keys()) {
           const store = childStores.getChild(dir)
           if (store && store.getState().status !== "loading") {
@@ -1359,6 +1378,7 @@ export function SyncProvider(props: {
               config: globalState.config,
               projects: globalState.projects,
               providers: globalState.providers,
+              path: globalState.path,
             },
             loadSessions: (dir) => retry(async () => {
               const result = await props.sdk.session.list({
@@ -1415,7 +1435,11 @@ export function SyncProvider(props: {
           const state = store.getState()
           const isActiveDirectory = directory === activeDirectoryRef.current
           if (state.session.length === 0 && attempt < 1 && isActiveDirectory) {
-            console.warn(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
+            // Downgraded from console.warn — this is the expected first
+            // attempt under a slow/cold OpenCode backend (or a brand new
+            // project with no sessions yet) and was alarming users into
+            // thinking the app was malfunctioning.
+            console.debug(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
             await new Promise((r) => setTimeout(r, 2000))
             store.setState({ status: "loading" as const })
             await runBootstrap(attempt + 1)
@@ -1478,6 +1502,7 @@ export function SyncProvider(props: {
         handleEvent(directory, payload, childStores, routingIndex)
       },
       onReconnect: () => {
+        const { hasEverConnected: wasEverConnected } = useConfigStore.getState()
         useConfigStore.setState({
           isConnected: true,
           hasEverConnected: true,
@@ -1485,6 +1510,19 @@ export function SyncProvider(props: {
         })
         for (const dir of childStores.children.keys()) {
           triggerRecoveryResync(dir)
+        }
+        // If we lost SSE and came back, the per-directory resync covers
+        // the active directory's state but the global session list
+        // (cross-project) can drift while disconnected. Re-pull it so
+        // sessions created in other projects show up after reconnect.
+        // Skipped on the initial connection — `ensureGlobalSessionsLoaded`
+        // already handled the cold load.
+        if (wasEverConnected) {
+          void import("@/stores/useGlobalSessionsStore").then((mod) => {
+            mod.refreshGlobalSessions().catch(() => {
+              // Transient — next SSE event or backstop will catch up.
+            })
+          })
         }
       },
       onDisconnect: (reason) => {
