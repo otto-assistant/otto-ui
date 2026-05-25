@@ -1,4 +1,5 @@
 import type { ProjectEntry } from '@/lib/api/types';
+import type { MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 
 export type AssistantNotificationPayload = {
   title?: string;
@@ -57,6 +58,7 @@ export type DesktopSettings = {
   securityScopedBookmarks?: string[];
   pinnedDirectories?: string[];
   showReasoningTraces?: boolean;
+  collapsibleThinkingBlocks?: boolean;
   showDeletionDialog?: boolean;
   nativeNotificationsEnabled?: boolean;
   notificationMode?: 'always' | 'hidden-only';
@@ -121,6 +123,7 @@ export type DesktopSettings = {
   gitModelId?: string;
   pwaAppName?: string;
   pwaOrientation?: 'system' | 'portrait' | 'landscape';
+  mobileKeyboardMode?: MobileKeyboardMode;
   inputSpellcheckEnabled?: boolean;
   showToolFileIcons?: boolean;
   showExpandedBashTools?: boolean;
@@ -133,6 +136,7 @@ export type DesktopSettings = {
   mermaidRenderingMode?: 'svg' | 'ascii';
   userMessageRenderingMode?: 'markdown' | 'plain';
   stickyUserHeader?: boolean;
+  wideChatLayoutEnabled?: boolean;
   showSplitAssistantMessageActions?: boolean;
   fontSize?: number;
   terminalFontSize?: number;
@@ -157,6 +161,20 @@ export type DesktopSettings = {
   skillCatalogs?: SkillCatalogConfig[];
   // Opt-in to send anonymous usage reports for update checks (default: true)
   reportUsage?: boolean;
+
+  // Global behavior prompt — synced to ~/.config/opencode/AGENTS.md
+  globalBehaviorPrompt?: string;
+  responseStyleEnabled?: boolean;
+  responseStylePreset?: 'concise' | 'detailed' | 'mentor' | 'pushback' | 'noFiller' | 'matchEnergy' | 'warmPeer' | 'custom';
+  responseStyleCustomInstructions?: string;
+  sttProvider?: 'browser' | 'server' | 'wasm';
+  sttServerUrl?: string;
+  sttModel?: string;
+  wasmSttModel?: string;
+  sttLanguage?: string;
+  sttSilenceThresholdDb?: number;
+  sttSilenceHoldMs?: number;
+  sttTranscribeOnStop?: boolean;
 };
 
 type TauriGlobal = {
@@ -190,6 +208,21 @@ export const isTauriShell = (): boolean => {
 };
 
 export const isElectronShell = (): boolean => getElectronRuntime()?.runtime === 'electron';
+
+export const hasDesktopInvoke = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
+  return typeof tauri?.core?.invoke === 'function';
+};
+
+export const canUseElectronDesktopIPC = (): boolean => isElectronShell() && hasDesktopInvoke();
+
+export const invokeDesktop = async <T = unknown>(command: string, args?: Record<string, unknown>): Promise<T | null> => {
+  if (typeof window === 'undefined') return null;
+  const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
+  if (typeof tauri?.core?.invoke !== 'function') return null;
+  return tauri.core.invoke(command, args ?? {}) as Promise<T>;
+};
 
 const normalizeOrigin = (raw: string): string | null => {
   const trimmed = raw.trim();
@@ -336,7 +369,7 @@ export const requestDirectoryAccess = async (
 };
 
 export const requestFileAccess = async (
-  options?: { filters?: Array<{ name: string; extensions: string[] }> }
+  options?: { filters?: Array<{ name: string; extensions: string[] }>; defaultPath?: string }
 ): Promise<{ success: boolean; path?: string; error?: string }> => {
   if (isTauriShell() && isDesktopLocalOriginActive()) {
     try {
@@ -346,6 +379,7 @@ export const requestFileAccess = async (
         multiple: false,
         title: 'Select File',
         ...(options?.filters ? { filters: options.filters } : {}),
+        ...(options?.defaultPath ? { defaultPath: options.defaultPath } : {}),
       });
       if (!selected || typeof selected !== 'string') {
         return { success: false, error: 'File selection cancelled' };

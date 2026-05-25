@@ -82,6 +82,8 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       getProviderSources,
       removeProviderConfig,
       refreshOpenCodeAfterConfigChange,
+      buildOpenCodeUrl,
+      getOpenCodeAuthHeaders,
     });
 
     registerProjectIconRoutes(app, {
@@ -121,6 +123,12 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       createMcpConfig,
       updateMcpConfig,
       deleteMcpConfig,
+      listSnippets,
+      getSnippet,
+      createSnippet,
+      updateSnippet,
+      deleteSnippet,
+      expandSnippets,
     } = await import('./index.js');
 
     registerConfigEntityRoutes(app, {
@@ -142,11 +150,18 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       createMcpConfig,
       updateMcpConfig,
       deleteMcpConfig,
+      listSnippets,
+      getSnippet,
+      createSnippet,
+      updateSnippet,
+      deleteSnippet,
+      expandSnippets,
     });
 
     const {
       getSkillSources,
       discoverSkills,
+      mergeDiscoveredSkills,
       createSkill,
       updateSkill,
       deleteSkill,
@@ -187,6 +202,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       getOpenCodePort,
       getSkillSources,
       discoverSkills,
+      mergeDiscoveredSkills,
       createSkill,
       updateSkill,
       deleteSkill,

@@ -1,4 +1,5 @@
 import { resolveContainedPath } from '../auth/safe-path.js';
+import { createRealpathCache } from '../path-realpath-cache.js';
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
 
@@ -7,6 +8,36 @@ const createCommandTimeoutMs = () => {
   if (Number.isFinite(raw) && raw > 0) return raw;
   return 5 * 60 * 1000;
 };
+
+// How long a cached git-read result stays fresh. The location of a repo's git
+// directory is effectively static while the app runs, so a short TTL safely
+// absorbs the burst of identical lookups a fresh client (e.g. right after a
+// page reload) fires for every project. Set to 0 to disable caching.
+const createGitReadCacheTtlMs = () => {
+  const raw = Number(process.env.OPENCHAMBER_GIT_READ_CACHE_TTL_MS);
+  if (Number.isFinite(raw) && raw >= 0) return raw;
+  return 30 * 1000;
+};
+
+// Only deterministic, side-effect-free git plumbing path queries are cacheable.
+// Anything outside this allowlist (including any non-git command) runs normally
+// — we never cache arbitrary exec.
+const normalizeCommand = (command) =>
+  typeof command === 'string' ? command.trim().replace(/\s+/g, ' ') : '';
+
+const isCacheableGitReadCommand = (command) => {
+  const normalized = normalizeCommand(command);
+  return /^git rev-parse(?: --(?:absolute-git-dir|git-common-dir|show-toplevel)){1,3}$/.test(normalized);
+};
+
+// Dual-constraint bound per the project's caching policy (count + bytes). Git
+// rev-parse outputs are tiny, so these ceilings are generous and only guard
+// against pathological growth on long-lived, many-directory deployments.
+const GIT_READ_CACHE_MAX_ENTRIES = 500;
+const GIT_READ_CACHE_MAX_BYTES = 1024 * 1024;
+
+const gitReadEntryBytes = (key, result) =>
+  key.length + (result?.stdout?.length || 0) + (result?.stderr?.length || 0);
 
 const isPathWithinRoot = (resolvedPath, rootPath, path, os) => {
   const resolvedRoot = path.resolve(rootPath || os.homedir());
@@ -145,6 +176,69 @@ const resolveWorkspacePathFromContext = async ({ req, targetPath, resolveProject
   });
 };
 
+const deriveCloneDirectoryName = (remoteUrl) => {
+  const remote = typeof remoteUrl === 'string' ? remoteUrl.trim() : '';
+  if (!remote) return '';
+  const withoutQuery = remote.split(/[?#]/, 1)[0] || remote;
+  const match = withoutQuery.match(/([^/:]+?)(?:\.git)?\/?$/);
+  return match?.[1]?.trim() || '';
+};
+
+const resolveCloneGitIdentity = async (gitIdentityId) => {
+  const id = typeof gitIdentityId === 'string' ? gitIdentityId.trim() : '';
+  if (!id) return null;
+  const { getProfile, getGlobalIdentity } = await import('../git/index.js');
+  if (id === 'global') {
+    const globalIdentity = await getGlobalIdentity();
+    if (!globalIdentity?.userName || !globalIdentity?.userEmail) return null;
+    return {
+      id: 'global',
+      name: 'Global Identity',
+      userName: globalIdentity.userName,
+      userEmail: globalIdentity.userEmail,
+      sshKey: globalIdentity.sshCommand ? globalIdentity.sshCommand.replace('ssh -i ', '') : null,
+    };
+  }
+  return getProfile(id) || null;
+};
+
+const escapeCloneSshKeyPath = (sshKeyPath) => {
+  const raw = String(sshKeyPath || '').trim();
+  if (!raw) return '';
+  const normalized = process.platform === 'win32' ? raw.replace(/\\/g, '/') : raw;
+  const dangerousChars = /[`$!"';&|<>(){}[\]*?#~]/;
+  if (dangerousChars.test(normalized)) {
+    throw new Error(`SSH key path contains invalid characters: ${raw}`);
+  }
+  if (process.platform === 'win32') {
+    const driveMatch = normalized.match(/^([A-Za-z]):\//);
+    const unixPath = driveMatch ? `/${driveMatch[1].toLowerCase()}${normalized.slice(2)}` : normalized;
+    return `'${unixPath}'`;
+  }
+  return `'${normalized.replace(/'/g, "'\\''")}'`;
+};
+
+const resolveReadPathFromContext = async ({ req, targetPath, resolveProjectDirectory, path, os, normalizeDirectoryPath, openchamberUserConfigRoot }) => {
+  if (req.query?.allowOutsideWorkspace === 'true') {
+    const normalized = normalizeDirectoryPath(targetPath);
+    if (!normalized || typeof normalized !== 'string') {
+      return { ok: false, error: 'Path is required' };
+    }
+    const resolved = path.resolve(normalized);
+    return { ok: true, base: path.dirname(resolved), resolved };
+  }
+
+  return resolveWorkspacePathFromContext({
+    req,
+    targetPath,
+    resolveProjectDirectory,
+    path,
+    os,
+    normalizeDirectoryPath,
+    openchamberUserConfigRoot,
+  });
+};
+
 const runCommandInDirectory = ({ shell, shellFlag, command, resolvedCwd, spawn, buildAugmentedPath, commandTimeoutMs }) => {
   return new Promise((resolve) => {
     let stdout = '';
@@ -227,9 +321,15 @@ export const registerFsRoutes = (app, dependencies) => {
     resolveGitBinaryForSpawn,
     openchamberUserConfigRoot,
   } = dependencies;
+  const realpathCache = createRealpathCache({
+    realpath: fsPromises.realpath.bind(fsPromises),
+  });
 
   const execJobs = new Map();
   const commandTimeoutMs = createCommandTimeoutMs();
+  const gitReadCacheTtlMs = createGitReadCacheTtlMs();
+  const gitReadCache = new Map();
+  const inFlightGitReadCache = new Map();
 
   const pruneExecJobs = () => {
     const now = Date.now();
@@ -245,6 +345,94 @@ export const registerFsRoutes = (app, dependencies) => {
     }
   };
 
+  const pruneGitReadCache = () => {
+    if (gitReadCacheTtlMs <= 0) {
+      return;
+    }
+    const now = Date.now();
+    for (const [key, entry] of gitReadCache.entries()) {
+      if (!entry || now - entry.at > gitReadCacheTtlMs) {
+        gitReadCache.delete(key);
+      }
+    }
+  };
+
+  // Insert with LRU (oldest-first) eviction enforcing both count and byte caps.
+  // Map iteration order is insertion order, so deleting+re-setting a key moves
+  // it to the most-recently-used position.
+  const setGitReadCacheEntry = (key, result) => {
+    gitReadCache.delete(key);
+    gitReadCache.set(key, { result, at: Date.now() });
+
+    let totalBytes = 0;
+    for (const [k, entry] of gitReadCache) {
+      totalBytes += gitReadEntryBytes(k, entry.result);
+    }
+    while (
+      gitReadCache.size > GIT_READ_CACHE_MAX_ENTRIES ||
+      (totalBytes > GIT_READ_CACHE_MAX_BYTES && gitReadCache.size > 1)
+    ) {
+      const oldest = gitReadCache.entries().next().value;
+      if (!oldest) {
+        break;
+      }
+      totalBytes -= gitReadEntryBytes(oldest[0], oldest[1].result);
+      gitReadCache.delete(oldest[0]);
+    }
+  };
+
+  // Runs a command, transparently serving/storing cacheable git-read results.
+  // Non-cacheable commands always execute and are never stored.
+  const runCommandWithGitReadCache = async ({ shell, shellFlag, command, resolvedCwd }) => {
+    const cacheable = gitReadCacheTtlMs > 0 && isCacheableGitReadCommand(command);
+    const cacheKey = cacheable ? `${resolvedCwd} ${normalizeCommand(command)}` : null;
+
+    if (cacheKey) {
+      const cached = gitReadCache.get(cacheKey);
+      if (cached && Date.now() - cached.at < gitReadCacheTtlMs) {
+        // Refresh recency for LRU without altering the entry's age/TTL.
+        gitReadCache.delete(cacheKey);
+        gitReadCache.set(cacheKey, cached);
+        return { ...cached.result, command };
+      }
+      if (cached) {
+        gitReadCache.delete(cacheKey);
+      }
+
+      const inFlight = inFlightGitReadCache.get(cacheKey);
+      if (inFlight) {
+        const result = await inFlight;
+        return { ...result, command };
+      }
+    }
+
+    const runPromise = runCommandInDirectory({
+      shell,
+      shellFlag,
+      command,
+      resolvedCwd,
+      spawn,
+      buildAugmentedPath,
+      commandTimeoutMs,
+    }).then((result) => {
+      // Only cache successful results — failures may be transient.
+      if (cacheKey && result && result.success) {
+        setGitReadCacheEntry(cacheKey, result);
+      }
+      return result;
+    }).finally(() => {
+      if (cacheKey && inFlightGitReadCache.get(cacheKey) === runPromise) {
+        inFlightGitReadCache.delete(cacheKey);
+      }
+    });
+
+    if (cacheKey) {
+      inFlightGitReadCache.set(cacheKey, runPromise);
+    }
+
+    return runPromise;
+  };
+
   const runExecJob = async (job) => {
     job.status = 'running';
     job.updatedAt = Date.now();
@@ -257,14 +445,11 @@ export const registerFsRoutes = (app, dependencies) => {
       }
 
       try {
-        const result = await runCommandInDirectory({
+        const result = await runCommandWithGitReadCache({
           shell: job.shell,
           shellFlag: job.shellFlag,
           command,
           resolvedCwd: job.resolvedCwd,
-          spawn,
-          buildAugmentedPath,
-          commandTimeoutMs,
         });
         results.push(result);
       } catch (error) {
@@ -334,6 +519,115 @@ export const registerFsRoutes = (app, dependencies) => {
     }
   });
 
+  app.post('/api/fs/clone', async (req, res) => {
+    try {
+      const { remoteUrl, destinationPath, gitIdentityId } = req.body ?? {};
+      const remote = typeof remoteUrl === 'string' ? remoteUrl.trim() : '';
+      const destination = typeof destinationPath === 'string' ? destinationPath.trim() : '';
+      if (!remote) {
+        return res.status(400).json({ error: 'Repository URL is required' });
+      }
+      if (!destination) {
+        return res.status(400).json({ error: 'Destination path is required' });
+      }
+
+      let resolvedDestination = path.resolve(normalizeDirectoryPath(destination));
+      let parentPath = path.dirname(resolvedDestination);
+      let directoryName = path.basename(resolvedDestination);
+
+      const cloneIntoDestinationDirectory = destination.endsWith('/') || destination.endsWith('\\');
+      if (cloneIntoDestinationDirectory) {
+        const inferredName = deriveCloneDirectoryName(remote);
+        if (!inferredName) {
+          return res.status(400).json({ error: 'Could not infer repository directory name from URL' });
+        }
+        parentPath = resolvedDestination;
+        directoryName = inferredName;
+        resolvedDestination = path.join(parentPath, directoryName);
+      } else {
+        try {
+          const stat = await fsPromises.stat(resolvedDestination);
+          if (stat.isDirectory()) {
+            const inferredName = deriveCloneDirectoryName(remote);
+            if (!inferredName) {
+              return res.status(400).json({ error: 'Could not infer repository directory name from URL' });
+            }
+            parentPath = resolvedDestination;
+            directoryName = inferredName;
+            resolvedDestination = path.join(parentPath, directoryName);
+          }
+        } catch (error) {
+          if (!error || error.code !== 'ENOENT') {
+            throw error;
+          }
+        }
+      }
+      if (!directoryName || directoryName === '.' || directoryName === '..') {
+        return res.status(400).json({ error: 'Destination path must include a directory name' });
+      }
+
+      const identity = await resolveCloneGitIdentity(gitIdentityId);
+      const gitArgs = ['clone', '--', remote, directoryName];
+      const sshKeyPath = typeof identity?.sshKey === 'string' ? identity.sshKey.trim() : '';
+      if (sshKeyPath) {
+        gitArgs.unshift(`core.sshCommand=ssh -i ${escapeCloneSshKeyPath(sshKeyPath)} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`);
+        gitArgs.unshift('-c');
+      }
+
+      await fsPromises.mkdir(parentPath, { recursive: true });
+      try {
+        await fsPromises.access(resolvedDestination);
+        return res.status(409).json({ error: 'Destination path already exists' });
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') {
+          throw error;
+        }
+      }
+
+      const output = await new Promise((resolve, reject) => {
+        const child = spawn(resolveGitBinaryForSpawn(), gitArgs, {
+          cwd: parentPath,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            PATH: buildAugmentedPath ? buildAugmentedPath(process.env.PATH || '') : process.env.PATH,
+            GIT_TERMINAL_PROMPT: '0',
+          },
+        });
+
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (data) => { stdout += data.toString(); });
+        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        child.on('error', reject);
+        child.on('close', (code) => {
+          const combined = `${stdout}\n${stderr}`.trim();
+          if (code === 0) {
+            resolve(combined);
+            return;
+          }
+          const message = combined || `git clone failed with exit code ${code}`;
+          reject(new Error(message));
+        });
+      });
+
+      if (identity?.userName && identity?.userEmail) {
+        try {
+          const { setLocalIdentity } = await import('../git/index.js');
+          await setLocalIdentity(resolvedDestination, identity);
+        } catch (error) {
+          console.warn('Failed to apply git identity after clone:', error);
+        }
+      }
+
+      return res.json({ success: true, path: resolvedDestination, output });
+    } catch (error) {
+      console.error('Failed to clone repository:', error);
+      return res.status(500).json({ error: error.message || 'Failed to clone repository' });
+    }
+  });
+
   app.get('/api/fs/stat', async (req, res) => {
     const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
     if (!filePath) {
@@ -341,7 +635,7 @@ export const registerFsRoutes = (app, dependencies) => {
     }
 
     try {
-      const resolved = await resolveWorkspacePathFromContext({
+      const resolved = await resolveReadPathFromContext({
         req,
         targetPath: filePath,
         resolveProjectDirectory,
@@ -378,12 +672,13 @@ export const registerFsRoutes = (app, dependencies) => {
 
   app.get('/api/fs/read', async (req, res) => {
     const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+    const optional = req.query.optional === 'true';
     if (!filePath) {
       return res.status(400).json({ error: 'Path is required' });
     }
 
     try {
-      const resolved = await resolveWorkspacePathFromContext({
+      const resolved = await resolveReadPathFromContext({
         req,
         targetPath: filePath,
         resolveProjectDirectory,
@@ -409,6 +704,9 @@ export const registerFsRoutes = (app, dependencies) => {
     } catch (error) {
       const err = error;
       if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        if (optional) {
+          return res.type('text/plain').send('');
+        }
         return res.status(404).json({ error: 'File not found' });
       }
       if (err && typeof err === 'object' && err.code === 'EACCES') {
@@ -426,7 +724,7 @@ export const registerFsRoutes = (app, dependencies) => {
     }
 
     try {
-      const resolved = await resolveWorkspacePathFromContext({
+      const resolved = await resolveReadPathFromContext({
         req,
         targetPath: filePath,
         resolveProjectDirectory,
@@ -691,6 +989,7 @@ export const registerFsRoutes = (app, dependencies) => {
     }
 
     pruneExecJobs();
+    pruneGitReadCache();
 
     try {
       const resolvedWorkspaceCwd = await resolveWorkspacePathFromContext({
@@ -803,7 +1102,7 @@ export const registerFsRoutes = (app, dependencies) => {
     };
 
     try {
-      resolvedPath = path.resolve(normalizeDirectoryPath(rawPath));
+      resolvedPath = await realpathCache.resolve(path.resolve(normalizeDirectoryPath(rawPath)));
 
       const stats = await fsPromises.stat(resolvedPath);
       if (!stats.isDirectory()) {
@@ -878,7 +1177,7 @@ export const registerFsRoutes = (app, dependencies) => {
       const err = error;
       const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
       const isPlansPath = code === 'ENOENT' && (isPlansDirectory(resolvedPath) || isPlansDirectory(rawPath));
-      if (!isPlansPath) {
+      if (code !== 'ENOENT') {
         console.error('Failed to list directory:', error);
       }
       if (code === 'ENOENT') {

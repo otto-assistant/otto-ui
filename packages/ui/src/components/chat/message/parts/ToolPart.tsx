@@ -1,7 +1,7 @@
 
 import React from 'react';
+import { animate, type AnimationPlaybackControls } from 'motion';
 import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
-import { RiArrowDownSLine, RiArrowRightSLine, RiExternalLinkLine } from '@remixicon/react';
 import { PatchDiff } from '@pierre/diffs/react';
 import { cn } from '@/lib/utils';
 import { SimpleMarkdownRenderer } from '../../MarkdownRenderer';
@@ -17,11 +17,12 @@ import { getSyncChildStores } from '@/sync/sync-refs';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionActivity } from '@/hooks/useSessionActivity';
 import { opencodeClient } from '@/lib/opencode/client';
+import { isVSCodeRuntime } from '@/lib/desktop';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { ScrollShadow } from '@/components/ui/ScrollShadow';
 import { Text } from '@/components/ui/text';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
-import type { ContentChangeReason } from '@/hooks/useChatScrollManager';
+import type { ContentChangeReason } from '@/hooks/useChatAutoFollow';
 import type { ToolPopupContent } from '../types';
 import { ensurePierreThemeRegistered } from '@/lib/shiki/appThemeRegistry';
 import { getDefaultTheme } from '@/lib/theme/themes';
@@ -34,6 +35,7 @@ import {
     tryParseJsonOutput,
 } from '../toolRenderers';
 import { JsonTreeViewer } from '@/components/ui/JsonTreeViewer';
+import { Icon } from "@/components/icon/Icon";
 import { DiffViewToggle, type DiffViewMode } from '../DiffViewToggle';
 import { MinDurationShineText } from './MinDurationShineText';
 import { ToolRevealOnMount } from './ToolRevealOnMount';
@@ -43,6 +45,10 @@ import { resolveFallbackTaskSessionId } from './resolveFallbackTaskSessionId';
 import { areRenderRelevantPartsEqual } from '../renderCompare';
 import { useI18n } from '@/lib/i18n';
 
+const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-4 sm:!leading-6 tracking-normal';
+const TOOL_ROW_TITLE_CLASS = cn('typography-meta font-medium', TOOL_ROW_TEXT_CLASS);
+const TOOL_ROW_DESCRIPTION_CLASS = cn('typography-meta', TOOL_ROW_TEXT_CLASS);
+
 type ToolStateWithMetadata = ToolStateUnion & { metadata?: Record<string, unknown>; input?: Record<string, unknown>; output?: string; error?: string; time?: { start: number; end?: number } };
 
 interface ToolPartProps {
@@ -51,6 +57,7 @@ interface ToolPartProps {
     onToggle: (toolId: string) => void;
     syntaxTheme: { [key: string]: React.CSSProperties };
     isMobile: boolean;
+    alwaysShowActions?: boolean;
     onContentChange?: (reason?: ContentChangeReason) => void;
     onShowPopup?: (content: ToolPopupContent) => void;
     animateTailText?: boolean;
@@ -110,11 +117,11 @@ const getMultiFileDescription = (
             {entries.map((entry) => {
                 const hasPerFileDiff = entry.added !== null || entry.removed !== null;
                 return (
-                    <span key={entry.path} className="inline-flex min-w-0 max-w-full items-center gap-1 typography-meta leading-5" style={{ color: 'var(--tools-description)' }}>
+                    <span key={entry.path} className={cn('inline-flex min-w-0 max-w-full items-center gap-1', TOOL_ROW_DESCRIPTION_CLASS)} style={{ color: 'var(--tools-description)' }}>
                         {showFileIcons ? <FileTypeIcon filePath={entry.path} className="h-3.5 w-3.5" /> : null}
                         <Text
                             variant={animate ? 'generate-effect' : 'static'}
-                            className="min-w-0 max-w-full truncate typography-meta leading-5"
+                            className={cn('min-w-0 max-w-full truncate', TOOL_ROW_DESCRIPTION_CLASS)}
                             style={{ color: 'var(--tools-description)' }}
                             title={entry.path}
                         >
@@ -160,6 +167,9 @@ const TASK_TOOL_POLL_HIDDEN_MS = 6000;
 const TASK_TOOL_INITIAL_FETCH_LIMIT = 500;
 const TASK_TOOL_ACTIVE_FETCH_LIMIT = 160;
 const TASK_TOOL_IDLE_FETCH_LIMIT = 80;
+const VSCODE_TASK_TOOL_INITIAL_FETCH_LIMIT = 30;
+const VSCODE_TASK_TOOL_ACTIVE_FETCH_LIMIT = 30;
+const VSCODE_TASK_TOOL_IDLE_FETCH_LIMIT = 30;
 const TASK_TOOL_NO_CHANGE_BACKOFF_AFTER_POLLS = 3;
 const TASK_TOOL_SETTLE_GRACE_MS = 2500;
 const TASK_TOOL_FALLBACK_RETRY_MS = 3000;
@@ -186,18 +196,53 @@ const LiveDuration: React.FC<{ start: number; end?: number; active: boolean }> =
     return <>{formatDuration(start, end, now)}</>;
 };
 
+const EXPANDED_CONTENT_TRANSITION_MS = 350;
+const EXPANDED_CONTENT_SPRING = { type: 'spring' as const, visualDuration: 0.35, bounce: 0 };
+
+const useAnimatedExpandedContent = (isExpanded: boolean) => {
+    const [shouldRender, setShouldRender] = React.useState(isExpanded);
+
+    React.useEffect(() => {
+        if (typeof window === 'undefined') {
+            setShouldRender(isExpanded);
+            return;
+        }
+
+        if (isExpanded) {
+            setShouldRender(true);
+            return;
+        }
+
+        const timer = window.setTimeout(() => {
+            setShouldRender(false);
+        }, EXPANDED_CONTENT_TRANSITION_MS);
+
+        return () => {
+            window.clearTimeout(timer);
+        };
+    }, [isExpanded]);
+
+    return shouldRender;
+};
+
 const parseDiffStats = (metadata?: Record<string, unknown>): { added: number; removed: number } | null => {
     const diffText = getPatchText((metadata as { patch?: unknown } | undefined)?.patch)
         ?? getPatchText(metadata?.diff);
     if (!diffText) return null;
 
-    const lines = diffText.split('\n');
     let added = 0;
     let removed = 0;
+    let lineStart = 0;
 
-    for (const line of lines) {
+    for (let index = 0; index <= diffText.length; index += 1) {
+        if (index < diffText.length && diffText.charCodeAt(index) !== 10) {
+            continue;
+        }
+
+        const line = diffText.slice(lineStart, index);
         if (line.startsWith('+') && !line.startsWith('+++')) added++;
         if (line.startsWith('-') && !line.startsWith('---')) removed++;
+        lineStart = index + 1;
     }
 
     if (added === 0 && removed === 0) return null;
@@ -206,8 +251,13 @@ const parseDiffStats = (metadata?: Record<string, unknown>): { added: number; re
 
 const parseWriteLineCount = (input?: Record<string, unknown>): number | null => {
     if (!input?.content || typeof input.content !== 'string') return null;
-    const lines = input.content.split('\n');
-    return lines.length;
+    let lines = 1;
+    for (let index = 0; index < input.content.length; index += 1) {
+        if (input.content.charCodeAt(index) === 10) {
+            lines += 1;
+        }
+    }
+    return lines;
 };
 
 const extractFirstChangedLineFromDiff = (diffText: string): number | undefined => {
@@ -260,15 +310,13 @@ const extractFirstChangedLineFromDiff = (diffText: string): number | undefined =
 
 const getPatchText = (value: unknown): string | undefined => {
     if (typeof value === 'string') {
-        const trimmed = value.trim();
-        return trimmed.length > 0 ? trimmed : undefined;
+        return /\S/.test(value) ? value : undefined;
     }
 
     if (value && typeof value === 'object') {
         const patch = (value as { patch?: unknown }).patch;
         if (typeof patch === 'string') {
-            const trimmed = patch.trim();
-            return trimmed.length > 0 ? trimmed : undefined;
+            return /\S/.test(patch) ? patch : undefined;
         }
     }
 
@@ -695,7 +743,7 @@ const ToolScrollableSection: React.FC<ToolScrollableSectionProps> = ({
                 disableHorizontal ? 'overflow-y-auto overflow-x-hidden' : 'overflow-auto',
                 className,
             )}
-            size={24}
+           
         >
             <div className="w-full min-w-0">
                 {children}
@@ -1053,8 +1101,11 @@ const TaskToolSummary: React.FC<{
     isActive?: boolean;
 }> = ({ entries, isExpanded, isMobile, output, sessionId, onShowPopup, input, animateTailText = true, isActive = false }) => {
     const { t } = useI18n();
+    const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
     const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
+    const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
     const showToolFileIcons = useUIStore((state) => state.showToolFileIcons);
+    const runtime = React.useContext(RuntimeAPIContext);
     const displayEntries = entries;
 
     const trimmedOutput = typeof output === 'string'
@@ -1065,8 +1116,18 @@ const TaskToolSummary: React.FC<{
 
     const handleOpenSession = (event: React.MouseEvent) => {
         event.stopPropagation();
-        if (sessionId) {
-            setCurrentSession(sessionId);
+        if (sessionId && currentDirectory) {
+            if (isMobile || runtime?.runtime.isVSCode) {
+                setCurrentSession(sessionId, currentDirectory);
+                return;
+            }
+
+            openContextPanelTab(currentDirectory, {
+                mode: 'chat',
+                dedupeKey: `session:${sessionId}`,
+                label: agentType.charAt(0).toUpperCase() + agentType.slice(1),
+                readOnly: true,
+            });
         }
     };
 
@@ -1163,7 +1224,7 @@ const TaskToolSummary: React.FC<{
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={handleOpenSession}
                 >
-                    <RiExternalLinkLine className="h-3.5 w-3.5 flex-shrink-0" />
+                    <Icon name="external-link" className="h-3.5 w-3.5 flex-shrink-0" />
                     <span className="typography-meta text-primary font-medium">{t('chat.toolPart.openSubtask', { type: agentType.charAt(0).toUpperCase() + agentType.slice(1) })}</span>
                 </button>
             )}
@@ -1181,9 +1242,9 @@ const TaskToolSummary: React.FC<{
                         }}
                     >
                         {isOutputExpanded ? (
-                            <RiArrowDownSLine className="h-3.5 w-3.5 flex-shrink-0" />
+                            <Icon name="arrow-down-s" className="h-3.5 w-3.5 flex-shrink-0" />
                         ) : (
-                            <RiArrowRightSLine className="h-3.5 w-3.5 flex-shrink-0" />
+                            <Icon name="arrow-right-s" className="h-3.5 w-3.5 flex-shrink-0" />
                         )}
                         <span className="typography-meta text-foreground/80 font-medium">{t('chat.toolPart.output')}</span>
                     </button>
@@ -1245,6 +1306,16 @@ type DiffPatchEntry = {
 
 const hasUnifiedDiffHunk = (patch: string): boolean => /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/m.test(patch);
 
+const isUnifiedFileHeaderPair = (minusLine: string, plusLine: string): boolean => {
+    if (!minusLine.startsWith('--- ') || !plusLine.startsWith('+++ ')) {
+        return false;
+    }
+
+    const oldPath = minusLine.slice(4).trim();
+    const newPath = plusLine.slice(4).trim();
+    return oldPath.length > 0 && newPath.length > 0;
+};
+
 const getUnifiedDiffPath = (patch: string, fallbackTitle: string): string => {
     const plusHeader = patch.match(/^\+\+\+\s+(?:[ab]\/(.+)|(.+))$/m);
     const rawPath = plusHeader?.[1] ?? plusHeader?.[2];
@@ -1266,9 +1337,7 @@ const splitUnifiedDiffPatch = (patch: string): DiffPatchEntry[] => {
     for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index] ?? '';
         const nextLine = lines[index + 1] ?? '';
-        const isUnifiedFileHeader = /^---\s+(?:[ab]\/|\/dev\/null|\/)/.test(line)
-            && /^\+\+\+\s+(?:[ab]\/|\/dev\/null|\/)/.test(nextLine);
-        if (line.startsWith('diff --git ') || line.startsWith('Index: ') || isUnifiedFileHeader) {
+        if (line.startsWith('diff --git ') || line.startsWith('Index: ') || isUnifiedFileHeaderPair(line, nextLine)) {
             starts.push(index);
         }
     }
@@ -1299,7 +1368,7 @@ const renderPathLikeGitChanges = (path: string, grow = true) => {
         return (
             <span
                 className={cn('min-w-0 truncate typography-ui-label text-foreground', grow && 'flex-1')}
-                style={{ direction: 'rtl', textAlign: 'left' }}
+                style={{ direction: 'rtl', textAlign: 'left', unicodeBidi: 'plaintext' }}
                 title={path}
             >
                 {path}
@@ -1315,7 +1384,7 @@ const renderPathLikeGitChanges = (path: string, grow = true) => {
     return (
         <span className={cn('min-w-0 flex items-baseline overflow-hidden typography-ui-label', grow && 'flex-1')} title={path}>
             {hasAbsoluteRoot ? <span className="flex-shrink-0 text-muted-foreground">/</span> : null}
-            <span className="min-w-0 truncate text-muted-foreground" style={{ direction: 'rtl', textAlign: 'left' }}>
+            <span className="min-w-0 truncate text-muted-foreground" style={{ direction: 'rtl', textAlign: 'left', unicodeBidi: 'plaintext' }}>
                 {displayDir}
             </span>
             <span className="flex-shrink-0">
@@ -1326,20 +1395,20 @@ const renderPathLikeGitChanges = (path: string, grow = true) => {
     );
 };
 
-const renderAnimatedPathWithIcon = (path: string, _animate = true, grow = true, showFileIcons = true) => {
-    void _animate;
+const renderAnimatedPathWithIcon = (path: string, animate = true, grow = true, showFileIcons = true) => {
     const lastSlash = path.lastIndexOf('/');
 
     if (lastSlash === -1) {
         return (
             <span className={cn('min-w-0 inline-flex items-center gap-1 overflow-hidden', grow && 'flex-1')} title={path}>
                 {showFileIcons ? <FileTypeIcon filePath={path} className="h-3.5 w-3.5 flex-shrink-0" /> : null}
-                <span
-                    className={cn('min-w-0 truncate whitespace-nowrap typography-meta', grow && 'flex-1')}
+                <Text
+                    variant={animate ? 'generate-effect' : 'static'}
+                    className={cn('min-w-0 truncate whitespace-nowrap', TOOL_ROW_DESCRIPTION_CLASS, grow && 'flex-1')}
                     style={{ color: 'var(--tools-title)' }}
                 >
                     {path}
-                </span>
+                </Text>
             </span>
         );
     }
@@ -1352,7 +1421,7 @@ const renderAnimatedPathWithIcon = (path: string, _animate = true, grow = true, 
     return (
         <span className={cn('min-w-0 inline-flex items-center gap-1 overflow-hidden', grow && 'flex-1')} title={path}>
             {showFileIcons ? <FileTypeIcon filePath={path} className="h-3.5 w-3.5 flex-shrink-0" /> : null}
-            <span className={cn('min-w-0 inline-flex max-w-full items-baseline overflow-hidden typography-meta', grow && 'flex-1')}>
+            <span className={cn('min-w-0 inline-flex max-w-full items-baseline overflow-hidden', TOOL_ROW_DESCRIPTION_CLASS, grow && 'flex-1')}>
                 {hasAbsoluteRoot ? <span className="flex-shrink-0" style={{ color: 'var(--tools-description)' }}>/</span> : null}
                 <span
                     className="min-w-0 shrink truncate whitespace-nowrap"
@@ -1360,14 +1429,19 @@ const renderAnimatedPathWithIcon = (path: string, _animate = true, grow = true, 
                         color: 'var(--tools-description)',
                         direction: 'rtl',
                         textAlign: 'left',
+                        unicodeBidi: 'plaintext',
                     }}
                 >
                     {displayDir}
                 </span>
                 <span className="flex-shrink-0" style={{ color: 'var(--tools-description)' }}>/</span>
-                <span className="flex-shrink-0" style={{ color: 'var(--tools-title)' }}>
+                <Text
+                    variant={animate ? 'generate-effect' : 'static'}
+                    className="flex-shrink-0"
+                    style={{ color: 'var(--tools-title)' }}
+                >
                     {name}
-                </span>
+                </Text>
             </span>
         </span>
     );
@@ -1388,7 +1462,8 @@ const getDiffPatchEntries = (
 
             const record = file as { relativePath?: unknown; filePath?: unknown; patch?: unknown; diff?: unknown };
             const patch = getPatchText(record.patch) ?? getPatchText(record.diff) ?? '';
-            if (!patch || !hasUnifiedDiffHunk(patch)) {
+            const splitPatchEntries = splitUnifiedDiffPatch(patch);
+            if (!patch || splitPatchEntries.length === 0) {
                 return null;
             }
 
@@ -1402,12 +1477,13 @@ const getDiffPatchEntries = (
                 ? getRelativePath(rawPath, currentDirectory)
                 : `File ${index + 1}`;
 
-            return {
-                id: `${title}-${index}`,
-                title,
-                patch,
-            } satisfies DiffPatchEntry;
+            return splitPatchEntries.map((entry, splitIndex) => ({
+                id: `${title}-${index}-${splitIndex}`,
+                title: splitPatchEntries.length === 1 ? title : getRelativePath(entry.title, currentDirectory),
+                patch: entry.patch,
+            } satisfies DiffPatchEntry));
         })
+        .flat()
         .filter((entry): entry is DiffPatchEntry => entry !== null);
 
     if (entries.length > 0) {
@@ -1713,7 +1789,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
                     syntaxTheme={syntaxTheme}
                 />,
                 {
-                    className: 'p-1',
+                    className: part.tool === 'bash' ? 'p-1 rounded-none' : 'p-1',
                     maxHeightClass: part.tool === 'bash' ? 'max-h-[46vh]' : undefined,
                 }
             );
@@ -1756,7 +1832,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
                                 ),
                                 {
                                     maxHeightClass: 'max-h-60',
-                                    className: part.tool === 'bash' ? 'tool-input-surface p-0' : 'tool-input-surface',
+                                    className: part.tool === 'bash' ? 'tool-input-surface p-0 rounded-none' : 'tool-input-surface',
                                 }
                             )}
                         </div>
@@ -1803,6 +1879,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
     onToggle,
     syntaxTheme,
     isMobile,
+    alwaysShowActions = isMobile,
     onContentChange,
     onShowPopup,
     animateTailText = true,
@@ -1855,21 +1932,81 @@ const ToolPart: React.FC<ToolPartProps> = ({
         sessionEvents.requestGitRefresh({ directory: currentDirectory });
     }, [currentDirectory, isError, isFinalized, normalizedPartTool, part.id, status]);
 
-
-
     const shouldNotifyStructuralChange = isFinalized || isTaskTool;
 
     const onContentChangeRef = React.useRef(onContentChange);
     onContentChangeRef.current = onContentChange;
+    const expandedContentRef = React.useRef<HTMLDivElement>(null);
+    const expandedContentAnimationRef = React.useRef<AnimationPlaybackControls | null>(null);
+    const expandedContentMountedRef = React.useRef(false);
 
-    React.useEffect(() => {
-        if (!shouldNotifyStructuralChange) {
+    React.useLayoutEffect(() => {
+        if (isTaskTool) {
             return;
         }
-        if (typeof isExpanded === 'boolean') {
-            onContentChangeRef.current?.('structural');
+
+        const element = expandedContentRef.current;
+        if (!element) {
+            return;
         }
-    }, [isExpanded, shouldNotifyStructuralChange]);
+
+        expandedContentAnimationRef.current?.stop();
+
+        if (!expandedContentMountedRef.current) {
+            expandedContentMountedRef.current = true;
+            element.style.height = isExpanded ? 'auto' : '0px';
+            element.style.opacity = isExpanded ? '1' : '0';
+            element.style.overflow = isExpanded ? 'visible' : 'hidden';
+            return;
+        }
+
+        element.style.overflow = 'hidden';
+
+        if (isExpanded) {
+            element.style.height = '0px';
+            element.style.opacity = '0';
+        } else {
+            element.style.height = `${element.scrollHeight}px`;
+            element.style.opacity = '1';
+        }
+
+        const animation = animate(
+            element,
+            { height: isExpanded ? 'auto' : '0px', opacity: isExpanded ? 1 : 0 },
+            EXPANDED_CONTENT_SPRING,
+        );
+        expandedContentAnimationRef.current = animation;
+
+        void animation.finished.then(() => {
+            if (expandedContentAnimationRef.current !== animation) {
+                return;
+            }
+            expandedContentAnimationRef.current = null;
+            if (isExpanded) {
+                element.style.overflow = 'visible';
+                element.style.height = 'auto';
+            } else {
+                element.style.overflow = 'hidden';
+            }
+            if (shouldNotifyStructuralChange) {
+                onContentChangeRef.current?.('structural');
+            }
+        }).catch(() => undefined);
+
+        return () => {
+            animation.stop();
+            if (expandedContentAnimationRef.current === animation) {
+                expandedContentAnimationRef.current = null;
+            }
+        };
+    }, [isExpanded, isTaskTool, shouldNotifyStructuralChange]);
+
+    React.useEffect(() => {
+        return () => {
+            expandedContentAnimationRef.current?.stop();
+            expandedContentAnimationRef.current = null;
+        };
+    }, []);
 
     const stateWithData = state as ToolStateWithMetadata;
     const metadata = stateWithData.metadata;
@@ -1953,6 +2090,24 @@ const ToolPart: React.FC<ToolPartProps> = ({
     // When true, resolveFallbackTaskSessionId widens its time window (3s → 8s).
     const [taskFallbackRetried, setTaskFallbackRetried] = React.useState(false);
 
+    const metadataTaskSummaryEntries = React.useMemo<TaskToolSummaryEntry[]>(() => {
+        if (!isTaskTool) {
+            return [];
+        }
+        const candidateSummary = (metadata as { summary?: unknown; entries?: unknown; tools?: unknown; calls?: unknown } | undefined);
+        const normalized = normalizeTaskSummaryEntries(
+            candidateSummary?.summary ?? candidateSummary?.entries ?? candidateSummary?.tools ?? candidateSummary?.calls
+        );
+
+        if (normalized.length > 0) {
+            return normalized;
+        }
+
+        return parsedTaskMetadata.summaryEntries;
+    }, [isTaskTool, metadata, parsedTaskMetadata.summaryEntries]);
+
+    const hasFinalMetadataTaskSummary = isFinalized && metadataTaskSummaryEntries.length > 0;
+
     const explicitTaskSessionId = React.useMemo<string | undefined>(() => {
         if (!isTaskTool) {
             return undefined;
@@ -1994,25 +2149,10 @@ const ToolPart: React.FC<ToolPartProps> = ({
     );
 
     const taskSessionId = explicitTaskSessionId ?? fallbackTaskSessionId;
+    const childSessionLookupId = hasFinalMetadataTaskSummary ? '' : (taskSessionId ?? '');
 
-    const childSessionMessages = useSessionMessageRecords(taskSessionId ?? '', currentDirectory);
-    useEnsureSessionMessages(taskSessionId ?? '', currentDirectory);
-
-    const metadataTaskSummaryEntries = React.useMemo<TaskToolSummaryEntry[]>(() => {
-        if (!isTaskTool) {
-            return [];
-        }
-        const candidateSummary = (metadata as { summary?: unknown; entries?: unknown; tools?: unknown; calls?: unknown } | undefined);
-        const normalized = normalizeTaskSummaryEntries(
-            candidateSummary?.summary ?? candidateSummary?.entries ?? candidateSummary?.tools ?? candidateSummary?.calls
-        );
-
-        if (normalized.length > 0) {
-            return normalized;
-        }
-
-        return parsedTaskMetadata.summaryEntries;
-    }, [isTaskTool, metadata, parsedTaskMetadata.summaryEntries]);
+    const childSessionMessages = useSessionMessageRecords(childSessionLookupId, currentDirectory);
+    useEnsureSessionMessages(childSessionLookupId, currentDirectory);
 
     const childSessionTaskSummaryEntries = React.useMemo<TaskToolSummaryEntry[]>(() => {
         if (!isTaskTool || !taskSessionId) {
@@ -2104,7 +2244,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
     ]);
 
     React.useEffect(() => {
-        if (!isTaskTool || !taskSessionId) {
+        if (hasFinalMetadataTaskSummary || !isTaskTool || !taskSessionId) {
             return;
         }
 
@@ -2173,6 +2313,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
         childSessionHasInFlightTools,
         childSessionTaskSummaryEntries.length,
         currentDirectory,
+        hasFinalMetadataTaskSummary,
         activeLatched,
         isFinalized,
         isTaskTool,
@@ -2183,7 +2324,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
     ]);
 
     React.useEffect(() => {
-        if (!isTaskTool || !taskSessionId || !taskChildPollingStopped || !taskPendingFinalFetch || taskFinalFetchDoneRef.current) {
+        if (hasFinalMetadataTaskSummary || !isTaskTool || !taskSessionId || !taskChildPollingStopped || !taskPendingFinalFetch || taskFinalFetchDoneRef.current) {
             return;
         }
 
@@ -2195,7 +2336,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
                 const scopedClient = opencodeClient.getScopedSdkClient(currentDirectory);
                 const response = await scopedClient.session.messages({
                     sessionID: capturedSessionId,
-                    limit: TASK_TOOL_INITIAL_FETCH_LIMIT,
+                    limit: isVSCodeRuntime() ? VSCODE_TASK_TOOL_INITIAL_FETCH_LIMIT : TASK_TOOL_INITIAL_FETCH_LIMIT,
                 });
 
                 if (cancelled) {
@@ -2237,6 +2378,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
         };
     }, [
         currentDirectory,
+        hasFinalMetadataTaskSummary,
         isTaskTool,
         taskChildPollingStopped,
         taskPendingFinalFetch,
@@ -2282,6 +2424,10 @@ const ToolPart: React.FC<ToolPartProps> = ({
         }
 
         const childSessionActive = childSessionActivity.phase === 'busy' || childSessionActivity.phase === 'retry';
+        if (hasFinalMetadataTaskSummary) {
+            return;
+        }
+
         const shouldPoll =
             !taskChildPollingStopped
             && (childSessionHasInFlightTools || childSessionActive || childSessionTaskSummaryEntries.length === 0);
@@ -2301,6 +2447,16 @@ const ToolPart: React.FC<ToolPartProps> = ({
         };
 
         const resolveFetchLimit = (isInitialFetch: boolean) => {
+            if (isVSCodeRuntime()) {
+                if (isInitialFetch && childSessionTaskSummaryEntries.length === 0) {
+                    return VSCODE_TASK_TOOL_INITIAL_FETCH_LIMIT;
+                }
+                if (isActive || childSessionHasInFlightTools || childSessionActive) {
+                    return VSCODE_TASK_TOOL_ACTIVE_FETCH_LIMIT;
+                }
+                return VSCODE_TASK_TOOL_IDLE_FETCH_LIMIT;
+            }
+
             if (isInitialFetch && childSessionTaskSummaryEntries.length === 0) {
                 return TASK_TOOL_INITIAL_FETCH_LIMIT;
             }
@@ -2383,13 +2539,13 @@ const ToolPart: React.FC<ToolPartProps> = ({
         childSessionHasInFlightTools,
         childSessionTaskSummaryEntries.length,
         currentDirectory,
+        hasFinalMetadataTaskSummary,
         isActive,
         isTaskTool,
         taskPendingFinalFetch,
         taskChildPollingStopped,
         taskSessionId,
     ]);
-
 
     const taskSummaryLenRef = React.useRef<number>(taskSummaryEntries.length);
     React.useEffect(() => {
@@ -2403,8 +2559,14 @@ const ToolPart: React.FC<ToolPartProps> = ({
         onContentChange?.('structural');
     }, [isTaskTool, onContentChange, taskSummaryEntries.length]);
 
-    const diffStats = (normalizedPartTool === 'edit' || normalizedPartTool === 'multiedit' || normalizedPartTool === 'apply_patch') ? parseDiffStats(metadata) : null;
-    const writeLineCount = normalizedPartTool === 'write' ? parseWriteLineCount(input) : null;
+    const diffStats = React.useMemo(() => {
+        return (normalizedPartTool === 'edit' || normalizedPartTool === 'multiedit' || normalizedPartTool === 'apply_patch')
+            ? parseDiffStats(metadata)
+            : null;
+    }, [metadata, normalizedPartTool]);
+    const writeLineCount = React.useMemo(() => {
+        return normalizedPartTool === 'write' ? parseWriteLineCount(input) : null;
+    }, [input, normalizedPartTool]);
     const isMultiFileApplyPatch = normalizedPartTool === 'apply_patch' && Array.isArray(metadata?.files) && (metadata?.files as []).length > 1;
     const normalizedPart = normalizedPartTool !== part.tool ? ({ ...part, tool: normalizedPartTool } as ToolPartType) : part;
     const descriptionPath = getToolDescriptionPath(normalizedPart, state, currentDirectory);
@@ -2492,6 +2654,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
 
     const iconStyle = !isTaskTool && isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
     const titleStyle = !isTaskTool && isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
+    const shouldRenderExpandedContent = useAnimatedExpandedContent(isExpanded);
 
     if (!shouldTreatAsFinalized && !isActive && !isTaskTool) {
         return null;
@@ -2502,7 +2665,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
             {}
             <div
                 className={cn(
-                'group/tool flex gap-1.5 pr-2 pl-px py-2 rounded-xl cursor-pointer',
+                'group/tool flex gap-1.5 pr-2 pl-px py-1.5 rounded-xl cursor-pointer',
                 isMultiFileApplyPatch ? 'flex-wrap items-start' : 'items-center'
             )}
                 onClick={handleMainClick}
@@ -2521,7 +2684,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
                             className={cn(
                                 'absolute inset-0 transition-opacity',
                                 isExpanded && 'opacity-0',
-                                !isExpanded && 'group-hover/tool:opacity-0'
+                                !isExpanded && (alwaysShowActions ? 'opacity-0' : 'group-hover/tool:opacity-0')
                             )}
                             style={iconStyle}
                         >
@@ -2532,10 +2695,10 @@ const ToolPart: React.FC<ToolPartProps> = ({
                             className={cn(
                                 'absolute inset-0 transition-opacity flex items-center justify-center',
                                 isExpanded && 'opacity-100',
-                                !isExpanded && 'opacity-0 group-hover/tool:opacity-100'
+                                !isExpanded && (alwaysShowActions ? 'opacity-100' : 'opacity-0 group-hover/tool:opacity-100')
                             )}
                         >
-                            {isExpanded ? <RiArrowDownSLine className="h-3.5 w-3.5" /> : <RiArrowRightSLine className="h-3.5 w-3.5" />}
+                            {isExpanded ? <Icon name="arrow-down-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-right-s" className="h-3.5 w-3.5" />}
                         </div>
                     </div>
                     {isMultiFileApplyPatch ? (
@@ -2543,7 +2706,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
                             <MinDurationShineText
                                 active={Boolean(isActive && !isError)}
                                 minDurationMs={300}
-                                className="typography-meta font-medium flex-shrink-0"
+                                className={cn(TOOL_ROW_TITLE_CLASS, 'flex-shrink-0')}
                                 style={titleStyle}
                                 title={displayName}
                             >
@@ -2557,7 +2720,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
                                 <MinDurationShineText
                                     active={Boolean(isActive && !isError)}
                                     minDurationMs={300}
-                                    className="typography-meta font-medium flex-shrink-0"
+                                    className={cn(TOOL_ROW_TITLE_CLASS, 'flex-shrink-0')}
                                     style={titleStyle}
                                     title={displayName}
                                 >
@@ -2565,7 +2728,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
                                 </MinDurationShineText>
                             </div>
                             {normalizedPartTool === 'bash' && typeof effectiveTimeStart === 'number' ? (
-                                <span className="flex-shrink-0 tabular-nums text-muted-foreground/80 typography-meta">
+                                <span className={cn('flex-shrink-0 tabular-nums text-muted-foreground/80', TOOL_ROW_DESCRIPTION_CLASS)}>
                                     <LiveDuration
                                         start={effectiveTimeStart}
                                         end={typeof effectiveTimeEnd === 'number' ? effectiveTimeEnd : undefined}
@@ -2578,11 +2741,11 @@ const ToolPart: React.FC<ToolPartProps> = ({
                 </div>
 
                 {!isMultiFileApplyPatch && (
-                    <div className="flex items-center gap-1 flex-1 min-w-0 typography-meta" style={{ color: 'var(--tools-description)' }}>
+                    <div className={cn('flex items-center gap-1 flex-1 min-w-0', TOOL_ROW_DESCRIPTION_CLASS)} style={{ color: 'var(--tools-description)' }}>
                         <div className="flex items-center gap-1 flex-1 min-w-0">
                             {justificationText && (
                                 <span
-                                    className="min-w-0 truncate typography-meta"
+                                    className={cn('min-w-0 truncate', TOOL_ROW_DESCRIPTION_CLASS)}
                                     style={{ color: 'var(--tools-description)', opacity: 0.8 }}
                                     title={justificationText}
                                 >
@@ -2595,7 +2758,7 @@ const ToolPart: React.FC<ToolPartProps> = ({
                                 ) : (
                                     <Text
                                         variant={animateTailText ? 'generate-effect' : 'static'}
-                                        className="min-w-0 truncate typography-meta"
+                                        className={cn('min-w-0 truncate', TOOL_ROW_DESCRIPTION_CLASS)}
                                         style={{ color: 'var(--tools-description)' }}
                                         title={description}
                                     >
@@ -2635,20 +2798,33 @@ const ToolPart: React.FC<ToolPartProps> = ({
                 />
             ) : null}
 
-            {!isTaskTool && isExpanded ? (
-                <div className="relative ml-2 pl-3">
-                    <span
-                        aria-hidden="true"
-                        className="pointer-events-none absolute left-0 top-px bottom-0 w-px"
-                        style={{ backgroundColor: 'var(--tools-border)' }}
-                    />
-                    <ToolExpandedContent
-                        part={part}
-                        state={state}
-                        syntaxTheme={syntaxTheme}
-                        currentDirectory={currentDirectory}
-                        onShowPopup={onShowPopup}
-                    />
+            {!isTaskTool ? (
+                <div
+                    ref={expandedContentRef}
+                    aria-hidden={!isExpanded}
+                    style={{
+                        height: isExpanded ? 'auto' : '0px',
+                        opacity: isExpanded ? 1 : 0,
+                        overflow: isExpanded ? 'visible' : 'hidden',
+                        overflowAnchor: 'none',
+                    }}
+                >
+                    {shouldRenderExpandedContent ? (
+                        <div className="relative ml-2 pl-3">
+                            <span
+                                aria-hidden="true"
+                                className="pointer-events-none absolute left-0 top-px bottom-0 w-px"
+                                style={{ backgroundColor: 'var(--tools-border)' }}
+                            />
+                            <ToolExpandedContent
+                                part={part}
+                                state={state}
+                                syntaxTheme={syntaxTheme}
+                                currentDirectory={currentDirectory}
+                                onShowPopup={onShowPopup}
+                            />
+                        </div>
+                    ) : null}
                 </div>
             ) : null}
         </div>
@@ -2660,6 +2836,7 @@ export default React.memo(ToolPart, (prev, next) => {
         && prev.isExpanded === next.isExpanded
         && prev.syntaxTheme === next.syntaxTheme
         && prev.isMobile === next.isMobile
+        && prev.alwaysShowActions === next.alwaysShowActions
         && prev.onContentChange === next.onContentChange
         && prev.onShowPopup === next.onShowPopup
         && prev.animateTailText === next.animateTailText;

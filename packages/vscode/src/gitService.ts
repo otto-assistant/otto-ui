@@ -279,6 +279,27 @@ async function execGit(args: string[], cwd: string): Promise<{ stdout: string; s
   });
 }
 
+function extractGitStatusPath(status: string, pathPart: string): string {
+  if ((status === 'R' || status === 'C') && pathPart.includes('\t')) {
+    return pathPart.split('\t').pop() || pathPart;
+  }
+  return pathPart;
+}
+
+function extractGitNumstatDestinationPath(filePath: string): string {
+  if (!filePath.includes(' => ')) {
+    return filePath;
+  }
+
+  const braceMatch = filePath.match(/^(.*)\{([^{}]*)\s=>\s([^{}]*)\}(.*)$/);
+  if (braceMatch) {
+    const [, prefix, , destination, suffix] = braceMatch;
+    return `${prefix}${destination}${suffix}`.replace(/\/+/g, '/');
+  }
+
+  return filePath.split(' => ').pop()?.trim() || filePath;
+}
+
 // ============== Repository Operations ==============
 
 /**
@@ -342,6 +363,10 @@ export interface GitStatusResult {
   rebaseInProgress?: GitRebaseInProgress | null;
 }
 
+type GitStatusOptions = {
+  mode?: 'light';
+};
+
 /**
  * Map VS Code git status to our status codes
  */
@@ -371,10 +396,17 @@ function mapStatus(status: Status): string {
   return statusMap[status] || ' ';
 }
 
+function getRepositoryRelativePath(repo: Repository, uri: vscode.Uri): string {
+  return path.relative(repo.rootUri.fsPath, uri.fsPath).replace(/\\/g, '/');
+}
+
 /**
  * Get git status for a directory
  */
-export async function getGitStatus(directory: string): Promise<GitStatusResult> {
+export async function getGitStatus(directory: string, options?: GitStatusOptions): Promise<GitStatusResult> {
+  // The VS Code Git API path does not compute heavyweight diff stats today,
+  // but accepts the shared options contract so callers can rely on parity.
+  void options;
   const repo = await getRepository(directory);
   
   if (!repo) {
@@ -389,7 +421,7 @@ export async function getGitStatus(directory: string): Promise<GitStatusResult> 
   
   // Process index changes (staged)
   for (const change of state.indexChanges) {
-    const relativePath = vscode.workspace.asRelativePath(change.uri, false);
+    const relativePath = getRepositoryRelativePath(repo, change.uri);
     files.push({
       path: relativePath,
       index: mapStatus(change.status),
@@ -399,7 +431,7 @@ export async function getGitStatus(directory: string): Promise<GitStatusResult> 
   
   // Process working tree changes (unstaged)
   for (const change of state.workingTreeChanges) {
-    const relativePath = vscode.workspace.asRelativePath(change.uri, false);
+    const relativePath = getRepositoryRelativePath(repo, change.uri);
     const existing = files.find(f => f.path === relativePath);
     if (existing) {
       existing.working_dir = mapStatus(change.status);
@@ -2057,10 +2089,15 @@ export async function getGitFileDiff(
         }
       }
       
-      // Read the current file content
-      const fileUri = vscode.Uri.file(path.join(directory, filePath));
-      const modifiedBytes = await vscode.workspace.fs.readFile(fileUri);
-      const modified = Buffer.from(modifiedBytes).toString('utf8');
+      let modified: string;
+      if (staged) {
+        const stagedResult = await execGit(['show', `:${filePath}`], directory);
+        modified = stagedResult.exitCode === 0 ? stagedResult.stdout : '';
+      } else {
+        const fileUri = vscode.Uri.file(path.join(directory, filePath));
+        const modifiedBytes = await vscode.workspace.fs.readFile(fileUri);
+        modified = Buffer.from(modifiedBytes).toString('utf8');
+      }
       
       return { original, modified, path: filePath };
     } catch (error) {
@@ -2075,20 +2112,101 @@ export async function getGitFileDiff(
 /**
  * Revert a file to its last committed state
  */
-export async function revertGitFile(directory: string, filePath: string): Promise<void> {
-  const repo = await getRepository(directory);
-  
-  if (repo) {
-    try {
-      await repo.revert([filePath]);
-      return;
-    } catch (error) {
-      console.error('[GitService] Failed to revert via API:', error);
+export async function revertGitFile(
+  directory: string,
+  filePath: string,
+  options: { scope?: 'all' | 'working' } = {},
+): Promise<void> {
+  const scope = options.scope === 'working' ? 'working' : 'all';
+  const tracked = await execGit(['ls-files', '--error-unmatch', '--', filePath], directory);
+  if (tracked.exitCode !== 0) {
+    const clean = await execGit(['clean', '-f', '-d', '--', filePath], directory);
+    if (clean.exitCode !== 0) {
+      const root = path.resolve(directory);
+      const target = path.resolve(directory, filePath);
+      if (target !== root && !target.startsWith(root + path.sep)) {
+        throw new Error(`Path is outside repository: ${filePath}`);
+      }
+      await fs.promises.rm(target, { recursive: true, force: true });
+    }
+    return;
+  }
+
+  if (scope === 'all') {
+    const unstage = await execGit(['restore', '--staged', '--', filePath], directory);
+    if (unstage.exitCode !== 0) {
+      await execGit(['reset', 'HEAD', '--', filePath], directory);
     }
   }
 
-  // Fallback to raw git
-  await execGit(['checkout', '--', filePath], directory);
+  const restore = await execGit(['restore', '--', filePath], directory);
+  if (restore.exitCode === 0) {
+    return;
+  }
+
+  const fallback = await execGit(['checkout', '--', filePath], directory);
+  if (fallback.exitCode !== 0) {
+    throw new Error(fallback.stderr || restore.stderr || 'Failed to revert git file');
+  }
+}
+
+export async function stageGitFile(directory: string, filePath: string): Promise<void> {
+  await stageGitFiles(directory, [filePath]);
+}
+
+export async function stageGitFiles(directory: string, filePaths: string[]): Promise<void> {
+  const paths = filePaths.map((path) => path.trim()).filter(Boolean);
+
+  if (paths.length === 0) {
+    throw new Error('path is required');
+  }
+  const result = await execGit(['add', '--', ...paths], directory);
+  if (result.exitCode === 0) {
+    return;
+  }
+
+  const isPathspecError =
+    /pathspec/.test(result.stderr) && /did not match any files/.test(result.stderr);
+  if (!isPathspecError) {
+    throw new Error(result.stderr || 'Failed to stage git file');
+  }
+
+  // During rapid stage/unstage toggling the optimistic UI can request staging a
+  // path that a prior queued mutation already staged (most visibly a deletion,
+  // whose file is gone from the working tree). `git add` aborts the whole batch on
+  // a single unmatched pathspec, so retry per-path and skip the ones already in
+  // their target state rather than failing the entire "stage all".
+  for (const path of paths) {
+    const perPath = await execGit(['add', '--', path], directory);
+    if (perPath.exitCode === 0) {
+      continue;
+    }
+    const perPathIsPathspecError =
+      /pathspec/.test(perPath.stderr) && /did not match any files/.test(perPath.stderr);
+    if (!perPathIsPathspecError) {
+      throw new Error(perPath.stderr || 'Failed to stage git file');
+    }
+  }
+}
+
+export async function unstageGitFile(directory: string, filePath: string): Promise<void> {
+  await unstageGitFiles(directory, [filePath]);
+}
+
+export async function unstageGitFiles(directory: string, filePaths: string[]): Promise<void> {
+  const paths = filePaths.map((path) => path.trim()).filter(Boolean);
+
+  if (paths.length === 0) {
+    throw new Error('path is required');
+  }
+  const result = await execGit(['restore', '--staged', '--', ...paths], directory);
+  if (result.exitCode === 0) {
+    return;
+  }
+  const fallback = await execGit(['reset', 'HEAD', '--', ...paths], directory);
+  if (fallback.exitCode !== 0) {
+    throw new Error(fallback.stderr || result.stderr || 'Failed to unstage git file');
+  }
 }
 
 // ============== Commit Operations ==============
@@ -2110,8 +2228,49 @@ export interface GitCommitResult {
 export async function createGitCommit(
   directory: string,
   message: string,
-  options?: { addAll?: boolean; files?: string[] }
+  options?: { addAll?: boolean; files?: string[]; stageFiles?: string[] }
 ): Promise<GitCommitResult> {
+  if (options?.files?.length && options.stageFiles) {
+    const selectedFiles = new Set(options.files);
+    const stagedResult = await execGit(['diff', '--cached', '--name-only'], directory);
+    const temporarilyUnstagedFiles = stagedResult.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((filePath) => filePath && !selectedFiles.has(filePath));
+
+    try {
+      if (temporarilyUnstagedFiles.length > 0) {
+        await execGit(['restore', '--staged', '--', ...temporarilyUnstagedFiles], directory);
+      }
+      if (options.stageFiles.length > 0) {
+        await execGit(['add', '--', ...options.stageFiles], directory);
+      }
+
+      const result = await execGit(['commit', '-m', message], directory);
+      if (result.exitCode !== 0) {
+        return {
+          success: false,
+          commit: '',
+          branch: '',
+          summary: { changes: 0, insertions: 0, deletions: 0 },
+        };
+      }
+
+      const hashResult = await execGit(['rev-parse', 'HEAD'], directory);
+      const branchResult = await execGit(['rev-parse', '--abbrev-ref', 'HEAD'], directory);
+      return {
+        success: true,
+        commit: hashResult.stdout.trim(),
+        branch: branchResult.stdout.trim(),
+        summary: { changes: 0, insertions: 0, deletions: 0 },
+      };
+    } finally {
+      if (temporarilyUnstagedFiles.length > 0) {
+        await execGit(['add', '--', ...temporarilyUnstagedFiles], directory);
+      }
+    }
+  }
+
   const repo = await getRepository(directory);
   
   if (repo) {
@@ -2119,7 +2278,10 @@ export async function createGitCommit(
       if (options?.addAll) {
         await repo.add(['.']);
       } else if (options?.files?.length) {
-        await repo.add(options.files);
+        const filesToStage = options.stageFiles ?? options.files;
+        if (filesToStage.length > 0) {
+          await repo.add(filesToStage);
+        }
       }
       
       await repo.commit(message);
@@ -2140,7 +2302,10 @@ export async function createGitCommit(
   if (options?.addAll) {
     await execGit(['add', '-A'], directory);
   } else if (options?.files?.length) {
-    await execGit(['add', ...options.files], directory);
+    const filesToStage = options.stageFiles ?? options.files;
+    if (filesToStage.length > 0) {
+      await execGit(['add', ...filesToStage], directory);
+    }
   }
 
   const result = await execGit(['commit', '-m', message], directory);
@@ -2360,11 +2525,11 @@ export async function gitPush(
  */
 export async function gitPull(
   directory: string,
-  options?: { remote?: string; branch?: string }
+  options?: { remote?: string; branch?: string; rebase?: boolean }
 ): Promise<{ success: boolean; summary: { changes: number; insertions: number; deletions: number }; files: string[]; insertions: number; deletions: number }> {
   const repo = await getRepository(directory);
   
-  if (repo) {
+  if (repo && options?.rebase !== true) {
     try {
       await repo.pull();
       return {
@@ -2380,19 +2545,97 @@ export async function gitPull(
   }
 
   // Fallback to raw git
+  const beforeHead = await execGit(['rev-parse', 'HEAD'], directory);
   const args = ['pull'];
+  if (options?.rebase === true) args.push('--rebase');
   if (options?.remote) args.push(options.remote);
   if (options?.branch) args.push(options.branch);
 
   const result = await execGit(args, directory);
-  
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || 'Failed to pull from remote');
+  }
+  const afterHead = await execGit(['rev-parse', 'HEAD'], directory);
+  const before = beforeHead.exitCode === 0 ? beforeHead.stdout.trim() : '';
+  const after = afterHead.exitCode === 0 ? afterHead.stdout.trim() : '';
+  const changedFiles = before && after && before !== after
+    ? await execGit(['diff', '--name-only', before, after], directory)
+    : { stdout: '', stderr: '', exitCode: 0 };
+  const files = changedFiles.exitCode === 0
+    ? changedFiles.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+    : [];
+   
   return {
     success: result.exitCode === 0,
-    summary: { changes: 0, insertions: 0, deletions: 0 },
-    files: [],
+    summary: { changes: files.length, insertions: 0, deletions: 0 },
+    files,
     insertions: 0,
     deletions: 0,
   };
+}
+
+export async function listGitStashes(directory: string): Promise<Array<{ ref: string; message: string; relativeTime: string; hash: string }>> {
+  const result = await execGit(['stash', 'list', '--format=%gd%x1f%gs%x1f%cr%x1f%H'], directory);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Failed to list stashes');
+  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [ref = '', message = '', relativeTime = '', hash = ''] = line.split('\x1f');
+    return { ref, message, relativeTime, hash };
+  }).filter((entry) => entry.ref);
+}
+
+export async function countGitStashFiles(directory: string, refs: string[]): Promise<Record<string, number>> {
+  const uniqueRefs = Array.from(new Set(refs.map((ref) => String(ref || '').trim()).filter(Boolean)));
+  const counts: Record<string, number> = {};
+  const concurrency = 4;
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < uniqueRefs.length) {
+      const ref = uniqueRefs[cursor++];
+      if (!ref) continue;
+      const names = await execGit(['stash', 'show', '--name-only', ref], directory);
+      counts[ref] = names.exitCode === 0 ? names.stdout.split('\n').map((line) => line.trim()).filter(Boolean).length : 0;
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, uniqueRefs.length) }, () => worker()));
+  return counts;
+}
+
+export async function stashGitChanges(directory: string, options: { message?: string } = {}): Promise<{ success: boolean; created: boolean; message: string; output: string }> {
+  const message = options.message?.trim() || `OpenChamber stash ${new Date().toISOString()}`;
+  const result = await execGit(['stash', 'push', '--include-untracked', '-m', message], directory);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Failed to stash changes');
+  const output = result.stdout.trim() || result.stderr.trim();
+  return { success: true, created: !/no local changes/i.test(output), message, output };
+}
+
+export async function applyGitStash(directory: string, options: { ref: string }): Promise<{ success: boolean; ref: string }> {
+  const ref = options.ref || 'stash@{0}';
+  // Prefer --index so the staged/unstaged split captured in the stash is restored
+  // faithfully. Fall back to a plain apply when the index can't be reinstated
+  // cleanly (e.g. conflicts), which is the prior behavior.
+  const withIndex = await execGit(['stash', 'apply', '--index', ref], directory);
+  if (withIndex.exitCode === 0) {
+    return { success: true, ref };
+  }
+  const result = await execGit(['stash', 'apply', ref], directory);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || 'Failed to apply stash');
+  return { success: true, ref };
+}
+
+export async function dropGitStash(directory: string, options: { ref: string }): Promise<{ success: boolean; ref: string }> {
+  const ref = options.ref || 'stash@{0}';
+  const result = await execGit(['stash', 'drop', ref], directory);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || 'Failed to drop stash');
+  return { success: true, ref };
+}
+
+export async function popGitStash(directory: string, options: { ref: string }): Promise<{ success: boolean; ref: string }> {
+  const ref = options.ref || 'stash@{0}';
+  await applyGitStash(directory, { ref });
+  await dropGitStash(directory, { ref });
+  return { success: true, ref };
 }
 
 /**
@@ -2438,6 +2681,34 @@ export interface GitLogEntry {
 }
 
 /**
+ * Resolve a log base ref using local-first semantics (mirrors web service.js).
+ *
+ * - Returns undefined when `from` is falsy/whitespace.
+ * - Returns `from` unchanged when the local ref resolves.
+ * - Returns `origin/<from>` when local is absent but the remote-tracking ref exists.
+ * - Returns `from` unchanged when neither resolves (lets git surface the error).
+ */
+async function resolveBaseRefForLog(
+  from: string | undefined,
+  directory: string
+): Promise<string | undefined> {
+  const normalized = typeof from === 'string' ? from.trim() : undefined;
+  if (!normalized) return undefined;
+
+  const checkRef = async (ref: string): Promise<boolean> => {
+    const result = await execGit(['rev-parse', '--verify', ref], directory);
+    return result.exitCode === 0 && Boolean(result.stdout.trim());
+  };
+
+  if (await checkRef(normalized)) return normalized;
+
+  const originRef = `refs/remotes/origin/${normalized}`;
+  if (await checkRef(originRef)) return `origin/${normalized}`;
+
+  return normalized;
+}
+
+/**
  * Get git log
  */
 export async function getGitLog(
@@ -2445,6 +2716,11 @@ export async function getGitLog(
   options?: { maxCount?: number; from?: string; to?: string; file?: string }
 ): Promise<{ all: GitLogEntry[]; latest: GitLogEntry | null; total: number }> {
   const maxCount = options?.maxCount || 50;
+
+  // Prefer the local ref; fall back to origin/<from> only when the local ref
+  // cannot be resolved (e.g. user has never checked out the base branch).
+  const resolvedFrom = await resolveBaseRefForLog(options?.from, directory);
+
   const args = [
     'log',
     `--max-count=${maxCount}`,
@@ -2452,8 +2728,12 @@ export async function getGitLog(
     '--shortstat',
   ];
   
-  if (options?.from && options?.to) {
-    args.push(`${options.from}..${options.to}`);
+  if (resolvedFrom && options?.to) {
+    args.push(`${resolvedFrom}..${options.to}`);
+  } else if (resolvedFrom) {
+    args.push(`${resolvedFrom}..HEAD`);
+  } else if (options?.to) {
+    args.push(options.to);
   }
   
   if (options?.file) {
@@ -2463,7 +2743,7 @@ export async function getGitLog(
   const result = await execGit(args, directory);
   
   if (result.exitCode !== 0) {
-    return { all: [], latest: null, total: 0 };
+    throw new Error(result.stderr.trim() || result.stdout.trim() || 'Failed to get git log');
   }
 
   const entries: GitLogEntry[] = [];
@@ -2516,29 +2796,82 @@ export async function getCommitFiles(
   directory: string,
   hash: string
 ): Promise<{ files: Array<{ path: string; insertions: number; deletions: number; isBinary: boolean; changeType: string }> }> {
-  const result = await execGit(['show', '--numstat', '--format=', hash], directory);
-  
-  if (result.exitCode !== 0) {
+  const numstatResult = await execGit(['show', '--numstat', '--format=', hash], directory);
+
+  if (numstatResult.exitCode !== 0) {
     return { files: [] };
   }
 
   const files: Array<{ path: string; insertions: number; deletions: number; isBinary: boolean; changeType: string }> = [];
-  
-  for (const line of result.stdout.trim().split('\n').filter(Boolean)) {
+  const lines = numstatResult.stdout.trim().split('\n').filter(Boolean);
+
+  for (const line of lines) {
     const parts = line.split('\t');
-    if (parts.length >= 3) {
-      const isBinary = parts[0] === '-' && parts[1] === '-';
-      files.push({
-        path: parts[2] || '',
-        insertions: isBinary ? 0 : parseInt(parts[0] || '0', 10),
-        deletions: isBinary ? 0 : parseInt(parts[1] || '0', 10),
-        isBinary,
-        changeType: 'M', // Would need additional parsing for actual change type
-      });
+    if (parts.length < 3) continue;
+
+    const [insertionsRaw, deletionsRaw, ...pathParts] = parts;
+    const filePath = pathParts.join('\t');
+    if (!filePath) continue;
+
+    const isBinary = insertionsRaw === '-' && deletionsRaw === '-';
+    const insertions = isBinary ? 0 : (parseInt(insertionsRaw, 10) || 0);
+    const deletions = isBinary ? 0 : (parseInt(deletionsRaw, 10) || 0);
+
+    let changeType = 'M';
+    if (filePath.includes(' => ')) {
+      changeType = 'R';
+    }
+
+    files.push({ path: filePath, insertions, deletions, isBinary, changeType });
+  }
+
+  // Get accurate change types from --name-status
+  const nameStatusResult = await execGit(['show', '--name-status', '--format=', hash], directory);
+  if (nameStatusResult.exitCode === 0) {
+    const statusMap = new Map<string, string>();
+    for (const line of nameStatusResult.stdout.trim().split('\n').filter(Boolean)) {
+      const match = line.match(/^([AMDRC])\d*\t(.+)$/);
+      if (match) {
+        const [, status, pathPart] = match;
+        statusMap.set(extractGitStatusPath(status, pathPart), status);
+      }
+    }
+    for (const file of files) {
+      const basePath = extractGitNumstatDestinationPath(file.path);
+      const status = statusMap.get(basePath) ?? statusMap.get(file.path);
+      if (status) {
+        file.changeType = status;
+      }
     }
   }
 
   return { files };
+}
+
+export async function getCommitFileDiff(
+  directory: string,
+  hash: string,
+  filePath: string,
+  isBinary: boolean
+): Promise<{ original: string; modified: string; isBinary: boolean }> {
+  if (isBinary) {
+    return { original: '', modified: '', isBinary: true };
+  }
+
+  const [originalResult, modifiedResult] = await Promise.all([
+    execGit(['show', `${hash}^:${filePath}`], directory),
+    execGit(['show', `${hash}:${filePath}`], directory),
+  ]);
+
+  if (originalResult.exitCode !== 0 && modifiedResult.exitCode !== 0) {
+    throw new Error(`Failed to read file content at commit ${hash}`);
+  }
+
+  return {
+    original: originalResult.exitCode === 0 ? originalResult.stdout : '',
+    modified: modifiedResult.exitCode === 0 ? modifiedResult.stdout : '',
+    isBinary: false,
+  };
 }
 
 // ============== Git Identity Operations ==============

@@ -35,6 +35,8 @@ import {
   createGlobalUiEventBroadcaster,
   createGlobalMessageStreamHub,
   createMessageStreamWsRuntime,
+  DEFAULT_UPSTREAM_STALL_TIMEOUT_MS,
+  UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS,
 } from './lib/event-stream/index.js';
 import { createOttoEventsWebSocketRuntime } from './lib/otto-api/websocket.js';
 import { createFsSearchRuntime as createFsSearchRuntimeFactory } from './lib/fs/search.js';
@@ -81,6 +83,8 @@ import { createDiscordSyncRouter } from './lib/otto-api/discord-sync.js';
 import { createMessengerSyncRouter } from './lib/otto-api/messenger-sync.js';
 import { createMempalaceBridgeRouter } from './lib/otto-api/mempalace-bridge.js';
 import { broadcast as ottoEventsBroadcast } from './lib/otto-api/websocket.js';
+import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
+import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -139,6 +143,10 @@ function shouldSkipCompression(req, res) {
   }
 
   const pathname = req.path || req.url || '';
+  if ((pathname === '/api' || pathname.startsWith('/api/')) && shouldSkipApiCompression()) {
+    return true;
+  }
+
   if (pathname.startsWith('/api/terminal/') && pathname.endsWith('/stream')) {
     return true;
   }
@@ -171,6 +179,22 @@ const isEnvFlagEnabled = (value) => {
   return normalized === '1' || normalized === 'true';
 };
 
+const isEnvFlagDisabled = (value) => {
+  if (value === false || value === 0) return true;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '0' || normalized === 'false';
+};
+
+const shouldSkipApiCompression = () => {
+  if (isEnvFlagEnabled(process.env.OPENCHAMBER_SKIP_API_COMPRESSION)) return true;
+  if (isEnvFlagEnabled(process.env.OPENCHAMBER_COMPRESS_API)) return false;
+  if (isEnvFlagDisabled(process.env.OPENCHAMBER_COMPRESS_API)) return true;
+  return process.env.OPENCHAMBER_RUNTIME === 'desktop';
+};
+
+const OPENCHAMBER_VERBOSE_REQUEST_LOGS = isEnvFlagEnabled(process.env.OPENCHAMBER_VERBOSE_REQUEST_LOGS);
+
 const PLAN_MODE_EXPERIMENT_ENABLED =
   isEnvFlagEnabled(process.env.OPENCODE_EXPERIMENTAL_PLAN_MODE)
   || isEnvFlagEnabled(process.env.OPENCODE_EXPERIMENTAL);
@@ -181,6 +205,7 @@ const settingsNormalizationRuntime = createSettingsNormalizationRuntime({
   os,
   path,
   processLike: process,
+  realpathSync: fs.realpathSync,
   tunnelBootstrapTtlDefaultMs: TUNNEL_BOOTSTRAP_TTL_DEFAULT_MS,
   tunnelBootstrapTtlMinMs: TUNNEL_BOOTSTRAP_TTL_MIN_MS,
   tunnelBootstrapTtlMaxMs: TUNNEL_BOOTSTRAP_TTL_MAX_MS,
@@ -232,9 +257,6 @@ const formatProjectLabel = (...args) => notificationTemplateRuntime.formatProjec
 const resolveNotificationTemplate = (...args) => notificationTemplateRuntime.resolveNotificationTemplate(...args);
 const shouldApplyResolvedTemplateMessage = (...args) => notificationTemplateRuntime.shouldApplyResolvedTemplateMessage(...args);
 const fetchFreeZenModels = (...args) => notificationTemplateRuntime.fetchFreeZenModels(...args);
-const resolveZenModel = (...args) => notificationTemplateRuntime.resolveZenModel(...args);
-const validateZenModelAtStartup = (...args) => notificationTemplateRuntime.validateZenModelAtStartup(...args);
-const summarizeText = (...args) => notificationTemplateRuntime.summarizeText(...args);
 const extractTextFromParts = (...args) => notificationTemplateRuntime.extractTextFromParts(...args);
 const extractLastMessageText = (...args) => notificationTemplateRuntime.extractLastMessageText(...args);
 const fetchLastAssistantMessageText = (...args) => notificationTemplateRuntime.fetchLastAssistantMessageText(...args);
@@ -386,6 +408,17 @@ const sessionRuntime = createSessionRuntime({
   broadcastEvent: broadcastGlobalUiEvent,
 });
 
+const getActiveSessionCount = () => {
+  const snapshot = sessionRuntime.getSessionActivitySnapshot();
+  return Object.values(snapshot).filter((entry) => entry.type === 'busy').length;
+};
+
+const getUpstreamStallTimeoutMs = () => (
+  getActiveSessionCount() > 1
+    ? UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS
+    : DEFAULT_UPSTREAM_STALL_TIMEOUT_MS
+);
+
 const projectConfigRuntime = createProjectConfigRuntime({
   fsPromises,
   path,
@@ -413,6 +446,7 @@ let openCodeApiPrefix = '';
 let openCodeApiPrefixDetected = true;
 let openCodeApiDetectionTimer = null;
 let lastOpenCodeError = null;
+let lastOpenCodeLaunchDiagnostics = null;
 let isOpenCodeReady = false;
 let openCodeNotReadySince = 0;
 let isExternalOpenCode = false;
@@ -640,8 +674,6 @@ notificationTemplateRuntime = createNotificationTemplateRuntime({
 const notificationTriggerRuntime = createNotificationTriggerRuntime({
   readSettingsFromDisk,
   prepareNotificationLastMessage,
-  summarizeText,
-  resolveZenModel,
   buildTemplateVariables,
   extractLastMessageText,
   fetchLastAssistantMessageText,
@@ -660,6 +692,7 @@ const setAutoAcceptSession = (...args) => notificationTriggerRuntime.setAutoAcce
 const globalMessageStreamHub = createGlobalMessageStreamHub({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
+  upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
 });
 
 const openCodeWatcherRuntime = createOpenCodeWatcherRuntime({
@@ -687,9 +720,12 @@ const processForwardedEventPayload = (payload, emitSyntheticEvent) => {
   }
 
   const properties = payload.properties && typeof payload.properties === 'object' ? payload.properties : {};
+  const statusInfo = properties.status && typeof properties.status === 'object' ? properties.status : {};
   const info = properties.info && typeof properties.info === 'object' ? properties.info : {};
   const sessionId = typeof properties.sessionID === 'string' ? properties.sessionID.trim() : '';
-  const status = typeof info.type === 'string' ? info.type.trim() : '';
+  const status = typeof statusInfo.type === 'string'
+    ? statusInfo.type.trim()
+    : (typeof info.type === 'string' ? info.type.trim() : '');
 
   if (!sessionId || !status) {
     return;
@@ -698,13 +734,19 @@ const processForwardedEventPayload = (payload, emitSyntheticEvent) => {
   emitSyntheticEvent({
     type: 'openchamber:session-status',
     properties: {
-      sessionId,
+      sessionID: sessionId,
       status,
       timestamp: Date.now(),
       metadata: {
-        attempt: typeof info.attempt === 'number' ? info.attempt : undefined,
-        message: typeof info.message === 'string' ? info.message : undefined,
-        next: typeof info.next === 'number' ? info.next : undefined,
+        attempt: typeof statusInfo.attempt === 'number'
+          ? statusInfo.attempt
+          : (typeof info.attempt === 'number' ? info.attempt : undefined),
+        message: typeof statusInfo.message === 'string'
+          ? statusInfo.message
+          : (typeof info.message === 'string' ? info.message : undefined),
+        next: typeof statusInfo.next === 'number'
+          ? statusInfo.next
+          : (typeof info.next === 'number' ? info.next : undefined),
       },
       needsAttention: false,
     },
@@ -845,6 +887,7 @@ Object.defineProperties(openCodeLifecycleState, {
   openCodeApiPrefixDetected: { get: () => openCodeApiPrefixDetected, set: (value) => { openCodeApiPrefixDetected = value; } },
   openCodeApiDetectionTimer: { get: () => openCodeApiDetectionTimer, set: (value) => { openCodeApiDetectionTimer = value; } },
   lastOpenCodeError: { get: () => lastOpenCodeError, set: (value) => { lastOpenCodeError = value; } },
+  lastOpenCodeLaunchDiagnostics: { get: () => lastOpenCodeLaunchDiagnostics, set: (value) => { lastOpenCodeLaunchDiagnostics = value; } },
   isOpenCodeReady: { get: () => isOpenCodeReady, set: (value) => { isOpenCodeReady = value; } },
   openCodeNotReadySince: { get: () => openCodeNotReadySince, set: (value) => { openCodeNotReadySince = value; } },
   isExternalOpenCode: { get: () => isExternalOpenCode, set: (value) => { isExternalOpenCode = value; } },
@@ -885,6 +928,8 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   clearResolvedOpenCodeBinary,
   buildAugmentedPath,
   buildManagedOpenCodePath,
+  getManagedOpenCodeShellEnvSnapshot: getLoginShellEnvSnapshot,
+  getActiveSessionCount,
 });
 
 const restartOpenCode = (...args) => openCodeLifecycleRuntime.restartOpenCode(...args);
@@ -1037,13 +1082,13 @@ async function main(options = {}) {
   if (typeof options.onDesktopNotification === 'function') {
     notificationEmitterRuntime.setOnDesktopNotification(options.onDesktopNotification);
   }
+  if (typeof options.getIsWindowFocused === 'function') {
+    notificationTriggerRuntime.setGetIsWindowFocused(options.getIsWindowFocused);
+  }
 
   console.log(`Starting OpenChamber on port ${port === 0 ? 'auto' : port}`);
 
   const sayTTSCapability = await detectSayTtsCapability(process);
-
-  // Startup model validation is best-effort and runs in background.
-  void validateZenModelAtStartup();
 
   const app = express();
   const serverStartedAt = new Date().toISOString();
@@ -1078,6 +1123,7 @@ async function main(options = {}) {
         openCodeApiPrefixDetected: true,
         isOpenCodeReady,
         lastOpenCodeError,
+        lastOpenCodeLaunchDiagnostics,
         opencodeBinaryResolved: resolvedOpencodeBinary || null,
         opencodeBinarySource: resolvedOpencodeBinarySource || null,
         opencodeLaunchBinary: launchSpec?.binary || null,
@@ -1093,11 +1139,11 @@ async function main(options = {}) {
         planModeExperimentalEnabled: PLAN_MODE_EXPERIMENT_ENABLED,
       };
     },
+    verboseRequestLogs: OPENCHAMBER_VERBOSE_REQUEST_LOGS,
     uiPassword,
     tunnelAuthController,
     readSettingsFromDiskMigrated,
     normalizeTunnelSessionTtlMs,
-    resolveZenModel,
     sayTTSCapability,
     ensurePushInitialized,
     ensureGlobalWatcherStarted,
@@ -1193,6 +1239,20 @@ async function main(options = {}) {
     }),
   });
 
+  const previewProxyRuntime = createPreviewProxyRuntime({
+    crypto,
+    URL,
+    createProxyMiddleware,
+    responseInterceptor,
+  });
+  previewProxyRuntime.attach(app, {
+    server,
+    express,
+    uiAuthController,
+    isRequestOriginAllowed,
+    rejectWebSocketUpgrade,
+  });
+
   const startupPipelineResult = await startupPipelineRuntime.run({
     app,
     server,
@@ -1210,6 +1270,7 @@ async function main(options = {}) {
     globalEventHub: globalMessageStreamHub,
     processForwardedEventPayload,
     messageStreamWsClients: uiNotificationWsClients,
+    upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
     terminalHeartbeatIntervalMs: TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS,
     terminalRebindWindowMs: TERMINAL_INPUT_WS_REBIND_WINDOW_MS,
     terminalMaxRebindsPerWindow: TERMINAL_INPUT_WS_MAX_REBINDS_PER_WINDOW,
@@ -1256,6 +1317,12 @@ async function main(options = {}) {
     getPort: () => tunnelRuntimeContext.getActivePort(),
     getOpenCodePort: () => openCodePort,
     getTunnelUrl: () => tunnelService.getPublicUrl(),
+    getQuitRiskStatus: () => ({
+      tunnel: {
+        active: Boolean(tunnelService.getPublicUrl()),
+      },
+      scheduledTasks: scheduledTasksRuntime.getStatus(),
+    }),
     isReady: () => isOpenCodeReady,
     restartOpenCode: () => restartOpenCode(),
     stop: (shutdownOptions = {}) =>

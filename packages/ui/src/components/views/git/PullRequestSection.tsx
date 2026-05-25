@@ -1,22 +1,4 @@
 import React from 'react';
-import {
-  RiChat4Line,
-  RiCheckLine,
-  RiCheckboxCircleLine,
-  RiAiGenerate2,
-  RiArrowDownSLine,
-  RiArrowRightSLine,
-  RiCloseLine,
-  RiEditLine,
-  RiErrorWarningLine,
-  RiExternalLinkLine,
-  RiGitClosePullRequestLine,
-  RiGitMergeLine,
-  RiGitPrDraftLine,
-  RiGitPullRequestLine,
-  RiInformationLine,
-  RiLoader4Line,
-} from '@remixicon/react';
 import { toast } from '@/components/ui';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
@@ -27,12 +9,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
@@ -50,6 +26,7 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useDeviceInfo } from '@/lib/device';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { SimpleMarkdownRenderer } from '@/components/chat/MarkdownRenderer';
+import { Icon } from "@/components/icon/Icon";
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
@@ -59,6 +36,7 @@ import { getGitHubPrStatusKey, useGitHubPrStatusStore } from '@/stores/useGitHub
 import type {
   GitHubPullRequest,
   GitHubCheckRun,
+  GitHubAPI,
   GitHubPullRequestContextResult,
   GitHubPullRequestStatus,
   GitRemote,
@@ -66,6 +44,7 @@ import type {
 import { useI18n } from '@/lib/i18n';
 
 type MergeMethod = 'merge' | 'squash' | 'rebase';
+type DetectedUpstream = { owner: string; repo: string; url: string; defaultBranch?: string; defaultBranchSha?: string | null; remoteName?: string | null };
 
 const statusColor = (state: string | undefined | null): string => {
   switch (state) {
@@ -270,6 +249,56 @@ const pullRequestDraftSnapshots = new Map<string, PullRequestDraftSnapshot>();
 
 const openExternal = openExternalUrl;
 
+function useDetectedUpstreamRepo(directory: string, github: GitHubAPI | undefined) {
+  const [detectedUpstream, setDetectedUpstream] = React.useState<DetectedUpstream | null>(null);
+  const [upstreamBranches, setUpstreamBranches] = React.useState<string[]>([]);
+  const attemptedDirectoryRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    setDetectedUpstream(null);
+    setUpstreamBranches([]);
+  }, [directory]);
+
+  React.useEffect(() => {
+    if (!directory || !github?.repoUpstream || attemptedDirectoryRef.current === directory) {
+      return;
+    }
+    attemptedDirectoryRef.current = directory;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await github.repoUpstream(directory);
+        if (cancelled || !result?.isFork || !result.upstream) {
+          return;
+        }
+
+        setDetectedUpstream(result.upstream);
+        if (!github.repoBranches) {
+          return;
+        }
+
+        try {
+          const branches = await github.repoBranches(result.upstream.owner, result.upstream.repo);
+          if (!cancelled) {
+            setUpstreamBranches(branches);
+          }
+        } catch {
+          // Silently fail - branch list is best-effort.
+        }
+      } catch {
+        // Silently fail - upstream detection is best-effort.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [directory, github]);
+
+  return { detectedUpstream, upstreamBranches };
+}
+
 export const PullRequestSection: React.FC<{
   directory: string;
   branch: string;
@@ -339,6 +368,16 @@ export const PullRequestSection: React.FC<{
       trackingBranch,
     })
   );
+  const [useDetectedUpstream, setUseDetectedUpstream] = React.useState(false);
+  const { detectedUpstream, upstreamBranches } = useDetectedUpstreamRepo(directory, github);
+
+  React.useEffect(() => {
+    setUseDetectedUpstream(false);
+  }, [directory]);
+
+  const hasUpstreamRemote = remotes.some((r) => r.name === 'upstream');
+  const isFork = hasUpstreamRemote || detectedUpstream !== null;
+  const canShow = Boolean(directory && branch && baseBranch && (branch !== baseBranch || isFork));
 
   const prStatusKey = React.useMemo(
     () => getGitHubPrStatusKey(directory, branch),
@@ -352,7 +391,7 @@ export const PullRequestSection: React.FC<{
   const isInitialStatusResolved = statusEntry?.isInitialStatusResolved ?? false;
 
   const availableBaseBranches = React.useMemo(() => {
-    const selectedRemoteName = selectedRemote?.name?.trim() || null;
+    const selectedRemoteName = useDetectedUpstream ? null : (selectedRemote?.name?.trim() || null);
     const unique = new Set<string>();
 
     for (const remoteBranch of remoteBranches) {
@@ -361,6 +400,15 @@ export const PullRequestSection: React.FC<{
         continue;
       }
       unique.add(branchName);
+    }
+
+    // When using detected upstream, include all upstream repo branches
+    if (useDetectedUpstream) {
+      for (const b of upstreamBranches) {
+        if (b && b !== 'HEAD') {
+          unique.add(b);
+        }
+      }
     }
 
     const defaultBase = normalizeBranchRef(baseBranch);
@@ -374,9 +422,7 @@ export const PullRequestSection: React.FC<{
     }
 
     return Array.from(unique).sort((a, b) => a.localeCompare(b));
-  }, [baseBranch, remoteBranches, selectedRemote?.name, targetBaseBranch]);
-
-  const hasMultipleRemotes = remotes.length > 1;
+  }, [baseBranch, remoteBranches, selectedRemote?.name, targetBaseBranch, upstreamBranches, useDetectedUpstream]);
 
   // Update selected remote when remotes change
   React.useEffect(() => {
@@ -432,7 +478,19 @@ export const PullRequestSection: React.FC<{
   const autoRemoteProbeDoneRef = React.useRef<Set<string>>(new Set());
   const pendingActionRefreshTimersRef = React.useRef<number[]>([]);
 
-  const canShow = Boolean(directory && branch && baseBranch && branch !== baseBranch);
+  // Auto-enable detected upstream when there's no explicit upstream remote
+  React.useEffect(() => {
+    if (detectedUpstream && !hasUpstreamRemote) {
+      setUseDetectedUpstream(true);
+    }
+  }, [detectedUpstream, hasUpstreamRemote]);
+
+  // Set target base branch to upstream's default branch when using detected upstream
+  React.useEffect(() => {
+    if (useDetectedUpstream && detectedUpstream?.defaultBranch) {
+      setTargetBaseBranch(detectedUpstream.defaultBranch);
+    }
+  }, [useDetectedUpstream, detectedUpstream?.defaultBranch]);
 
   const pr = status?.pr ?? null;
   const currentPrBodyHydrationKey = pr ? `${directory}#${pr.number}` : null;
@@ -694,7 +752,7 @@ export const PullRequestSection: React.FC<{
           {run.detailsUrl ? (
             <Button variant="outline" size="sm" asChild className="flex-shrink-0">
               <a href={run.detailsUrl} target="_blank" rel="noopener noreferrer">
-                <RiExternalLinkLine className="size-4" />
+                <Icon name="external-link" className="size-4" />
                 Open
               </a>
             </Button>
@@ -783,7 +841,7 @@ export const PullRequestSection: React.FC<{
                         (isFail ? 'bg-destructive/10 text-destructive' : 'text-muted-foreground')
                       }
                     >
-                      {stepExpanded ? <RiArrowDownSLine className="size-4" /> : <RiArrowRightSLine className="size-4" />}
+                      {stepExpanded ? <Icon name="arrow-down-s" className="size-4" /> : <Icon name="arrow-right-s" className="size-4" />}
                       <span className="truncate">{step.name}</span>
                       {step.conclusion ? <span className="ml-auto flex-shrink-0">{step.conclusion}</span> : null}
                     </button>
@@ -933,12 +991,6 @@ export const PullRequestSection: React.FC<{
       void refresh({ force: true, silent: true, markInitialResolved: true });
     }, delayMs));
   }, [refresh]);
-
-  // Refetch PR status when selected remote changes
-  const handleRemoteChange = React.useCallback((remote: GitRemote) => {
-    didUserOverrideRemoteRef.current = true;
-    setSelectedRemote((prev) => (prev?.name === remote.name ? prev : remote));
-  }, []);
 
   React.useEffect(() => {
     if (!github?.prStatus || !canShow || remotes.length <= 1) {
@@ -1120,8 +1172,14 @@ export const PullRequestSection: React.FC<{
     if (!directory) return;
     setIsGenerating(true);
     try {
+      // For cross-repo PRs, use the upstream's default branch SHA for the commit range.
+      // Using a bare branch name like "main" would resolve to the local ref, making
+      // "git log main..main" a no-op. The SHA points to the actual upstream commit.
+      const baseRef = (useDetectedUpstream && detectedUpstream?.defaultBranchSha)
+        ? detectedUpstream.defaultBranchSha
+        : targetBaseBranch;
       const payload: { base: string; head: string; context?: string; files?: string[] } = {
-        base: targetBaseBranch,
+        base: baseRef,
         head: branch,
       };
       if (additionalContext) {
@@ -1142,7 +1200,7 @@ export const PullRequestSection: React.FC<{
     } finally {
       setIsGenerating(false);
     }
-  }, [additionalContext, branch, directory, isGenerating, onGeneratedDescription, targetBaseBranch, t]);
+  }, [additionalContext, branch, detectedUpstream?.defaultBranchSha, directory, isGenerating, onGeneratedDescription, targetBaseBranch, t, useDetectedUpstream]);
 
   const createPr = React.useCallback(async () => {
     if (!github?.prCreate) {
@@ -1160,15 +1218,17 @@ export const PullRequestSection: React.FC<{
       toast.error(t('gitView.pr.toast.baseBranchRequired'));
       return;
     }
-    if (trimmedBase === branch) {
+    if (!useDetectedUpstream && trimmedBase === branch) {
       toast.error(t('gitView.pr.toast.baseMustDifferFromHead'));
       return;
     }
 
     setIsCreating(true);
     try {
-      // Let the server determine the head source from tracking info
-      // The server will check the branch's tracking remote and use that
+      const trackingRemoteName = getTrackingRemoteName(trackingBranch);
+
+      const usingDetectedUpstream = useDetectedUpstream && detectedUpstream;
+
       const pr = await github.prCreate({
         directory,
         title: trimmedTitle,
@@ -1176,7 +1236,14 @@ export const PullRequestSection: React.FC<{
         base: trimmedBase,
         ...(body.trim() ? { body } : {}),
         draft,
-        ...(selectedRemote ? { remote: selectedRemote.name } : {}),
+        ...(usingDetectedUpstream
+          ? { targetRepo: { owner: detectedUpstream.owner, repo: detectedUpstream.repo }, headRemote: 'origin' }
+          : {
+              ...(selectedRemote ? { remote: selectedRemote.name } : {}),
+              ...(trackingRemoteName && trackingRemoteName !== selectedRemote?.name
+                ? { headRemote: trackingRemoteName }
+                : {}),
+            }),
       });
       toast.success(t('gitView.pr.toast.prCreated'));
       updatePrStatus(prStatusKey, (prev) => (prev ? { ...prev, pr } : prev));
@@ -1188,7 +1255,7 @@ export const PullRequestSection: React.FC<{
     } finally {
       setIsCreating(false);
     }
-  }, [body, branch, directory, draft, github, prStatusKey, refresh, scheduleActionRefresh, selectedRemote, targetBaseBranch, title, updatePrStatus, t]);
+  }, [body, branch, detectedUpstream, directory, draft, github, prStatusKey, refresh, scheduleActionRefresh, selectedRemote, targetBaseBranch, title, trackingBranch, updatePrStatus, useDetectedUpstream, t]);
 
   const mergePr = React.useCallback(async (pr: GitHubPullRequest) => {
     if (!github?.prMerge) {
@@ -1280,24 +1347,47 @@ export const PullRequestSection: React.FC<{
   }, [directory, editBody, editTitle, github, prStatusKey, refresh, scheduleActionRefresh, updatePrStatus, t]);
 
   if (!canShow) {
-    return null;
+    return (
+      <section className="border-0 bg-transparent rounded-none">
+        <div className="space-y-1 pt-3">
+          <div className="typography-ui-header font-semibold text-foreground">{t('gitView.pullRequest.title')}</div>
+          <div className="typography-micro text-muted-foreground">
+            {t('gitView.pullRequest.availableOnFeatureBranches')}
+          </div>
+        </div>
+      </section>
+    );
   }
 
-  const repoUrl = status?.repo?.url || null;
+  const originRepoUrl = status?.repo?.url || null;
+  const repoUrl = (useDetectedUpstream && detectedUpstream?.url) ? detectedUpstream.url : originRepoUrl;
   const checks = status?.checks ?? null;
   const canMerge = Boolean(status?.canMerge);
   const isConnected = Boolean(status?.connected);
   const shouldShowConnectionNotice = githubAuthChecked && status?.connected === false;
   const prVisualState = getPrVisualState(status);
   const prColorVar = prVisualState ? `var(--pr-${prVisualState})` : 'var(--status-info)';
-  const PrStateIcon = prVisualState === 'draft'
-    ? RiGitPrDraftLine
+  const prStateIconName = prVisualState === 'draft'
+    ? 'git-pr-draft'
     : prVisualState === 'merged'
-      ? RiGitMergeLine
+      ? 'git-merge'
       : prVisualState === 'closed'
-        ? RiGitClosePullRequestLine
-        : RiGitPullRequestLine;
-
+        ? 'git-close-pull-request'
+        : 'git-pull-request';
+  const prStatusText = pr
+    ? [
+        `${pr.state}${pr.draft ? ' (draft)' : ''}`,
+        pr.mergeable === false ? t('gitView.pr.notMergeable') : null,
+        pr.state === 'open' && typeof pr.mergeableState === 'string' && pr.mergeableState && pr.mergeableState !== 'unknown'
+          ? pr.mergeableState
+          : null,
+      ].filter(Boolean).join(' · ')
+    : '';
+  const checksText = checks
+    ? checks.total > 0
+      ? `${checks.success}/${checks.total} ${t('gitView.pr.checks.label')}`
+      : `${checks.state} ${t('gitView.pr.checks.label')}`
+    : '';
   const containerClassName = 'border-0 bg-transparent rounded-none';
   const headerClassName = 'px-0 py-3 border-b border-border/40 flex flex-col gap-1';
   const bodyClassName = 'flex flex-col gap-3 py-3';
@@ -1305,10 +1395,10 @@ export const PullRequestSection: React.FC<{
   return (
     <section className={containerClassName}>
       <div className={headerClassName}>
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             {pr ? (
-              <Tooltip delayDuration={300}>
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
@@ -1316,68 +1406,52 @@ export const PullRequestSection: React.FC<{
                     onClick={() => void openExternal(pr.url)}
                     aria-label={t('gitView.pr.actions.openOnGitHubAria')}
                   >
-                    <PrStateIcon className="size-4 shrink-0" style={{ color: prColorVar }} />
+                    <Icon name={prStateIconName} className="size-4 shrink-0" style={{ color: prColorVar }} />
                   </button>
                 </TooltipTrigger>
                 <TooltipContent><p>{t('gitView.pr.actions.openOnGitHub')}</p></TooltipContent>
               </Tooltip>
             ) : (
-              <PrStateIcon className="size-4 shrink-0" style={{ color: 'var(--surface-muted-foreground)' }} />
+              <Icon name={prStateIconName} className="size-4 shrink-0" style={{ color: 'var(--surface-muted-foreground)' }} />
             )}
             <h3 className="typography-ui-header font-semibold text-foreground truncate">{t('gitView.pullRequest.title')}</h3>
             {pr ? (
               <span className="typography-meta text-muted-foreground truncate">#{pr.number}</span>
             ) : null}
           </div>
-          <div className="flex items-center gap-2">
-            {isLoading ? <RiLoader4Line className="size-4 animate-spin text-muted-foreground" /> : null}
-            {checks ? (
-              <span className="inline-flex items-center gap-2 typography-micro text-muted-foreground">
-                <span className={`h-2 w-2 rounded-full ${statusColor(checks.state)}`} />
-                {checks.total > 0 ? `${checks.success}/${checks.total} checks` : `${checks.state} checks`}
-              </span>
-            ) : null}
-            {hasMultipleRemotes ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="xs" className="gap-1">
-                    <span className="typography-micro">{selectedRemote?.name}</span>
-                    <RiArrowDownSLine className="size-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[200px]">
-                  {remotes.map((remote) => (
-                    <DropdownMenuItem
-                      key={remote.name}
-                      onSelect={() => handleRemoteChange(remote)}
-                    >
-                      <div className="flex flex-col">
-                        <span className="typography-ui-label text-foreground">
-                          {remote.name}
-                          {remote.name === selectedRemote?.name && (
-                            <span className="ml-2 text-primary">✓</span>
-                          )}
-                        </span>
-                        <span className="typography-meta text-muted-foreground truncate">
-                          {remote.pushUrl}
-                        </span>
-                      </div>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : null}
+          <div className="flex shrink-0 items-center gap-1">
+            {isLoading ? <Icon name="loader-4" className="size-4 animate-spin text-muted-foreground" /> : null}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex size-5 items-center justify-center rounded hover:bg-interactive-hover/60 disabled:opacity-40"
+                  disabled={isLoading}
+                  onClick={() => void refresh({ force: true })}
+                  aria-label={t('gitView.pr.actions.refreshAria')}
+                >
+                  <Icon name="refresh" className="size-3.5 text-muted-foreground" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent><p>{t('gitView.pr.actions.refresh')}</p></TooltipContent>
+            </Tooltip>
           </div>
         </div>
+
         {pr ? (
-          <div className="typography-micro text-muted-foreground">
-            <span style={{ color: prColorVar }}>
-              {pr.state}{pr.draft ? ' (draft)' : ''}
-            </span>
-            {pr.mergeable === false ? ` · ${t('gitView.pr.notMergeable')}` : ''}
-            {pr.state === 'open' && typeof pr.mergeableState === 'string' && pr.mergeableState && pr.mergeableState !== 'unknown'
-              ? ` · ${pr.mergeableState}`
-              : ''}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 typography-micro text-muted-foreground">
+            <span style={{ color: prColorVar }}>{prStatusText}</span>
+            {checks ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className={`h-2 w-2 rounded-full ${statusColor(checks.state)}`} />
+                {checksText}
+              </span>
+            ) : null}
+            {trackingBranch && selectedRemote && trackingBranch.split('/')[0] !== selectedRemote.name ? (
+              <span className="min-w-0 truncate">
+                {trackingBranch.split('/')[0]} → {selectedRemote.name}
+              </span>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -1401,7 +1475,7 @@ export const PullRequestSection: React.FC<{
                 {repoUrl ? (
                   <Button variant="outline" size="sm" asChild className="w-fit">
                     <a href={repoUrl} target="_blank" rel="noopener noreferrer">
-                      <RiExternalLinkLine className="size-4" />
+                      <Icon name="external-link" className="size-4" />
                       Open Repo
                     </a>
                   </Button>
@@ -1411,7 +1485,7 @@ export const PullRequestSection: React.FC<{
 
             {!pr && !isInitialStatusResolved && !error && !shouldShowConnectionNotice ? (
               <div className="flex items-center gap-2 typography-micro text-muted-foreground">
-                <RiLoader4Line className="size-4 animate-spin" />
+                <Icon name="loader-4" className="size-4 animate-spin" />
                 {t('gitView.pr.checkingStatus')}
               </div>
             ) : pr ? (
@@ -1468,7 +1542,7 @@ export const PullRequestSection: React.FC<{
                       {pr.state === 'open' ? (
                         isEditingPr ? (
                           <>
-                            <Tooltip delayDuration={300}>
+                            <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
                                   variant="outline"
@@ -1482,12 +1556,12 @@ export const PullRequestSection: React.FC<{
                                   disabled={isUpdating}
                                   aria-label={t('gitView.pr.actions.cancelEditingAria')}
                                 >
-                                  <RiCloseLine className="size-4" />
+                                  <Icon name="close" className="size-4" />
                                 </Button>
                               </TooltipTrigger>
                               <TooltipContent><p>{t('gitView.pr.actions.cancelEditing')}</p></TooltipContent>
                             </Tooltip>
-                            <Tooltip delayDuration={300}>
+                            <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
                                   size="sm"
@@ -1496,14 +1570,14 @@ export const PullRequestSection: React.FC<{
                                   disabled={isUpdating || !editTitle.trim()}
                                   aria-label={t('gitView.pr.actions.savePrAria')}
                                 >
-                                  {isUpdating ? <RiLoader4Line className="size-4 animate-spin" /> : <RiCheckLine className="size-4" />}
+                                  {isUpdating ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="check" className="size-4" />}
                                 </Button>
                               </TooltipTrigger>
                               <TooltipContent><p>{t('gitView.pr.actions.savePr')}</p></TooltipContent>
                             </Tooltip>
                           </>
                         ) : (
-                          <Tooltip delayDuration={300}>
+                          <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
                                 variant="outline"
@@ -1512,7 +1586,7 @@ export const PullRequestSection: React.FC<{
                                 onClick={() => setIsEditingPr(true)}
                                 aria-label={t('gitView.pr.actions.editPrAria')}
                               >
-                                <RiEditLine className="size-4" />
+                                <Icon name="edit" className="size-4" />
                               </Button>
                             </TooltipTrigger>
                             <TooltipContent><p>{t('gitView.pr.actions.editPr')}</p></TooltipContent>
@@ -1521,7 +1595,7 @@ export const PullRequestSection: React.FC<{
                       ) : null}
 
                       {checks ? (
-                        <Tooltip delayDuration={300}>
+                        <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
                               variant="outline"
@@ -1531,7 +1605,7 @@ export const PullRequestSection: React.FC<{
                               disabled={isLoadingCheckDetails}
                               aria-label={t('gitView.pr.actions.openChecksAria')}
                             >
-                              {isLoadingCheckDetails ? <RiLoader4Line className="size-4 animate-spin" /> : <RiInformationLine className="size-4" />}
+                              {isLoadingCheckDetails ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="information" className="size-4" />}
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent><p>{t('gitView.pr.actions.openChecks')}</p></TooltipContent>
@@ -1539,7 +1613,7 @@ export const PullRequestSection: React.FC<{
                       ) : null}
 
                       {checks?.failure ? (
-                        <Tooltip delayDuration={300}>
+                        <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
                               variant="outline"
@@ -1548,14 +1622,14 @@ export const PullRequestSection: React.FC<{
                               onClick={sendFailedChecksToChat}
                               aria-label={t('gitView.pr.actions.resolveFailedChecksAria')}
                             >
-                              <RiErrorWarningLine className="size-4" />
+                              <Icon name="error-warning" className="size-4" />
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent><p>{t('gitView.pr.actions.resolveFailedChecks')}</p></TooltipContent>
                         </Tooltip>
                       ) : null}
 
-                      <Tooltip delayDuration={300}>
+                      <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
                             variant="outline"
@@ -1564,13 +1638,13 @@ export const PullRequestSection: React.FC<{
                             onClick={openCommentsDialog}
                             aria-label={t('gitView.pr.actions.openCommentsAria')}
                           >
-                            <RiChat4Line className="size-4" />
+                            <Icon name="chat-4" className="size-4" />
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent><p>{t('gitView.pr.actions.openComments')}</p></TooltipContent>
                       </Tooltip>
 
-                      <Tooltip delayDuration={300}>
+                      <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
                             variant="outline"
@@ -1579,14 +1653,14 @@ export const PullRequestSection: React.FC<{
                             onClick={sendCommentsToChat}
                             aria-label={t('gitView.pr.actions.shareCommentsAria')}
                           >
-                            <RiAiGenerate2 className="size-4" />
+                            <Icon name="ai-generate-2" className="size-4" />
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent><p>{t('gitView.pr.actions.shareComments')}</p></TooltipContent>
                       </Tooltip>
 
                       {canMerge && pr.draft && pr.state === 'open' ? (
-                        <Tooltip delayDuration={300}>
+                        <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
                               variant="outline"
@@ -1596,7 +1670,7 @@ export const PullRequestSection: React.FC<{
                               disabled={isMarkingReady || isMerging || isUpdating || isEditingPr}
                               aria-label={t('gitView.pr.actions.markReadyAria')}
                             >
-                              {isMarkingReady ? <RiLoader4Line className="size-4 animate-spin" /> : <RiCheckboxCircleLine className="size-4" />}
+                              {isMarkingReady ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="checkbox-circle" className="size-4" />}
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent><p>{t('gitView.pr.actions.markReady')}</p></TooltipContent>
@@ -1621,7 +1695,7 @@ export const PullRequestSection: React.FC<{
                               <SelectItem value="rebase">{t('gitView.pr.mergeMethod.rebase')}</SelectItem>
                             </SelectContent>
                           </Select>
-                          <Tooltip delayDuration={300}>
+                          <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
                                 size="sm"
@@ -1630,7 +1704,7 @@ export const PullRequestSection: React.FC<{
                                 disabled={isMerging || isMarkingReady || pr.state !== 'open' || pr.draft || isUpdating || isEditingPr}
                                 aria-label={t('gitView.pr.actions.mergePrAria')}
                               >
-                                {isMerging ? <RiLoader4Line className="size-4 animate-spin" /> : <RiGitMergeLine className="size-4" />}
+                                {isMerging ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="git-merge" className="size-4" />}
                               </Button>
                             </TooltipTrigger>
                             <TooltipContent><p>{t('gitView.pr.actions.mergePr')}</p></TooltipContent>
@@ -1647,13 +1721,13 @@ export const PullRequestSection: React.FC<{
                   <div className="min-w-0">
                     <div className="typography-ui-label text-foreground">{t('gitView.pr.createTitle')}</div>
                     <div className="typography-micro text-muted-foreground truncate">
-                      {branch} → {targetBaseBranch}
+                      {branch} <span className="opacity-60">(local)</span> → {targetBaseBranch} <span className="opacity-60">({useDetectedUpstream && detectedUpstream ? 'upstream' : 'remote'})</span>
                     </div>
                   </div>
                   {repoUrl ? (
                     <Button variant="outline" size="sm" asChild>
                       <a href={repoUrl} target="_blank" rel="noopener noreferrer">
-                        <RiExternalLinkLine className="size-4" />
+                        <Icon name="external-link" className="size-4" />
                         {t('gitView.pr.actions.repo')}
                       </a>
                     </Button>
@@ -1814,7 +1888,7 @@ export const PullRequestSection: React.FC<{
                     onClick={generateDescription}
                     disabled={isGenerating || isCreating}
                   >
-                    {isGenerating ? <RiLoader4Line className="size-4 animate-spin" /> : <RiAiGenerate2 className="size-4 text-primary" />}
+                    {isGenerating ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="ai-generate-2" className="size-4 text-primary" />}
                     {t('gitView.commit.generate')}
                   </Button>
                   <div className="flex-1" />
@@ -1822,10 +1896,10 @@ export const PullRequestSection: React.FC<{
                     size="sm"
                     className="min-w-[7.5rem] justify-center gap-2"
                     onClick={createPr}
-                    disabled={isCreating || !isConnected || !targetBaseBranch.trim() || targetBaseBranch.trim() === branch}
+                    disabled={isCreating || !isConnected || !targetBaseBranch.trim() || (!useDetectedUpstream && targetBaseBranch.trim() === branch)}
                   >
                     <span className="inline-flex size-4 items-center justify-center">
-                      {isCreating ? <RiLoader4Line className="size-4 animate-spin" /> : <RiGitPullRequestLine className="size-4" />}
+                      {isCreating ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="git-pull-request" className="size-4" />}
                     </span>
                     <span>{t('gitView.pr.actions.createPr')}</span>
                   </Button>
@@ -1838,7 +1912,7 @@ export const PullRequestSection: React.FC<{
         <DialogContent className="max-w-2xl max-h-[70vh] flex flex-col min-h-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <RiGitPullRequestLine className="h-5 w-5" />
+              <Icon name="git-pull-request" className="h-5 w-5" />
               {t('gitView.pr.checkDetails.title')}
             </DialogTitle>
             <DialogDescription>
@@ -1849,7 +1923,7 @@ export const PullRequestSection: React.FC<{
           <div className="flex-1 min-h-0 overflow-y-auto mt-2">
             {isLoadingCheckDetails ? (
               <div className="text-center text-muted-foreground py-8 flex items-center justify-center gap-2">
-                <RiLoader4Line className="h-4 w-4 animate-spin" />
+                <Icon name="loader-4" className="h-4 w-4 animate-spin" />
                 {t('gitView.loading.loading')}
               </div>
             ) : null}
@@ -1879,7 +1953,7 @@ export const PullRequestSection: React.FC<{
         <DialogContent className="max-w-2xl max-h-[82vh] min-h-[38rem] flex flex-col gap-2">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <RiGitPullRequestLine className="h-5 w-5" />
+              <Icon name="git-pull-request" className="h-5 w-5" />
               {t('gitView.pr.comments.title')}
               {pr ? (
                 <span className="typography-meta text-muted-foreground">{t('gitView.pr.numberLabel', { number: pr.number })}</span>
@@ -1890,7 +1964,7 @@ export const PullRequestSection: React.FC<{
           <ScrollShadow className="mt-2 max-h-[66vh] overflow-y-auto overlay-scrollbar-target overlay-scrollbar-container">
             {isLoadingCommentsDetails ? (
               <div className="text-center text-muted-foreground py-8 flex items-center justify-center gap-2">
-                <RiLoader4Line className="h-4 w-4 animate-spin" />
+                <Icon name="loader-4" className="h-4 w-4 animate-spin" />
                 {t('gitView.loading.loading')}
               </div>
             ) : null}
@@ -1920,7 +1994,7 @@ export const PullRequestSection: React.FC<{
                                   {comment.authorLogin && comment.authorLogin !== comment.authorName ? ` · @${comment.authorLogin}` : ''}
                                 </span>
                                 {comment.createdAt ? <span className="whitespace-nowrap">{formatTimestamp(comment.createdAt)}</span> : null}
-                                <Tooltip delayDuration={300}>
+                                <Tooltip>
                                   <TooltipTrigger asChild>
                                     <Button
                                       variant="ghost"
@@ -1931,7 +2005,7 @@ export const PullRequestSection: React.FC<{
                                       }}
                                       aria-label={t('gitView.pr.actions.sendCommentToAgentAria')}
                                     >
-                                      <RiAiGenerate2 className="size-3.5" />
+                                      <Icon name="ai-generate-2" className="size-3.5" />
                                       {t('gitView.pr.actions.sendToAgent')}
                                     </Button>
                                   </TooltipTrigger>

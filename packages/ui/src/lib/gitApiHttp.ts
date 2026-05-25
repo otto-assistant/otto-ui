@@ -20,9 +20,12 @@ import type {
   GitCommitResult,
   GitPushResult,
   GitPullResult,
+  GitPullOptions,
+  GitStashEntry,
   GitLogOptions,
   GitLogResponse,
   GitCommitFilesResponse,
+  CommitFileDiffResponse,
   GitIdentityProfile,
   GitIdentitySummary,
   DiscoveredGitCredential,
@@ -197,7 +200,11 @@ export async function getGitFileDiff(directory: string, options: GetGitFileDiffO
   return response.json();
 }
 
-export async function revertGitFile(directory: string, filePath: string): Promise<void> {
+export async function revertGitFile(
+  directory: string,
+  filePath: string,
+  options?: { scope?: 'all' | 'working' }
+): Promise<void> {
   if (!filePath) {
     throw new Error('path is required to revert git changes');
   }
@@ -205,7 +212,7 @@ export async function revertGitFile(directory: string, filePath: string): Promis
   const response = await fetch(buildUrl(`${API_BASE}/revert`, directory), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: filePath }),
+    body: JSON.stringify({ path: filePath, scope: options?.scope }),
   });
 
   if (!response.ok) {
@@ -213,6 +220,52 @@ export async function revertGitFile(directory: string, filePath: string): Promis
       .json()
       .catch(() => ({ error: response.statusText }));
     throw new Error(message.error || 'Failed to revert git changes');
+  }
+}
+
+export async function stageGitFile(directory: string, filePath: string): Promise<void> {
+  await stageGitFiles(directory, [filePath]);
+}
+
+export async function stageGitFiles(directory: string, filePaths: string[]): Promise<void> {
+  const paths = filePaths.map((path) => path.trim()).filter(Boolean);
+
+  if (paths.length === 0) {
+    throw new Error('path is required to stage git changes');
+  }
+
+  const response = await fetch(buildUrl(`${API_BASE}/stage`, directory), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  });
+
+  if (!response.ok) {
+    const message = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(message.error || 'Failed to stage git changes');
+  }
+}
+
+export async function unstageGitFile(directory: string, filePath: string): Promise<void> {
+  await unstageGitFiles(directory, [filePath]);
+}
+
+export async function unstageGitFiles(directory: string, filePaths: string[]): Promise<void> {
+  const paths = filePaths.map((path) => path.trim()).filter(Boolean);
+
+  if (paths.length === 0) {
+    throw new Error('path is required to unstage git changes');
+  }
+
+  const response = await fetch(buildUrl(`${API_BASE}/unstage`, directory), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  });
+
+  if (!response.ok) {
+    const message = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(message.error || 'Failed to unstage git changes');
   }
 }
 
@@ -491,6 +544,7 @@ export async function createGitCommit(
       message,
       addAll: options.addAll ?? false,
       files: options.files,
+      stageFiles: options.stageFiles,
     }),
   });
   if (!response.ok) {
@@ -518,7 +572,7 @@ export async function gitPush(
 
 export async function gitPull(
   directory: string,
-  options: { remote?: string; branch?: string } = {}
+  options: GitPullOptions = {}
 ): Promise<GitPullResult> {
   const response = await fetch(buildUrl(`${API_BASE}/pull`, directory), {
     method: 'POST',
@@ -547,6 +601,58 @@ export async function gitFetch(
   }
   return response.json();
 }
+
+export async function listGitStashes(directory: string): Promise<{ stashes: GitStashEntry[] }> {
+  const response = await fetch(buildUrl(`${API_BASE}/stashes`, directory));
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || 'Failed to list stashes');
+  }
+  return response.json();
+}
+
+export async function countGitStashFiles(directory: string, refs: string[]): Promise<{ counts: Record<string, number> }> {
+  const response = await fetch(buildUrl(`${API_BASE}/stashes/file-counts`, directory), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refs }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || 'Failed to count stash files');
+  }
+  return response.json();
+}
+
+export async function stashGitChanges(directory: string, options: { message?: string } = {}): Promise<{ success: boolean; created: boolean; message: string; output: string }> {
+  const response = await fetch(buildUrl(`${API_BASE}/stash`, directory), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || 'Failed to stash changes');
+  }
+  return response.json();
+}
+
+const postStashRef = async (directory: string, path: string, options: { ref: string }): Promise<{ success: boolean; ref: string }> => {
+  const response = await fetch(buildUrl(`${API_BASE}/${path}`, directory), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || `Failed to ${path}`);
+  }
+  return response.json();
+};
+
+export const applyGitStash = (directory: string, options: { ref: string }) => postStashRef(directory, 'stash/apply', options);
+export const popGitStash = (directory: string, options: { ref: string }) => postStashRef(directory, 'stash/pop', options);
+export const dropGitStash = (directory: string, options: { ref: string }) => postStashRef(directory, 'stash/drop', options);
 
 export async function checkoutBranch(directory: string, branch: string): Promise<{ success: boolean; branch: string }> {
   const response = await fetch(buildUrl(`${API_BASE}/checkout`, directory), {
@@ -608,7 +714,8 @@ export async function getGitLog(
     })
   );
   if (!response.ok) {
-    throw new Error(`Failed to get git log: ${response.statusText}`);
+    const errorBody = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(`Failed to get git log: ${errorBody.error || response.statusText}`);
   }
   return response.json();
 }
@@ -622,6 +729,25 @@ export async function getCommitFiles(
   );
   if (!response.ok) {
     throw new Error(`Failed to get commit files: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function getCommitFileDiff(
+  directory: string,
+  hash: string,
+  filePath: string,
+  isBinary: boolean
+): Promise<CommitFileDiffResponse> {
+  const response = await fetch(
+    buildUrl(`${API_BASE}/commit-file-diff`, directory, {
+      hash,
+      path: filePath,
+      binary: isBinary ? 'true' : undefined,
+    })
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to get commit file diff: ${response.statusText}`);
   }
   return response.json();
 }
@@ -841,27 +967,13 @@ export async function stash(
   directory: string,
   options?: { message?: string; includeUntracked?: boolean }
 ): Promise<{ success: boolean }> {
-  const response = await fetch(buildUrl(`${API_BASE}/stash`, directory), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(options || {}),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(error.error || 'Failed to stash');
-  }
-  return response.json();
+  await stashGitChanges(directory, { message: options?.message });
+  return { success: true };
 }
 
 export async function stashPop(directory: string): Promise<{ success: boolean }> {
-  const response = await fetch(buildUrl(`${API_BASE}/stash/pop`, directory), {
-    method: 'POST',
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(error.error || 'Failed to pop stash');
-  }
-  return response.json();
+  await popGitStash(directory, { ref: 'stash@{0}' });
+  return { success: true };
 }
 
 export async function getConflictDetails(directory: string): Promise<MergeConflictDetails> {

@@ -6,12 +6,13 @@ import { getSafeStorage } from './utils/safeStorage';
 import { SEMANTIC_TYPOGRAPHY, getTypographyVariable, type SemanticTypographyKey } from '@/lib/typography';
 import type { ShortcutCombo } from '@/lib/shortcuts';
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
+import { getStoredMobileKeyboardMode, type MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 
 export type { AppActiveView };
 
-export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files';
+export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files' | 'context';
 export type RightSidebarTab = 'git' | 'files' | 'context';
-export type ContextPanelMode = 'diff' | 'file' | 'context' | 'plan' | 'chat';
+export type ContextPanelMode = 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'preview' | 'browser';
 export type MermaidRenderingMode = 'svg' | 'ascii';
 export type UserMessageRenderingMode = 'markdown' | 'plain';
 export type ChatRenderMode = 'sorted' | 'live';
@@ -26,6 +27,8 @@ type ContextPanelTab = {
   targetPath: string | null;
   dedupeKey: string;
   label: string | null;
+  readOnly: boolean;
+  stagedDiff: boolean;
   touchedAt: number;
 };
 
@@ -34,6 +37,8 @@ type ContextPanelTabDescriptor = {
   targetPath?: string | null;
   dedupeKey?: string | null;
   label?: string | null;
+  readOnly?: boolean;
+  stagedDiff?: boolean;
 };
 
 type ContextPanelDirectoryState = {
@@ -96,13 +101,13 @@ const isLegacyDefaultTemplates = (value: unknown): boolean => {
   );
 };
 
-const CONTEXT_PANEL_DEFAULT_WIDTH = 600;
-const CONTEXT_PANEL_MIN_WIDTH = 360;
+const CONTEXT_PANEL_DEFAULT_WIDTH = 380;
+const CONTEXT_PANEL_MIN_WIDTH = 380;
 const CONTEXT_PANEL_MAX_WIDTH = 1400;
 const CONTEXT_PANEL_MAX_TABS = 12;
 const CONTEXT_PANEL_MAX_LABEL_LENGTH = 120;
-const LEFT_SIDEBAR_MIN_WIDTH = 300;
-const RIGHT_SIDEBAR_MIN_WIDTH = 400;
+const LEFT_SIDEBAR_MIN_WIDTH = 280;
+const RIGHT_SIDEBAR_MIN_WIDTH = 360;
 
 const normalizeDirectoryPath = (value: string): string => {
   if (!value) return '';
@@ -164,6 +169,10 @@ const buildDefaultContextPanelTabDedupeKey = (mode: ContextPanelMode, targetPath
     return targetPath || mode;
   }
 
+  if (mode === 'preview') {
+    return targetPath || mode;
+  }
+
   return mode;
 };
 
@@ -199,6 +208,8 @@ const createContextPanelTab = (descriptor: ContextPanelTabDescriptor): ContextPa
     targetPath: normalizedTargetPath,
     dedupeKey,
     label: normalizeContextTabLabel(descriptor.label),
+    readOnly: descriptor.readOnly === true,
+    stagedDiff: descriptor.stagedDiff === true,
     touchedAt: Date.now(),
   };
 };
@@ -237,10 +248,12 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
       targetPath?: unknown;
       dedupeKey?: unknown;
       label?: unknown;
+      readOnly?: unknown;
+      stagedDiff?: unknown;
       touchedAt?: unknown;
     };
 
-    if (candidate.mode !== 'diff' && candidate.mode !== 'file' && candidate.mode !== 'context' && candidate.mode !== 'plan' && candidate.mode !== 'chat') {
+    if (candidate.mode !== 'diff' && candidate.mode !== 'file' && candidate.mode !== 'context' && candidate.mode !== 'plan' && candidate.mode !== 'chat' && candidate.mode !== 'preview' && candidate.mode !== 'browser') {
       continue;
     }
 
@@ -262,6 +275,8 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
       targetPath,
       dedupeKey,
       label: normalizeContextTabLabel(typeof candidate.label === 'string' ? candidate.label : null),
+      readOnly: candidate.readOnly === true,
+      stagedDiff: candidate.stagedDiff === true,
       touchedAt: typeof candidate.touchedAt === 'number' && Number.isFinite(candidate.touchedAt)
         ? candidate.touchedAt
         : Date.now(),
@@ -320,6 +335,7 @@ const upsertContextPanelTab = (
           targetPath: nextTab.targetPath,
           dedupeKey: nextTab.dedupeKey,
           label: nextTab.label,
+          stagedDiff: nextTab.stagedDiff,
           touchedAt: Date.now(),
         }
       : tab));
@@ -383,6 +399,17 @@ const reorderContextPanelTabs = (
     touchedAt: Date.now(),
   };
 };
+
+const setContextPanelTabTargetPath = (
+  current: ContextPanelDirectoryState,
+  tabID: string,
+  targetPath: string,
+): ContextPanelDirectoryState => ({
+  ...current,
+  tabs: current.tabs.map((tab) =>
+    tab.id === tabID ? { ...tab, targetPath } : tab,
+  ),
+});
 
 const sanitizeContextPanelByDirectory = (
   value: unknown,
@@ -478,15 +505,18 @@ interface UIStore {
   isBottomTerminalExpanded: boolean;
   bottomTerminalHeight: number;
   hasManuallyResizedBottomTerminal: boolean;
+  notesPanelHeight: number;
+  todoPanelHeight: number;
   isSessionSwitcherOpen: boolean;
+  isSessionDropdownOpen: boolean;
   activeMainTab: MainTab;
   mainTabGuard: MainTabGuard | null;
   sidebarOpenBeforeFullscreenTab: boolean | null;
   pendingDiffFile: string | null;
+  pendingDiffStaged: boolean;
   pendingFileNavigation: PendingFileNavigation | null;
   pendingFileFocusPath: string | null;
   isMobile: boolean;
-  isQuickOpenOpen: boolean;
   isCommandPaletteOpen: boolean;
   isHelpDialogOpen: boolean;
   isAboutDialogOpen: boolean;
@@ -507,6 +537,8 @@ interface UIStore {
   eventStreamStatus: EventStreamStatus;
   eventStreamHint: string | null;
   showReasoningTraces: boolean;
+  collapsibleThinkingBlocks: boolean;
+  groupReasoningBlocks: boolean;
   chatRenderMode: ChatRenderMode;
   activityRenderMode: ActivityRenderMode;
   showDeletionDialog: boolean;
@@ -522,6 +554,7 @@ interface UIStore {
   padding: number;
   cornerRadius: number;
   inputBarOffset: number;
+  mobileKeyboardMode: MobileKeyboardMode;
 
   favoriteModels: Array<{ providerID: string; modelID: string }>;
   hiddenModels: Array<{ providerID: string; modelID: string }>;
@@ -562,7 +595,9 @@ interface UIStore {
 
   showTerminalQuickKeysOnDesktop: boolean;
   persistChatDraft: boolean;
+  showOpenCodeUpdateNotifications: boolean;
   inputSpellcheckEnabled: boolean;
+  wideChatLayoutEnabled: boolean;
   showToolFileIcons: boolean;
   showExpandedBashTools: boolean;
   showExpandedEditTools: boolean;
@@ -587,11 +622,14 @@ interface UIStore {
   setRightSidebarWidth: (width: number) => void;
   setRightSidebarTab: (tab: RightSidebarTab) => void;
   openContextPanelTab: (directory: string, tab: ContextPanelTabDescriptor) => void;
-  openContextDiff: (directory: string, filePath: string) => void;
+  openContextDiff: (directory: string, filePath: string, staged?: boolean) => void;
   openContextFile: (directory: string, filePath: string) => void;
   openContextFileAtLine: (directory: string, filePath: string, line: number, column?: number) => void;
   openContextOverview: (directory: string) => void;
   openContextPlan: (directory: string) => void;
+  openContextPreview: (directory: string, url: string) => void;
+  openContextBrowser: (directory: string, url?: string) => void;
+  setContextPanelTabTargetPath: (directory: string, tabID: string, targetPath: string) => void;
   setActiveContextPanelTab: (directory: string, tabID: string) => void;
   reorderContextPanelTabs: (directory: string, activeTabID: string, overTabID: string) => void;
   closeContextPanelTab: (directory: string, tabID: string) => void;
@@ -602,17 +640,18 @@ interface UIStore {
   setBottomTerminalOpen: (open: boolean) => void;
   setBottomTerminalExpanded: (expanded: boolean) => void;
   setBottomTerminalHeight: (height: number) => void;
+  setNotesPanelHeight: (height: number) => void;
+  setTodoPanelHeight: (height: number) => void;
   setSessionSwitcherOpen: (open: boolean) => void;
+  setSessionDropdownOpen: (open: boolean) => void;
   setActiveMainTab: (tab: MainTab) => void;
   setMainTabGuard: (guard: MainTabGuard | null) => void;
-  setPendingDiffFile: (filePath: string | null) => void;
+  setPendingDiffFile: (filePath: string | null, staged?: boolean) => void;
   setPendingFileNavigation: (navigation: PendingFileNavigation | null) => void;
   setPendingFileFocusPath: (path: string | null) => void;
-  navigateToDiff: (filePath: string) => void;
+  navigateToDiff: (filePath: string, staged?: boolean) => void;
   consumePendingDiffFile: () => string | null;
   setIsMobile: (isMobile: boolean) => void;
-  setQuickOpenOpen: (open: boolean) => void;
-  toggleQuickOpen: () => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   toggleHelpDialog: () => void;
@@ -632,6 +671,7 @@ interface UIStore {
   setSettingsRemoteInstancesSelectedId: (instanceId: string | null) => void;
   setEventStreamStatus: (status: EventStreamStatus, hint?: string | null) => void;
   setShowReasoningTraces: (value: boolean) => void;
+  setCollapsibleThinkingBlocks: (value: boolean) => void;
   setChatRenderMode: (value: ChatRenderMode) => void;
   setActivityRenderMode: (value: ActivityRenderMode) => void;
   setShowDeletionDialog: (value: boolean) => void;
@@ -647,6 +687,7 @@ interface UIStore {
   setPadding: (size: number) => void;
   setCornerRadius: (radius: number) => void;
   setInputBarOffset: (offset: number) => void;
+  setMobileKeyboardMode: (mode: MobileKeyboardMode) => void;
   applyTypography: () => void;
   applyPadding: () => void;
   updateProportionalSidebarWidths: () => void;
@@ -688,7 +729,9 @@ interface UIStore {
   setSummaryLength: (value: number) => void;
   setMaxLastMessageLength: (value: number) => void;
   setPersistChatDraft: (value: boolean) => void;
+  setShowOpenCodeUpdateNotifications: (value: boolean) => void;
   setInputSpellcheckEnabled: (value: boolean) => void;
+  setWideChatLayoutEnabled: (value: boolean) => void;
   setShowToolFileIcons: (value: boolean) => void;
   setShowExpandedBashTools: (value: boolean) => void;
   setShowExpandedEditTools: (value: boolean) => void;
@@ -733,15 +776,18 @@ export const useUIStore = create<UIStore>()(
         isBottomTerminalExpanded: false,
         bottomTerminalHeight: 300,
         hasManuallyResizedBottomTerminal: false,
+        notesPanelHeight: 112,
+        todoPanelHeight: 259,
         isSessionSwitcherOpen: false,
+        isSessionDropdownOpen: false,
         activeMainTab: 'chat',
         mainTabGuard: null,
         sidebarOpenBeforeFullscreenTab: null,
         pendingDiffFile: null,
+        pendingDiffStaged: false,
         pendingFileNavigation: null,
         pendingFileFocusPath: null,
         isMobile: false,
-        isQuickOpenOpen: false,
         isCommandPaletteOpen: false,
         isHelpDialogOpen: false,
         isAboutDialogOpen: false,
@@ -760,6 +806,8 @@ export const useUIStore = create<UIStore>()(
         eventStreamStatus: 'idle',
         eventStreamHint: null,
         showReasoningTraces: true,
+        collapsibleThinkingBlocks: true,
+        groupReasoningBlocks: true,
         chatRenderMode: 'live',
         activityRenderMode: 'summary',
         showDeletionDialog: true,
@@ -775,6 +823,7 @@ export const useUIStore = create<UIStore>()(
         padding: 100,
         cornerRadius: 18,
         inputBarOffset: 0,
+        mobileKeyboardMode: getStoredMobileKeyboardMode(),
         favoriteModels: [],
         hiddenModels: [],
         collapsedModelProviders: [],
@@ -811,7 +860,9 @@ export const useUIStore = create<UIStore>()(
 
         showTerminalQuickKeysOnDesktop: false,
         persistChatDraft: true,
+        showOpenCodeUpdateNotifications: true,
         inputSpellcheckEnabled: false,
+        wideChatLayoutEnabled: false,
         showToolFileIcons: true,
         showExpandedBashTools: false,
         showExpandedEditTools: false,
@@ -938,15 +989,19 @@ export const useUIStore = create<UIStore>()(
           });
         },
 
-        openContextDiff: (directory, filePath) => {
+        openContextDiff: (directory, filePath, staged = false) => {
           const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
           const normalizedFilePath = (filePath || '').trim();
           if (!normalizedDirectory || !normalizedFilePath) {
             return;
           }
 
-          get().openContextPanelTab(normalizedDirectory, { mode: 'diff', targetPath: normalizedFilePath });
-          get().setPendingDiffFile(normalizedFilePath);
+          get().openContextPanelTab(normalizedDirectory, {
+            mode: 'diff',
+            targetPath: normalizedFilePath,
+            dedupeKey: staged ? 'staged' : null,
+            stagedDiff: staged,
+          });
         },
 
         openContextFile: (directory, filePath) => {
@@ -995,6 +1050,58 @@ export const useUIStore = create<UIStore>()(
           }
 
           get().openContextPanelTab(normalizedDirectory, { mode: 'plan' });
+        },
+
+        openContextPreview: (directory, url) => {
+          const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
+          const normalizedUrl = (url || '').trim();
+          if (!normalizedDirectory || !normalizedUrl) {
+            return;
+          }
+
+          let label: string | null = null;
+          try {
+            const parsed = new URL(normalizedUrl);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+              label = parsed.host || parsed.hostname || 'Preview';
+            }
+          } catch {
+            // ignore invalid URL
+          }
+
+          get().openContextPanelTab(normalizedDirectory, {
+            mode: 'preview',
+            targetPath: normalizedUrl,
+            dedupeKey: normalizedUrl,
+            label,
+          });
+        },
+        openContextBrowser: (directory, url = '') => {
+          const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
+          if (!normalizedDirectory) return;
+          const targetUrl = typeof url === 'string' && url.trim().length > 0 ? url.trim() : '';
+          get().openContextPanelTab(normalizedDirectory, {
+            mode: 'browser',
+            targetPath: targetUrl,
+            dedupeKey: 'desktop-browser',
+            label: 'Browser',
+          });
+        },
+
+        setContextPanelTabTargetPath: (directory, tabID, targetPath) => {
+          const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
+          const normalizedTabID = (tabID || '').trim();
+          if (!normalizedDirectory || !normalizedTabID) return;
+          set((state) => {
+            const current = state.contextPanelByDirectory[normalizedDirectory];
+            if (!current) return state;
+            return {
+              contextPanelByDirectory: {
+                ...state.contextPanelByDirectory,
+                [normalizedDirectory]: setContextPanelTabTargetPath(current, normalizedTabID, targetPath),
+              },
+            };
+          });
         },
 
         setActiveContextPanelTab: (directory, tabID) => {
@@ -1208,8 +1315,26 @@ export const useUIStore = create<UIStore>()(
           set({ bottomTerminalHeight: height, hasManuallyResizedBottomTerminal: true });
         },
 
+        setNotesPanelHeight: (height) => {
+          set({ notesPanelHeight: height });
+        },
+
+        setTodoPanelHeight: (height) => {
+          set({ todoPanelHeight: height });
+        },
+
         setSessionSwitcherOpen: (open) => {
+          if (get().isSessionSwitcherOpen === open) {
+            return;
+          }
           set({ isSessionSwitcherOpen: open });
+        },
+
+        setSessionDropdownOpen: (open) => {
+          if (get().isSessionDropdownOpen === open) {
+            return;
+          }
+          set({ isSessionDropdownOpen: open });
         },
 
         setMainTabGuard: (guard) => {
@@ -1227,8 +1352,8 @@ export const useUIStore = create<UIStore>()(
           set({ activeMainTab: tab });
         },
 
-        setPendingDiffFile: (filePath) => {
-          set({ pendingDiffFile: filePath });
+        setPendingDiffFile: (filePath, staged = false) => {
+          set({ pendingDiffFile: filePath, pendingDiffStaged: filePath ? staged : false });
         },
 
         setPendingFileNavigation: (navigation) => {
@@ -1239,32 +1364,24 @@ export const useUIStore = create<UIStore>()(
           set({ pendingFileFocusPath: path });
         },
 
-        navigateToDiff: (filePath) => {
+        navigateToDiff: (filePath, staged = false) => {
           const guard = get().mainTabGuard;
           if (guard && !guard('diff')) {
             return;
           }
-          set({ pendingDiffFile: filePath, activeMainTab: 'diff' });
+          set({ pendingDiffFile: filePath, pendingDiffStaged: staged, activeMainTab: 'diff' });
         },
 
         consumePendingDiffFile: () => {
           const { pendingDiffFile } = get();
           if (pendingDiffFile) {
-            set({ pendingDiffFile: null });
+            set({ pendingDiffFile: null, pendingDiffStaged: false });
           }
           return pendingDiffFile;
         },
 
         setIsMobile: (isMobile) => {
           set({ isMobile });
-        },
-
-        setQuickOpenOpen: (open) => {
-          set({ isQuickOpenOpen: open });
-        },
-
-        toggleQuickOpen: () => {
-          set((state) => ({ isQuickOpenOpen: !state.isQuickOpenOpen }));
         },
 
         toggleCommandPalette: () => {
@@ -1366,6 +1483,10 @@ export const useUIStore = create<UIStore>()(
 
         setShowReasoningTraces: (value) => {
           set({ showReasoningTraces: value });
+        },
+
+        setCollapsibleThinkingBlocks: (value) => {
+          set({ collapsibleThinkingBlocks: value });
         },
 
         setChatRenderMode: (value) => {
@@ -1518,6 +1639,10 @@ export const useUIStore = create<UIStore>()(
  
         setInputBarOffset: (offset) => {
           set({ inputBarOffset: offset });
+        },
+
+        setMobileKeyboardMode: (mode) => {
+          set((state) => state.mobileKeyboardMode === mode ? state : { mobileKeyboardMode: mode });
         },
 
         toggleFavoriteModel: (providerID, modelID) => {
@@ -1799,8 +1924,14 @@ export const useUIStore = create<UIStore>()(
         setPersistChatDraft: (value) => {
           set({ persistChatDraft: value });
         },
+        setShowOpenCodeUpdateNotifications: (value) => {
+          set({ showOpenCodeUpdateNotifications: value });
+        },
         setInputSpellcheckEnabled: (value) => {
           set({ inputSpellcheckEnabled: value });
+        },
+        setWideChatLayoutEnabled: (value) => {
+          set({ wideChatLayoutEnabled: value });
         },
         setShowToolFileIcons: (value) => {
           set({ showToolFileIcons: value });
@@ -1890,6 +2021,16 @@ export const useUIStore = create<UIStore>()(
             return persistedState;
           }
           const state = persistedState as Record<string, unknown>;
+
+          // v8 -> v9: initialize notes/todo panel height fields
+          if (version < 9) {
+            if (typeof state.notesPanelHeight !== 'number' || !Number.isFinite(state.notesPanelHeight)) {
+              state.notesPanelHeight = 112;
+            }
+            if (typeof state.todoPanelHeight !== 'number' || !Number.isFinite(state.todoPanelHeight)) {
+              state.todoPanelHeight = 259;
+            }
+          }
 
           // v0 -> v1: reset legacy notification templates
           if (version < 1) {
@@ -1981,6 +2122,8 @@ export const useUIStore = create<UIStore>()(
           isBottomTerminalOpen: state.isBottomTerminalOpen,
           isBottomTerminalExpanded: state.isBottomTerminalExpanded,
           bottomTerminalHeight: state.bottomTerminalHeight,
+          notesPanelHeight: state.notesPanelHeight,
+          todoPanelHeight: state.todoPanelHeight,
           isSessionSwitcherOpen: state.isSessionSwitcherOpen,
           activeMainTab: state.activeMainTab,
           activeView: state.activeView,
@@ -1992,6 +2135,7 @@ export const useUIStore = create<UIStore>()(
           isSessionCreateDialogOpen: state.isSessionCreateDialogOpen,
           // Note: isSettingsDialogOpen intentionally NOT persisted
           showReasoningTraces: state.showReasoningTraces,
+          collapsibleThinkingBlocks: state.collapsibleThinkingBlocks,
           chatRenderMode: state.chatRenderMode,
           activityRenderMode: state.activityRenderMode,
           showDeletionDialog: state.showDeletionDialog,
@@ -2029,7 +2173,9 @@ export const useUIStore = create<UIStore>()(
           summaryLength: state.summaryLength,
           maxLastMessageLength: state.maxLastMessageLength,
           persistChatDraft: state.persistChatDraft,
+          showOpenCodeUpdateNotifications: state.showOpenCodeUpdateNotifications,
           inputSpellcheckEnabled: state.inputSpellcheckEnabled,
+          wideChatLayoutEnabled: state.wideChatLayoutEnabled,
           showToolFileIcons: state.showToolFileIcons,
           showExpandedBashTools: state.showExpandedBashTools,
           showExpandedEditTools: state.showExpandedEditTools,

@@ -20,7 +20,6 @@ import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { generateSyntaxTheme } from '@/lib/theme/syntaxThemeGenerator';
 import { createFlexokiCodeMirrorTheme } from '@/lib/codemirror/flexokiTheme';
 import { languageByExtension } from '@/lib/codemirror/languageByExtension';
-import { RiCheckLine, RiClipboardLine, RiCodeAiLine, RiLoopRightAiLine } from '@remixicon/react';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessions } from '@/sync/sync-context';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
@@ -31,6 +30,7 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useGitStore } from '@/stores/useGitStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
+import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { EditorView } from '@codemirror/view';
 import { copyTextToClipboard } from '@/lib/clipboard';
@@ -38,6 +38,7 @@ import { generateBranchName } from '@/lib/git/branchNameGenerator';
 import { parseProjectPlanMarkdown } from '@/lib/openchamberConfig';
 import { createWorktreeSessionForNewBranch } from '@/lib/worktreeSessionCreator';
 import { TodoSendDialog, type TodoSendExecution } from '@/components/session/TodoSendDialog';
+import { Icon } from "@/components/icon/Icon";
 import { renderMagicPrompt } from '@/lib/magicPrompts';
 import { useI18n } from '@/lib/i18n';
 
@@ -337,7 +338,6 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
     };
   }, [cancel, editingDraftId, isMobile, lineSelection]);
 
-
   const editorExtensions = React.useMemo(() => {
     const extensions = [createFlexokiCodeMirrorTheme(currentTheme)];
     const language = languageByExtension(resolvedPath || 'plan.md');
@@ -365,7 +365,16 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
         return result?.content ?? '';
       }
 
-      const response = await fetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      const runtimeFiles = getRegisteredRuntimeAPIs()?.files;
+      if (runtimeFiles?.readFile) {
+        const result = await runtimeFiles.readFile(path, { optional: true });
+        return result?.content ?? '';
+      }
+
+      const response = await fetch(`/api/fs/read?path=${encodeURIComponent(path)}&optional=true`, {
+        // Avoid conditional requests (304 + empty body).
+        cache: 'no-store',
+      });
       if (!response.ok) {
         throw new Error(`Failed to read plan file (${response.status})`);
       }
@@ -618,7 +627,7 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
         {resolvedPath ? (
           <div className="flex items-center gap-1">
             <DropdownMenu>
-              <Tooltip delayDuration={500}>
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <DropdownMenuTrigger asChild>
                     <Button
@@ -628,7 +637,7 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
                       aria-label={t('planView.actions.improvePlanAria')}
                       disabled={!content.trim()}
                     >
-                      <RiLoopRightAiLine className="size-4" />
+                      <Icon name="loop-right-ai" className="size-4" />
                     </Button>
                   </DropdownMenuTrigger>
                 </TooltipTrigger>
@@ -647,7 +656,7 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
               </DropdownMenuContent>
             </DropdownMenu>
             <DropdownMenu>
-              <Tooltip delayDuration={500}>
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <DropdownMenuTrigger asChild>
                     <Button
@@ -657,7 +666,7 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
                       aria-label={t('planView.actions.implementPlanAria')}
                       disabled={!content.trim()}
                     >
-                      <RiCodeAiLine className="size-4" />
+                      <Icon name="code-ai" className="size-4" />
                     </Button>
                   </DropdownMenuTrigger>
                 </TooltipTrigger>
@@ -701,9 +710,9 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null }) => {
               aria-label={t('planView.actions.copyPlanContents')}
             >
               {copiedContent ? (
-                <RiCheckLine className="h-4 w-4 text-[color:var(--status-success)]" />
+                <Icon name="check" className="h-4 w-4 text-[color:var(--status-success)]" />
               ) : (
-                <RiClipboardLine className="h-4 w-4" />
+                <Icon name="clipboard" className="h-4 w-4" />
               )}
             </Button>
           </div>

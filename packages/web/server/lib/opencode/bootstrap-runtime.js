@@ -20,11 +20,11 @@ export const createBootstrapRuntime = (dependencies) => {
       serverStartedAt,
       gracefulShutdown,
       getHealthSnapshot,
+      verboseRequestLogs,
       uiPassword,
       tunnelAuthController,
       readSettingsFromDiskMigrated,
       normalizeTunnelSessionTtlMs,
-      resolveZenModel,
       sayTTSCapability,
       ensurePushInitialized,
       ensureGlobalWatcherStarted,
@@ -53,6 +53,7 @@ export const createBootstrapRuntime = (dependencies) => {
     } = options;
 
     registerServerStatusRoutes(app, {
+      express,
       process,
       openchamberVersion,
       runtimeName,
@@ -61,7 +62,7 @@ export const createBootstrapRuntime = (dependencies) => {
       getHealthSnapshot,
     });
 
-    registerCommonRequestMiddleware(app, { express });
+    registerCommonRequestMiddleware(app, { express, verboseRequestLogs });
 
     const ipcBearerProtection = createIpcBearerProtection({
       tunnelAuthController,
@@ -81,13 +82,14 @@ export const createBootstrapRuntime = (dependencies) => {
     }
 
     registerAuthAndAccessRoutes(app, {
+      express,
       tunnelAuthController,
       uiAuthController,
       readSettingsFromDiskMigrated,
       normalizeTunnelSessionTtlMs,
     });
 
-    registerTtsRoutes(app, { resolveZenModel, sayTTSCapability });
+    registerTtsRoutes(app, { sayTTSCapability });
 
     registerNotificationRoutes(app, {
       uiAuthController,

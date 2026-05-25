@@ -5,11 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
 import { QUOTA_PROVIDERS, resolveUsageTone } from '@/lib/quota';
 import { useQuotaStore } from '@/stores/useQuotaStore';
 import { updateDesktopSettings } from '@/lib/persistence';
-import { RiRefreshLine } from '@remixicon/react';
 import { useI18n } from '@/lib/i18n';
 
 interface UsageSidebarProps {
@@ -85,7 +85,7 @@ export const UsageSidebar: React.FC<UsageSidebarProps> = ({ onItemSelect }) => {
         <div className="flex items-center justify-between gap-2">
           <span className="typography-meta text-muted-foreground">{t('settings.usage.sidebar.total', { count: QUOTA_PROVIDERS.length })}</span>
           <div className="flex items-center gap-2">
-            <Tooltip delayDuration={700}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <span className="inline-flex">
                   <Checkbox
@@ -121,7 +121,7 @@ export const UsageSidebar: React.FC<UsageSidebarProps> = ({ onItemSelect }) => {
               title={t('settings.usage.sidebar.actions.refreshTitle')}
               disabled={isLoading}
             >
-              <RiRefreshLine className={cn('h-3.5 w-3.5', isLoading && 'animate-spin')} />
+              <Icon name="refresh" className={cn('h-3.5 w-3.5', isLoading && 'animate-spin')} />
             </Button>
           </div>
         </div>

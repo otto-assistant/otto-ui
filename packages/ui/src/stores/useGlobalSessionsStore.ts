@@ -22,7 +22,7 @@ type GlobalSessionsState = {
   archiveSessions: (ids: Iterable<string>, archivedAt?: number) => void;
 };
 
-const PAGE_SIZE = 200;
+const PAGE_SIZE = 500;
 
 let inflightLoad: Promise<LoadResult> | null = null;
 
@@ -58,7 +58,7 @@ const getSessionSignature = (session: Session): string => {
     session.time?.created ?? 0,
     session.time?.updated ?? 0,
     session.time?.archived ?? 0,
-    session.share ? 1 : 0,
+    session.share?.url ?? '',
     resolveGlobalSessionDirectory(session) ?? '',
   ].join(':');
 };

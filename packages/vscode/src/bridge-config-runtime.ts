@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   createAgent,
@@ -14,6 +16,7 @@ import {
   AGENT_SCOPE,
   COMMAND_SCOPE,
   discoverSkills,
+  mergeDiscoveredSkills,
   getSkillSources,
   createSkill,
   updateSkill,
@@ -55,6 +58,9 @@ type ConfigRuntimeDeps = {
   clientReloadDelayMs: number;
 };
 
+const AGENTS_MD_PATH = path.join(os.homedir(), '.config', 'opencode', 'AGENTS.md');
+const MAX_BEHAVIOR_PROMPT_SIZE = 1024 * 1024;
+
 const resolveWorkingDirectory = (ctx: BridgeContext | undefined, directory?: string): string | undefined => (
   (typeof directory === 'string' && directory.trim())
     ? directory.trim()
@@ -87,6 +93,15 @@ const parseSkillsCatalogSources = (settings: Record<string, unknown>): SkillsCat
     })
     .filter((value): value is SkillsCatalogSourceConfig => value !== null);
 };
+
+const resolveDiscoveredSkills = async (
+  deps: ConfigRuntimeDeps,
+  ctx: BridgeContext | undefined,
+  workingDirectory?: string,
+): Promise<DiscoveredSkill[]> => mergeDiscoveredSkills(
+  (await deps.fetchOpenCodeSkillsFromApi(ctx, workingDirectory)) || [],
+  discoverSkills(workingDirectory),
+);
 
 export async function handleConfigBridgeMessage(
   message: BridgeMessageInput,
@@ -142,6 +157,30 @@ export async function handleConfigBridgeMessage(
       const changes = (payload as Record<string, unknown>) || {};
       const updated = await deps.persistSettings(changes, ctx);
       return { id, type, success: true, data: updated };
+    }
+
+    case 'api:behavior/agents-md:get': {
+      try {
+        const content = await fs.promises.readFile(AGENTS_MD_PATH, 'utf8');
+        return { id, type, success: true, data: { content, exists: true } };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          return { id, type, success: true, data: { content: '', exists: false } };
+        }
+        throw error;
+      }
+    }
+
+    case 'api:behavior/agents-md:save': {
+      const request = (payload || {}) as { content?: unknown };
+      const content = typeof request.content === 'string' ? request.content : '';
+      if (content.length > MAX_BEHAVIOR_PROMPT_SIZE) {
+        return { id, type, success: false, error: `Content exceeds maximum size of ${MAX_BEHAVIOR_PROMPT_SIZE} bytes` };
+      }
+      await fs.promises.mkdir(path.dirname(AGENTS_MD_PATH), { recursive: true });
+      await fs.promises.writeFile(AGENTS_MD_PATH, content, 'utf8');
+      await ctx?.manager?.restart();
+      return { id, type, success: true, data: { success: true } };
     }
 
     case 'api:magic-prompts:get': {
@@ -429,7 +468,7 @@ export async function handleConfigBridgeMessage(
       const normalizedMethod = typeof method === 'string' && method.trim() ? method.trim().toUpperCase() : 'GET';
 
       if (!name && normalizedMethod === 'GET') {
-        const skills = (await deps.fetchOpenCodeSkillsFromApi(ctx, workingDirectory)) || discoverSkills(workingDirectory);
+        const skills = await resolveDiscoveredSkills(deps, ctx, workingDirectory);
         return { id, type, success: true, data: { skills } };
       }
 
@@ -439,7 +478,7 @@ export async function handleConfigBridgeMessage(
       }
 
       if (normalizedMethod === 'GET') {
-        const discoveredSkill = ((await deps.fetchOpenCodeSkillsFromApi(ctx, workingDirectory)) || [])
+        const discoveredSkill = (await resolveDiscoveredSkills(deps, ctx, workingDirectory))
           .find((skill) => skill.name === skillName);
         const sources = getSkillSources(skillName, workingDirectory, discoveredSkill || null);
         return {
@@ -510,7 +549,7 @@ export async function handleConfigBridgeMessage(
       const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       const settings = deps.readSettings(ctx);
       const additionalSources = parseSkillsCatalogSources(settings);
-      const installedSkills = (await deps.fetchOpenCodeSkillsFromApi(ctx, workingDirectory)) || undefined;
+      const installedSkills = await resolveDiscoveredSkills(deps, ctx, workingDirectory);
       const data = await getSkillsCatalog(workingDirectory, refresh, additionalSources, installedSkills);
       return { id, type, success: true, data };
     }
@@ -594,7 +633,7 @@ export async function handleConfigBridgeMessage(
         return { id, type, success: false, error: 'File path is required' };
       }
 
-      const discoveredSkill = ((await deps.fetchOpenCodeSkillsFromApi(ctx, workingDirectory)) || [])
+      const discoveredSkill = (await resolveDiscoveredSkills(deps, ctx, workingDirectory))
         .find((skill) => skill.name === skillName);
       const sources = getSkillSources(skillName, workingDirectory, discoveredSkill || null);
       if (!sources.md.dir) {

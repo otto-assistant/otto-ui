@@ -1,8 +1,8 @@
 import * as React from "react"
 import { Menu as BaseMenu } from "@base-ui/react/menu"
-import { RiArrowRightSLine, RiCheckLine } from '@remixicon/react';
 
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/icon/Icon";
 
 type AsChildProps = { asChild?: boolean };
 type AsChildRenderProps = {
@@ -95,6 +95,8 @@ type ContentProps = {
   align?: "start" | "center" | "end";
   side?: "top" | "right" | "bottom" | "left";
   alignOffset?: number;
+  portalToBody?: boolean;
+  positionerClassName?: string;
   style?: React.CSSProperties;
   className?: string;
   children?: React.ReactNode;
@@ -107,6 +109,8 @@ function DropdownMenuContent({
   align,
   side,
   alignOffset,
+  portalToBody = false,
+  positionerClassName,
   style,
   children,
   onCloseAutoFocus,
@@ -116,13 +120,13 @@ function DropdownMenuContent({
   void onCloseAutoFocus
 
   return (
-    <BaseMenu.Portal container={portalContext?.portalContainer || undefined}>
+    <BaseMenu.Portal container={portalToBody ? undefined : portalContext?.portalContainer || undefined}>
       <BaseMenu.Positioner
         sideOffset={sideOffset}
         align={align}
         side={side}
         alignOffset={alignOffset}
-        className="z-50"
+        className={cn("z-50", positionerClassName)}
       >
         <BaseMenu.Popup
           data-slot="dropdown-menu-content"
@@ -132,7 +136,7 @@ function DropdownMenuContent({
             ...style,
           }}
           className={cn(
-            "data-[open]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[open]:fade-in-0 data-[closed]:zoom-out-95 data-[open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 max-h-[var(--available-height)] min-w-[8rem] origin-[var(--transform-origin)] overflow-visible rounded-xl p-1 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
+            "transition-all duration-150 ease-out data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95 z-50 max-h-[var(--available-height)] min-w-[8rem] origin-[var(--transform-origin)] overflow-visible rounded-xl p-1 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
             className
           )}
           {...props}
@@ -203,7 +207,7 @@ function DropdownMenuCheckboxItem({
     >
       <span className="pointer-events-none absolute right-2 flex size-3.5 items-center justify-center">
         <BaseMenu.CheckboxItemIndicator>
-          <RiCheckLine className="size-3"/>
+          <Icon name="check" className="size-3" />
         </BaseMenu.CheckboxItemIndicator>
       </span>
       {children}
@@ -233,7 +237,7 @@ function DropdownMenuRadioItem({
     >
       <span className="pointer-events-none absolute right-2 flex size-3.5 items-center justify-center text-primary">
         <BaseMenu.RadioItemIndicator>
-          <RiCheckLine className="size-3" />
+          <Icon name="check" className="size-3" />
         </BaseMenu.RadioItemIndicator>
       </span>
       {children}
@@ -315,7 +319,7 @@ function DropdownMenuSubTrigger({
       {...props}
     >
       {children}
-      <RiArrowRightSLine className="ml-auto size-3.5" />
+      <Icon name="arrow-right-s" className="ml-auto size-3.5" />
     </BaseMenu.SubmenuTrigger>
   )
 }
@@ -336,7 +340,7 @@ function DropdownMenuSubContent({
             color: 'var(--surface-elevated-foreground)',
           }}
           className={cn(
-            "data-[open]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[open]:fade-in-0 data-[closed]:zoom-out-95 data-[open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-[var(--transform-origin)] overflow-visible rounded-xl p-1 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
+            "transition-all duration-150 ease-out data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95 z-50 min-w-[8rem] origin-[var(--transform-origin)] overflow-visible rounded-xl p-1 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
             className
           )}
           {...props}

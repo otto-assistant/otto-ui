@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, powerMonitor, session, shell, webContents } from 'electron';
 import contextMenu from 'electron-context-menu';
 import log from 'electron-log/main.js';
 import dgram from 'node:dgram';
@@ -104,12 +104,17 @@ const MIN_WINDOW_WIDTH = 800;
 const MIN_WINDOW_HEIGHT = 520;
 const MIN_RESTORE_WINDOW_WIDTH = 900;
 const MIN_RESTORE_WINDOW_HEIGHT = 560;
+const MINI_CHAT_WINDOW_WIDTH = 520;
+const MINI_CHAT_WINDOW_HEIGHT = 760;
+const MINI_CHAT_MIN_WINDOW_WIDTH = 360;
+const MINI_CHAT_MIN_WINDOW_HEIGHT = 480;
+const MAX_CAPTURE_PAGE_RECT_AREA = 4_000_000;
 const LOCAL_HOST_ID = 'local';
 const ENV_OVERRIDE_HOST_ID = '__env';
-const CHANGELOG_URL = 'https://raw.githubusercontent.com/btriapitsyn/openchamber/main/CHANGELOG.md';
-const UPDATE_METADATA_URL = 'https://github.com/btriapitsyn/openchamber/releases/latest/download/latest.json';
-const GITHUB_BUG_REPORT_URL = 'https://github.com/btriapitsyn/openchamber/issues/new?template=bug_report.yml';
-const GITHUB_FEATURE_REQUEST_URL = 'https://github.com/btriapitsyn/openchamber/issues/new?template=feature_request.yml';
+const CHANGELOG_URL = 'https://raw.githubusercontent.com/openchamber/openchamber/main/CHANGELOG.md';
+const UPDATE_METADATA_URL = 'https://github.com/openchamber/openchamber/releases/latest/download/latest.json';
+const GITHUB_BUG_REPORT_URL = 'https://github.com/openchamber/openchamber/issues/new?template=bug_report.yml';
+const GITHUB_FEATURE_REQUEST_URL = 'https://github.com/openchamber/openchamber/issues/new?template=feature_request.yml';
 const DISCORD_INVITE_URL = 'https://discord.gg/ZYRSdnwwKA';
 const INSTALLED_APPS_CACHE_TTL_SECS = 60 * 60 * 24;
 const INSTALLED_APPS_CACHE_FILE = 'discovered-apps.json';
@@ -127,17 +132,16 @@ const state = {
   quitConfirmed: false,
   quitConfirmationPending: false,
   installingUpdate: false,
-  quitRiskPollerStarted: false,
   pendingUpdate: null,
   unreachableHosts: new Set(),
   windowCounter: 1,
   focusedWindowIds: new Set(),
   windowGeometryRevisions: new Map(),
+  miniChatWindowsBySession: new Map(),
   sshStatuses: new Map(),
   sshLogs: new Map(),
 };
 
-const QUIT_RISK_POLL_INTERVAL_MS = 5_000;
 const quitRisk = {
   hasActiveTunnel: false,
   hasRunningScheduledTasks: false,
@@ -205,6 +209,8 @@ const performConfirmedQuit = () => {
 };
 
 const requestQuitWithConfirmation = async () => {
+  await refreshQuitRiskFlags();
+
   if (!shouldRequireQuitConfirmation()) {
     performConfirmedQuit();
     return;
@@ -246,6 +252,24 @@ const requestQuitWithConfirmation = async () => {
 };
 
 const refreshQuitRiskFlags = async () => {
+  if (state.serverHandle && typeof state.serverHandle.getQuitRiskStatus === 'function') {
+    try {
+      const status = await state.serverHandle.getQuitRiskStatus();
+      const scheduled = status?.scheduledTasks;
+      if (scheduled && typeof scheduled === 'object') {
+        const enabledCount = Number(scheduled.enabledScheduledTasksCount ?? 0);
+        const runningCount = Number(scheduled.runningScheduledTasksCount ?? 0);
+        quitRisk.enabledScheduledTasksCount = Number.isFinite(enabledCount) ? enabledCount : 0;
+        quitRisk.runningScheduledTasksCount = Number.isFinite(runningCount) ? runningCount : 0;
+        quitRisk.hasEnabledScheduledTasks = Boolean(scheduled.hasEnabledScheduledTasks) || quitRisk.enabledScheduledTasksCount > 0;
+        quitRisk.hasRunningScheduledTasks = Boolean(scheduled.hasRunningScheduledTasks) || quitRisk.runningScheduledTasksCount > 0;
+      }
+      quitRisk.hasActiveTunnel = Boolean(status?.tunnel?.active);
+      return;
+    } catch {
+    }
+  }
+
   const base = typeof state.sidecarUrl === 'string' ? state.sidecarUrl.trim().replace(/\/$/, '') : '';
   if (!base) return;
 
@@ -276,24 +300,6 @@ const refreshQuitRiskFlags = async () => {
   if (tunnel && typeof tunnel === 'object') {
     quitRisk.hasActiveTunnel = Boolean(tunnel.active);
   }
-};
-
-const startQuitRiskPoller = () => {
-  if (process.platform !== 'darwin') return;
-  if (state.quitRiskPollerStarted) return;
-  state.quitRiskPollerStarted = true;
-
-  const loop = async () => {
-    while (!state.quitConfirmed && !state.quitRequested) {
-      await refreshQuitRiskFlags();
-      if (state.quitConfirmed || state.quitRequested) break;
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, QUIT_RISK_POLL_INTERVAL_MS);
-        if (typeof timer?.unref === 'function') timer.unref();
-      });
-    }
-  };
-  void loop();
 };
 
 const settingsFilePath = () => {
@@ -767,6 +773,7 @@ const spawnLocalServer = async () => {
   process.env.OPENCHAMBER_DIST_DIR = resolveWebDistDir();
   process.env.OPENCHAMBER_RUNTIME = 'desktop';
   process.env.OPENCHAMBER_DESKTOP_NOTIFY = 'true';
+  process.env.OPENCHAMBER_SKIP_API_COMPRESSION = process.env.OPENCHAMBER_SKIP_API_COMPRESSION || 'true';
   process.env.NO_PROXY = process.env.NO_PROXY || 'localhost,127.0.0.1';
   process.env.no_proxy = process.env.no_proxy || 'localhost,127.0.0.1';
 
@@ -778,6 +785,7 @@ const spawnLocalServer = async () => {
     attachSignals: false,
     exitOnShutdown: false,
     onDesktopNotification: (payload) => maybeShowNativeNotification(payload),
+    getIsWindowFocused: isAnyWindowFocused,
   });
 
   const port = handle.getPort();
@@ -869,28 +877,86 @@ const buildStartupSplashHtml = () => {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root { color-scheme: light dark; }
+      :root {
+        --splash-background: ${splashBgLight};
+        --splash-stroke: ${splashFgLight};
+        --splash-face-fill: rgba(0, 0, 0, 0.15);
+        --splash-cell-fill: rgba(0, 0, 0, 0.4);
+        --splash-logo-fill: var(--splash-stroke);
+      }
       body {
         margin: 0;
         font-family: "IBM Plex Sans", sans-serif;
         display: grid;
         place-items: center;
         height: 100vh;
-        background: ${splashBgLight};
-        color: ${splashFgLight};
+        background: var(--splash-background);
+        color: var(--splash-stroke);
       }
       @media (prefers-color-scheme: dark) {
-        body { background: ${splashBgDark}; color: ${splashFgDark}; }
+        :root {
+          --splash-background: ${splashBgDark};
+          --splash-stroke: ${splashFgDark};
+          --splash-face-fill: rgba(255, 255, 255, 0.15);
+          --splash-cell-fill: rgba(255, 255, 255, 0.35);
+        }
       }
-      .mark {
-        font-size: 20px;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        opacity: 0.88;
+      @supports (color: color-mix(in srgb, white 50%, transparent)) {
+        :root {
+          --splash-face-fill: color-mix(in srgb, var(--splash-stroke) 15%, transparent);
+          --splash-cell-fill: color-mix(in srgb, var(--splash-stroke) 35%, transparent);
+        }
+      }
+      .stack {
+        display: grid;
+        justify-items: center;
       }
     </style>
   </head>
   <body>
-    <div class="mark">OpenChamber</div>
+    <div class="stack">
+      <svg width="120" height="120" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OpenChamber loading icon">
+        <path d="M50 50 L8.432 26 L8.432 74 L50 98 Z" fill="var(--splash-face-fill)" stroke="var(--splash-stroke)" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M50 50 L39.608 44 L39.608 56 L50 62 Z" fill="var(--splash-cell-fill)" opacity="0.2"/>
+        <path d="M39.608 44 L29.216 38 L29.216 50 L39.608 56 Z" fill="var(--splash-cell-fill)" opacity="0.45"/>
+        <path d="M29.216 38 L18.824 32 L18.824 44 L29.216 50 Z" fill="var(--splash-cell-fill)" opacity="0.15"/>
+        <path d="M18.824 32 L8.432 26 L8.432 38 L18.824 44 Z" fill="var(--splash-cell-fill)" opacity="0.55"/>
+        <path d="M50 62 L39.608 56 L39.608 68 L50 74 Z" fill="var(--splash-cell-fill)" opacity="0.35"/>
+        <path d="M39.608 56 L29.216 50 L29.216 62 L39.608 68 Z" fill="var(--splash-cell-fill)" opacity="0.1"/>
+        <path d="M29.216 50 L18.824 44 L18.824 56 L29.216 62 Z" fill="var(--splash-cell-fill)" opacity="0.5"/>
+        <path d="M18.824 44 L8.432 38 L8.432 50 L18.824 56 Z" fill="var(--splash-cell-fill)" opacity="0.25"/>
+        <path d="M50 74 L39.608 68 L39.608 80 L50 86 Z" fill="var(--splash-cell-fill)" opacity="0.4"/>
+        <path d="M39.608 68 L29.216 62 L29.216 74 L39.608 80 Z" fill="var(--splash-cell-fill)" opacity="0.3"/>
+        <path d="M29.216 62 L18.824 56 L18.824 68 L29.216 74 Z" fill="var(--splash-cell-fill)" opacity="0.45"/>
+        <path d="M18.824 56 L8.432 50 L8.432 62 L18.824 68 Z" fill="var(--splash-cell-fill)" opacity="0.15"/>
+        <path d="M50 86 L39.608 80 L39.608 92 L50 98 Z" fill="var(--splash-cell-fill)" opacity="0.55"/>
+        <path d="M39.608 80 L29.216 74 L29.216 86 L39.608 92 Z" fill="var(--splash-cell-fill)" opacity="0.2"/>
+        <path d="M29.216 74 L18.824 68 L18.824 80 L29.216 86 Z" fill="var(--splash-cell-fill)" opacity="0.35"/>
+        <path d="M18.824 68 L8.432 62 L8.432 74 L18.824 80 Z" fill="var(--splash-cell-fill)" opacity="0.1"/>
+        <path d="M50 50 L91.568 26 L91.568 74 L50 98 Z" fill="var(--splash-face-fill)" stroke="var(--splash-stroke)" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M50 50 L60.392 44 L60.392 56 L50 62 Z" fill="var(--splash-cell-fill)" opacity="0.3"/>
+        <path d="M60.392 44 L70.784 38 L70.784 50 L60.392 56 Z" fill="var(--splash-cell-fill)" opacity="0.15"/>
+        <path d="M70.784 38 L81.176 32 L81.176 44 L70.784 50 Z" fill="var(--splash-cell-fill)" opacity="0.45"/>
+        <path d="M81.176 32 L91.568 26 L91.568 38 L81.176 44 Z" fill="var(--splash-cell-fill)" opacity="0.25"/>
+        <path d="M50 62 L60.392 56 L60.392 68 L50 74 Z" fill="var(--splash-cell-fill)" opacity="0.5"/>
+        <path d="M60.392 56 L70.784 50 L70.784 62 L60.392 68 Z" fill="var(--splash-cell-fill)" opacity="0.35"/>
+        <path d="M70.784 50 L81.176 44 L81.176 56 L70.784 62 Z" fill="var(--splash-cell-fill)" opacity="0.1"/>
+        <path d="M81.176 44 L91.568 38 L91.568 50 L81.176 56 Z" fill="var(--splash-cell-fill)" opacity="0.4"/>
+        <path d="M50 74 L60.392 68 L60.392 80 L50 86 Z" fill="var(--splash-cell-fill)" opacity="0.2"/>
+        <path d="M60.392 68 L70.784 62 L70.784 74 L60.392 80 Z" fill="var(--splash-cell-fill)" opacity="0.55"/>
+        <path d="M70.784 62 L81.176 56 L81.176 68 L70.784 74 Z" fill="var(--splash-cell-fill)" opacity="0.3"/>
+        <path d="M81.176 56 L91.568 50 L91.568 62 L81.176 68 Z" fill="var(--splash-cell-fill)" opacity="0.15"/>
+        <path d="M50 86 L60.392 80 L60.392 92 L50 98 Z" fill="var(--splash-cell-fill)" opacity="0.45"/>
+        <path d="M60.392 80 L70.784 74 L70.784 86 L60.392 92 Z" fill="var(--splash-cell-fill)" opacity="0.25"/>
+        <path d="M70.784 74 L81.176 68 L81.176 80 L70.784 86 Z" fill="var(--splash-cell-fill)" opacity="0.4"/>
+        <path d="M81.176 68 L91.568 62 L91.568 74 L81.176 80 Z" fill="var(--splash-cell-fill)" opacity="0.2"/>
+        <path d="M50 2 L8.432 26 L50 50 L91.568 26 Z" fill="none" stroke="var(--splash-stroke)" stroke-width="2" stroke-linejoin="round"/>
+        <g transform="matrix(0.866, 0.5, -0.866, 0.5, 50, 26) scale(0.75)">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M-16 -20 L16 -20 L16 20 L-16 20 Z M-8 -12 L-8 12 L8 12 L8 -12 Z" fill="var(--splash-logo-fill)"/>
+          <path d="M-8 -4 L8 -4 L8 12 L-8 12 Z" fill="var(--splash-logo-fill)" fill-opacity="0.4"/>
+        </g>
+      </svg>
+    </div>
   </body>
   </html>`;
 };
@@ -1053,6 +1119,20 @@ const dispatchCheckForUpdates = () => {
   }
 };
 
+const reloadMenuTargetWindow = () => {
+  const target = getMenuTargetWindow();
+  if (!target || target.isDestroyed()) return;
+  target.webContents.reload();
+};
+
+const relaunchFromMenu = () => {
+  prepareForQuit();
+  setImmediate(() => {
+    app.relaunch();
+    app.exit(0);
+  });
+};
+
 const nextWindowLabel = () => {
   const value = state.windowCounter++;
   return value === 1 ? 'main' : `main-${value}`;
@@ -1101,6 +1181,7 @@ const createBrowserWindow = ({ label, restoreGeometry, url }) => {
       backgroundThrottling: true,
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       // sandbox must stay off: the preload uses contextBridge + ipcRenderer
       // from Electron's Node layer. contextIsolation + nodeIntegration:false
       // keep the renderer world walled off from Node. Do NOT flip to true —
@@ -1302,6 +1383,139 @@ const createAdditionalWindow = async (url) => {
   return browserWindow;
 };
 
+const buildMiniChatUrl = ({ mode, sessionId, directory, projectId }) => {
+  const base = state.localOrigin || state.sidecarUrl;
+  if (!base) {
+    throw new Error('Local UI is not available');
+  }
+
+  const url = new URL('/mini-chat.html', base);
+  url.searchParams.set('mode', mode === 'session' ? 'session' : 'draft');
+  if (sessionId) url.searchParams.set('sessionId', sessionId);
+  if (directory) url.searchParams.set('directory', directory);
+  if (projectId) url.searchParams.set('projectId', projectId);
+  return url.toString();
+};
+
+const createMiniChatWindow = async ({ mode, sessionId = '', directory = '', projectId = '' } = {}) => {
+  if (mode === 'session' && sessionId) {
+    const existing = state.miniChatWindowsBySession.get(sessionId);
+    if (existing && !existing.isDestroyed()) {
+      if (existing.isMinimized()) existing.restore();
+      existing.show();
+      existing.focus();
+      return existing;
+    }
+    state.miniChatWindowsBySession.delete(sessionId);
+  }
+
+  const desktopLocalOrigin = state.localOrigin || '';
+  const desktopHome = os.homedir() || '';
+  const desktopMacosMajor = String(macosMajorVersion());
+  const browserWindow = new BrowserWindow({
+    title: 'OpenChamber Mini Chat',
+    width: MINI_CHAT_WINDOW_WIDTH,
+    height: MINI_CHAT_WINDOW_HEIGHT,
+    minWidth: MINI_CHAT_MIN_WINDOW_WIDTH,
+    minHeight: MINI_CHAT_MIN_WINDOW_HEIGHT,
+    show: false,
+    backgroundColor: '#151313',
+    titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
+    trafficLightPosition: process.platform === 'darwin' ? { x: 16, y: 17 } : undefined,
+    webPreferences: {
+      additionalArguments: [
+        `--openchamber-local-origin=${desktopLocalOrigin}`,
+        `--openchamber-home=${desktopHome}`,
+        `--openchamber-macos-major=${desktopMacosMajor}`,
+      ],
+      preload: isDev ? path.join(__dirname, 'preload.mjs') : path.join(app.getAppPath(), 'preload.mjs'),
+      backgroundThrottling: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+      // sandbox must stay off
+      sandbox: false,
+    },
+  });
+  browserWindow.__ocLabel = nextWindowLabel();
+  browserWindow.__ocMiniChat = true;
+  browserWindow.__ocMiniChatSessionId = mode === 'session' ? sessionId : '';
+  browserWindow.__ocPinned = false;
+
+  if (mode === 'session' && sessionId) {
+    state.miniChatWindowsBySession.set(sessionId, browserWindow);
+  }
+
+  browserWindow.on('closed', () => {
+    if (browserWindow.__ocMiniChatSessionId) {
+      const existing = state.miniChatWindowsBySession.get(browserWindow.__ocMiniChatSessionId);
+      if (existing?.id === browserWindow.id) {
+        state.miniChatWindowsBySession.delete(browserWindow.__ocMiniChatSessionId);
+      }
+    }
+  });
+
+  if (process.platform === 'darwin') {
+    const refreshTrafficLights = () => {
+      if (browserWindow.isDestroyed()) return;
+      try {
+        browserWindow.setWindowButtonVisibility(true);
+        browserWindow.setTrafficLightPosition({ x: 16, y: 17 });
+      } catch {}
+    };
+    browserWindow.on('show', refreshTrafficLights);
+    browserWindow.on('focus', refreshTrafficLights);
+  }
+
+  browserWindow.once('ready-to-show', () => {
+    browserWindow.show();
+    browserWindow.focus();
+  });
+
+  browserWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
+  browserWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const target = new URL(url);
+      const local = new URL(state.localOrigin || state.sidecarUrl || '');
+      if (target.origin === local.origin) return;
+    } catch {
+    }
+    event.preventDefault();
+    void shell.openExternal(url).catch(() => {});
+  });
+  browserWindow.webContents.on('dom-ready', () => {
+    if (state.initScript) {
+      void browserWindow.webContents.executeJavaScript(state.initScript).catch(() => {});
+    }
+  });
+
+  await navigateWindow(browserWindow, buildMiniChatUrl({ mode, sessionId, directory, projectId }));
+  return browserWindow;
+};
+
+const setMiniChatPinned = (browserWindow, pinned) => {
+  if (!browserWindow || browserWindow.isDestroyed()) {
+    throw new Error('Window is not available');
+  }
+  if (browserWindow.__ocMiniChat !== true) {
+    throw new Error('Pinning is only available for Mini Chat windows');
+  }
+  const nextPinned = pinned === true;
+  browserWindow.__ocPinned = nextPinned;
+  if (nextPinned) {
+    browserWindow.setAlwaysOnTop(true, 'floating');
+  } else {
+    browserWindow.setAlwaysOnTop(false);
+    if (process.platform === 'darwin') {
+      browserWindow.setVisibleOnAllWorkspaces(false);
+    }
+  }
+  return { pinned: nextPinned };
+};
+
 const resolveInitialUrl = async () => {
   const localUrl = isDev && await waitForHealth('http://127.0.0.1:3901', 5_000, 100)
     ? 'http://127.0.0.1:3901'
@@ -1362,7 +1576,7 @@ const compareSemver = (left, right) => {
 };
 
 const parseGithubRepo = () => {
-  return { owner: 'btriapitsyn', repo: 'openchamber' };
+  return { owner: 'openchamber', repo: 'openchamber' };
 };
 
 const setupAutoUpdater = () => {
@@ -1647,6 +1861,53 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
 
     case 'desktop_get_app_version':
       return APP_VERSION;
+
+    case 'desktop_browser_capture_page': {
+      const wcId = Number.isFinite(args.webContentsId) ? Math.trunc(args.webContentsId) : null;
+      if (wcId === null || wcId < 0) throw new Error('webContentsId is required');
+      const wc = webContents.fromId(wcId);
+      if (!wc || wc.isDestroyed()) throw new Error('WebContents not found');
+      const image = await wc.capturePage();
+      const buffer = image.toJPEG(82);
+      return {
+        mime: 'image/jpeg',
+        base64: buffer.toString('base64'),
+        width: image.getSize().width,
+        height: image.getSize().height,
+      };
+    }
+
+    case 'desktop_capture_page_rect': {
+      if (!browserWindow || browserWindow.isDestroyed()) {
+        throw new Error('Window is not available');
+      }
+
+      const bounds = browserWindow.getContentBounds();
+      const x = Number.isFinite(args.x) ? Math.max(0, Math.floor(args.x)) : 0;
+      const y = Number.isFinite(args.y) ? Math.max(0, Math.floor(args.y)) : 0;
+      const width = Number.isFinite(args.width) ? Math.max(1, Math.floor(args.width)) : 1;
+      const height = Number.isFinite(args.height) ? Math.max(1, Math.floor(args.height)) : 1;
+      const clampedX = Math.min(x, Math.max(0, bounds.width - 1));
+      const clampedY = Math.min(y, Math.max(0, bounds.height - 1));
+      const rect = {
+        x: clampedX,
+        y: clampedY,
+        width: Math.min(width, Math.max(1, bounds.width - clampedX)),
+        height: Math.min(height, Math.max(1, bounds.height - clampedY)),
+      };
+      if (rect.width * rect.height > MAX_CAPTURE_PAGE_RECT_AREA) {
+        throw new Error('Capture area is too large');
+      }
+
+      const image = await browserWindow.webContents.capturePage(rect);
+      const buffer = image.toJPEG(82);
+      return {
+        mime: 'image/jpeg',
+        base64: buffer.toString('base64'),
+        width: image.getSize().width,
+        height: image.getSize().height,
+      };
+    }
 
     case 'desktop_save_markdown_file': {
       const defaultPath = typeof args.defaultFileName === 'string' ? args.defaultFileName.trim() : '';
@@ -2058,6 +2319,51 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       return null;
     }
 
+    case 'desktop_open_session_mini_chat_window': {
+      const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
+      if (!sessionId) throw new Error('Session id is required');
+      const directory = typeof args.directory === 'string' ? args.directory.trim() : '';
+      await createMiniChatWindow({ mode: 'session', sessionId, directory });
+      return null;
+    }
+
+    case 'desktop_open_draft_mini_chat_window': {
+      const directory = typeof args.directory === 'string' ? args.directory.trim() : '';
+      const projectId = typeof args.projectId === 'string' ? args.projectId.trim() : '';
+      await createMiniChatWindow({ mode: 'draft', directory, projectId });
+      return null;
+    }
+
+    case 'desktop_set_window_pinned':
+      return setMiniChatPinned(browserWindow, args.pinned === true);
+
+    case 'desktop_get_window_pinned':
+      return { pinned: Boolean(browserWindow?.__ocPinned) };
+
+    case 'desktop_focus_main_window':
+      if (state.mainWindow && !state.mainWindow.isDestroyed()) {
+        if (state.mainWindow.isMinimized()) state.mainWindow.restore();
+        state.mainWindow.show();
+        state.mainWindow.focus();
+        const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
+        const directory = typeof args.directory === 'string' ? args.directory.trim() : '';
+        const mode = typeof args.mode === 'string' ? args.mode.trim() : '';
+        if (sessionId) {
+          emitToWindow(state.mainWindow, 'openchamber:open-session', { sessionId, directory });
+        } else if (mode === 'draft') {
+          const projectId = typeof args.projectId === 'string' ? args.projectId.trim() : '';
+          emitToWindow(state.mainWindow, 'openchamber:open-draft-session', { directory, projectId });
+        }
+        return { focused: true };
+      }
+      return { focused: false };
+
+    case 'desktop_close_current_window':
+      if (browserWindow && !browserWindow.isDestroyed()) {
+        browserWindow.close();
+      }
+      return null;
+
     case 'desktop_ssh_instances_get':
       return sshManager.readInstances();
 
@@ -2108,15 +2414,16 @@ const buildMacMenu = () => {
     {
       label: app.name,
       submenu: [
-        { role: 'about' },
+        { label: 'About OpenChamber', click: () => dispatchAction('about') },
         {
           label: 'Check for Updates',
           click: () => dispatchCheckForUpdates(),
         },
         { type: 'separator' },
         { label: 'Settings', accelerator: 'Cmd+,', click: () => dispatchAction('settings') },
-        { label: 'Command Palette', accelerator: 'Cmd+K', click: () => dispatchAction('command-palette') },
-        { label: 'Quick Open…', accelerator: 'Cmd+P', click: () => dispatchAction('quick-open') },
+        { label: 'Reload Webview', click: () => reloadMenuTargetWindow() },
+        { label: 'Restart', click: () => relaunchFromMenu() },
+        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => dispatchAction('command-palette') },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -2154,10 +2461,12 @@ const buildMacMenu = () => {
     {
       label: 'View',
       submenu: [
-        { label: 'Git', accelerator: 'Cmd+G', click: () => dispatchAction('open-git-tab') },
-        { label: 'Diff', accelerator: 'Cmd+E', click: () => dispatchAction('open-diff-tab') },
-        { label: 'Files', click: () => dispatchAction('open-files-tab') },
-        { label: 'Terminal', accelerator: 'Cmd+T', click: () => dispatchAction('open-terminal-tab') },
+        { label: 'Toggle Right Sidebar', accelerator: 'Cmd+B', click: () => dispatchAction('toggle-right-sidebar') },
+        { label: 'Open Git Sidebar', accelerator: 'Cmd+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
+        { label: 'Open Files Sidebar', accelerator: 'Cmd+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
+        { type: 'separator' },
+        { label: 'Toggle Terminal Dock', accelerator: 'Cmd+J', click: () => dispatchAction('toggle-terminal') },
+        { label: 'Toggle Terminal Expanded', accelerator: 'Cmd+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
         { type: 'separator' },
         { label: 'Light Theme', click: () => dispatchAction('theme-light') },
         { label: 'Dark Theme', click: () => dispatchAction('theme-dark') },
@@ -2247,6 +2556,7 @@ const COMMANDS_SAFE_FOR_REMOTE = new Set([
   'desktop_start_window_drag',
   'desktop_get_app_version',
   'desktop_get_lan_address',
+  'desktop_capture_page_rect',
 ]);
 
 ipcMain.handle('openchamber:invoke', async (event, command, args) => {
@@ -2267,6 +2577,9 @@ ipcMain.handle('openchamber:dialog:open', async (event, options) => {
   const browserWindow = BrowserWindow.fromWebContents(event.sender);
   const result = await dialog.showOpenDialog(browserWindow || undefined, {
     title: typeof options?.title === 'string' ? options.title : undefined,
+    defaultPath: typeof options?.defaultPath === 'string' && options.defaultPath.trim().length > 0
+      ? options.defaultPath.trim()
+      : undefined,
     filters: Array.isArray(options?.filters)
       ? options.filters
           .filter((filter) => filter && typeof filter === 'object')
@@ -2360,12 +2673,23 @@ app.whenReady().then(async () => {
     Menu.setApplicationMenu(buildMacMenu());
   }
 
+  state.mainWindow = createBrowserWindow({
+    label: 'main',
+    restoreGeometry: true,
+    url: null,
+  });
+
   const initial = extractInitialDeepLinks();
   if (initial.length > 0) handleDeepLinks(initial);
 
   const { initialUrl, localOrigin, bootOutcome } = await resolveInitialUrl();
   await activateMainWindow(initialUrl, localOrigin, bootOutcome);
-  startQuitRiskPoller();
+
+  // Notify renderer on OS wake-from-sleep so the SSE event pipeline can
+  // reconnect immediately instead of waiting for the heartbeat watchdog.
+  powerMonitor.on('resume', () => {
+    emitToAllWindows('openchamber:system-resume', { timestamp: Date.now() });
+  });
 }).catch((error) => {
   log.error('[electron] startup failed:', error);
   app.exit(1);

@@ -128,7 +128,6 @@ const MENU_ITEM_SETTINGS_ID: &str = "menu_settings";
 #[cfg(target_os = "macos")]
 const MENU_ITEM_COMMAND_PALETTE_ID: &str = "menu_command_palette";
 #[cfg(target_os = "macos")]
-const MENU_ITEM_QUICK_OPEN_ID: &str = "menu_quick_open";
 #[cfg(target_os = "macos")]
 const MENU_ITEM_NEW_SESSION_ID: &str = "menu_new_session";
 #[cfg(target_os = "macos")]
@@ -407,14 +406,6 @@ fn build_macos_menu<R: tauri::Runtime>(
         MENU_ITEM_COMMAND_PALETTE_ID,
         "Command Palette",
         true,
-        Some("Cmd+K"),
-    )?;
-
-    let quick_open = MenuItem::with_id(
-        app,
-        MENU_ITEM_QUICK_OPEN_ID,
-        "Quick Open…",
-        true,
         Some("Cmd+P"),
     )?;
 
@@ -605,7 +596,6 @@ fn build_macos_menu<R: tauri::Runtime>(
                     &PredefinedMenuItem::separator(app)?,
                     &settings,
                     &command_palette,
-                    &quick_open,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::services(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
@@ -2676,6 +2666,7 @@ async fn spawn_local_server(app: &tauri::AppHandle) -> Result<String> {
             .env("OPENCHAMBER_DIST_DIR", dist_dir.clone())
             .env("OPENCHAMBER_RUNTIME", "desktop")
             .env("OPENCHAMBER_DESKTOP_NOTIFY", "true")
+            .env("OPENCHAMBER_SKIP_API_COMPRESSION", "true")
             .env("PATH", augmented_path.clone())
             .env("NO_PROXY", no_proxy)
             .env("no_proxy", no_proxy);
@@ -3921,11 +3912,6 @@ fn main() {
                     dispatch_menu_action(app, "command-palette");
                     return;
                 }
-                if id == MENU_ITEM_QUICK_OPEN_ID {
-                    dispatch_menu_action(app, "quick-open");
-                    return;
-                }
-
                 if id == MENU_ITEM_NEW_SESSION_ID {
                     dispatch_menu_action(app, "new-session");
                     return;

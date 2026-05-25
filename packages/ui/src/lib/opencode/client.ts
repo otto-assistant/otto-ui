@@ -15,11 +15,82 @@ import type {
 import type { PermissionRequest } from "@/types/permission";
 import type { QuestionRequest } from "@/types/question";
 import { waitForWorktreeBootstrap } from "@/lib/worktrees/worktreeBootstrap";
+import {
+  assertProviderCircuitClosed,
+  recordProviderSuccess,
+  recordProviderError,
+  shouldRetry,
+  getRetryDelayMs,
+} from "./provider-tracker";
 
 // Use relative path by default (works with both dev and nginx proxy server)
 // Can be overridden with VITE_OPENCODE_URL for absolute URLs in special deployments
 const DEFAULT_BASE_URL = import.meta.env.VITE_OPENCODE_URL || "/api";
+
+/**
+ * Render an SDK error payload into a short string for Error messages.
+ * The SDK returns `{data, error}` shape without throwing on non-2xx; methods
+ * that need to signal failure (so callers can preserve state instead of
+ * conflating failure with an empty success) wrap the error with this helper.
+ */
+function formatSdkError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error && typeof (error as { message: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
 const ABSOLUTE_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//;
+const ID_RANDOM_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ID_RANDOM_LENGTH = 14;
+
+let lastIdTimestamp = 0;
+let idCounter = 0;
+
+const randomBase62 = (length: number): string => {
+  const bytes = new Uint8Array(length);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  let result = "";
+  for (let index = 0; index < length; index += 1) {
+    result += ID_RANDOM_CHARS[bytes[index] % ID_RANDOM_CHARS.length];
+  }
+  return result;
+};
+
+const ascendingId = (prefix: "msg"): string => {
+  const timestamp = Date.now();
+  if (timestamp !== lastIdTimestamp) {
+    lastIdTimestamp = timestamp;
+    idCounter = 0;
+  }
+  idCounter += 1;
+
+  const sortable = BigInt(timestamp) * BigInt(0x1000) + BigInt(idCounter);
+  const timeBytes = new Uint8Array(6);
+  for (let index = 0; index < 6; index += 1) {
+    timeBytes[index] = Number((sortable >> BigInt(40 - 8 * index)) & BigInt(0xff));
+  }
+  const hex = Array.from(timeBytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}_${hex}${randomBase62(ID_RANDOM_LENGTH)}`;
+};
+
+const isRetryableFetchError = (error: unknown): boolean => {
+  if (error instanceof DOMException && error.name === 'AbortError') return true;
+  if (error instanceof TypeError) return true;
+  return false;
+};
 
 const ensureAbsoluteBaseUrl = (candidate: string): string => {
   const normalized = typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : "/api";
@@ -618,10 +689,9 @@ class OpencodeService {
       retryCount?: number;
     };
   }): Promise<string> {
-    // Generate a temporary client-side ID for optimistic UI
-    // This ID won't be sent to the server - server will generate its own
-    const baseTimestamp = Date.now();
-    const tempMessageId = params.messageId ?? `temp_${baseTimestamp}_${Math.random().toString(36).substring(2, 9)}`;
+    // Reuse one client-side message ID across retries. The server accepts this
+    // as the real user message ID, making ambiguous network retries idempotent.
+    const messageId = params.messageId ?? ascendingId("msg");
 
     // Build parts array using SDK types (TextPartInput | FilePartInput) plus lightweight agent parts
     const parts: Array<TextPartInput | FilePartInput | AgentPartInputLite> = [];
@@ -725,39 +795,58 @@ class OpencodeService {
       });
     }
 
-    let response: Response;
-    try {
-      response = await fetch(url.toString(), {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: 'application/json',
-        },
-        body: JSON.stringify({
-          model: {
-            providerID: params.providerID,
-            modelID: params.modelID,
-          },
-          agent: params.agent,
-          variant: params.variant,
-          ...(params.messageId ? { messageID: params.messageId } : {}),
-          ...(params.format ? { format: params.format } : {}),
-          parts,
-        }),
-      });
-    } catch (error) {
-      console.error('[git-generation][browser] prompt_async request failed before response', {
-        sessionId: params.id,
-        url: url.toString(),
-        directory: this.currentDirectory,
-        hasFormat: Boolean(params.format),
-        message: error instanceof Error ? error.message : String(error),
-        error,
-      });
-      throw error;
-    }
+    assertProviderCircuitClosed(params.providerID);
 
-    if (!response.ok) {
+    let response!: Response;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await fetch(url.toString(), {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+          },
+          body: JSON.stringify({
+            model: {
+              providerID: params.providerID,
+              modelID: params.modelID,
+            },
+            agent: params.agent,
+            variant: params.variant,
+            messageID: messageId,
+            ...(params.format ? { format: params.format } : {}),
+            parts,
+          }),
+        });
+      } catch (error) {
+        if (attempt < 2 && isRetryableFetchError(error)) {
+          const delay = getRetryDelayMs(attempt);
+          console.warn(
+            `[prompt] fetch failed for ${params.providerID}/${params.modelID} (attempt ${attempt + 1}/3), retrying in ${delay}ms`,
+            (error as Error)?.message
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        recordProviderError(params.providerID);
+        throw error;
+      }
+
+      if (response.ok) {
+        recordProviderSuccess(params.providerID);
+        return messageId;
+      }
+
+      if (shouldRetry(params.providerID, response.status, attempt)) {
+        const delay = getRetryDelayMs(attempt);
+        console.warn(
+          `[prompt] ${response.status} for ${params.providerID}/${params.modelID} (attempt ${attempt + 1}/3), retrying in ${delay}ms`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
       let detail = '';
       try {
         detail = await response.text();
@@ -765,12 +854,13 @@ class OpencodeService {
         // ignore
       }
       const suffix = detail && detail.trim().length > 0 ? `: ${detail.trim()}` : '';
-      throw new Error(`Failed to send message (${response.status})${suffix}`);
+      const error = new Error(`Failed to send message (${response.status})${suffix}`);
+      recordProviderError(params.providerID, response.status);
+      throw error;
     }
-
-    // Return temporary ID for optimistic UI
-    // Real messageID will come from server via SSE events
-    return tempMessageId;
+    // Defensive fallback — all loop paths return/throw, but TypeScript
+    // control flow analysis cannot prove exhaustiveness without this.
+    throw new Error('Failed to send message after retries');
   }
 
   async sendCommand(params: {
@@ -784,8 +874,7 @@ class OpencodeService {
     files?: Array<FileInputLite>;
     messageId?: string;
   }): Promise<string> {
-    const baseTimestamp = Date.now();
-    const tempMessageId = params.messageId ?? `temp_${baseTimestamp}_${Math.random().toString(36).substring(2, 9)}`;
+    const tempMessageId = params.messageId ?? ascendingId("msg");
 
     const parts: FilePartInput[] = [];
     if (params.files && params.files.length > 0) {
@@ -807,7 +896,7 @@ class OpencodeService {
       ...(params.agent ? { agent: params.agent } : {}),
       ...(params.variant ? { variant: params.variant } : {}),
       ...(parts.length > 0 ? { parts } : {}),
-      ...(params.messageId ? { messageID: params.messageId } : {}),
+      messageID: tempMessageId,
     };
 
     const response = await fetch(url.toString(), {
@@ -881,12 +970,20 @@ class OpencodeService {
   async getSessionStatus(): Promise<
     Record<string, { type: "idle" | "busy" | "retry"; attempt?: number; message?: string; next?: number }>
   > {
-    return this.getSessionStatusForDirectory(this.currentDirectory ?? null);
+    return (await this.getSessionStatusForDirectory(this.currentDirectory ?? null)) ?? {};
   }
 
+  /**
+   * Returns the upstream `/session/status` map, or `null` if the fetch failed.
+   *
+   * `null` vs `{}` matters for reconnect resync: the server omits idle sessions
+   * from the response, so an empty `{}` means "everything is idle" and a candidate
+   * missing from the response is authoritatively idle. A network/HTTP failure must
+   * not be conflated with that — return `null` so the caller can preserve state.
+   */
   async getSessionStatusForDirectory(
     directory: string | null | undefined
-  ): Promise<Record<string, { type: "idle" | "busy" | "retry"; attempt?: number; message?: string; next?: number }>> {
+  ): Promise<Record<string, { type: "idle" | "busy" | "retry"; attempt?: number; message?: string; next?: number }> | null> {
     try {
       const base = this.baseUrl.replace(/\/$/, "");
       const url = new URL(`${base}/session/status`);
@@ -904,12 +1001,12 @@ class OpencodeService {
       });
 
       if (!response.ok) {
-        return {};
+        return null;
       }
 
       const data = await response.json().catch(() => null);
       if (!data || typeof data !== "object") {
-        return {};
+        return null;
       }
 
       return data as Record<
@@ -917,14 +1014,14 @@ class OpencodeService {
         { type: "idle" | "busy" | "retry"; attempt?: number; message?: string; next?: number }
       >;
     } catch {
-      return {};
+      return null;
     }
   }
 
   async getGlobalSessionStatus(): Promise<
     Record<string, { type: "idle" | "busy" | "retry"; attempt?: number; message?: string; next?: number }>
   > {
-    return this.getSessionStatusForDirectory(null);
+    return (await this.getSessionStatusForDirectory(null)) ?? {};
   }
 
   /**
@@ -989,17 +1086,22 @@ class OpencodeService {
     return result.data || false;
   }
 
+  /**
+   * Throws on fetch/SDK failure. Callers that drive authoritative state from
+   * the result (e.g. reconnect resync) must let the throw propagate so they
+   * can preserve existing state instead of conflating "fetch failed" with
+   * "server returned no pending permissions".
+   */
   async listPendingPermissions(options?: { directories?: Array<string | null | undefined> }): Promise<PermissionRequest[]> {
     const fetches: Array<Promise<PermissionRequest[]>> = [];
 
     const fetchForDirectory = async (directory?: string | null): Promise<PermissionRequest[]> => {
-      try {
-        const trimmed = typeof directory === 'string' ? directory.trim() : '';
-        const result = await this.client.permission.list(trimmed ? { directory: trimmed } : undefined);
-        return (result.data || []) as unknown as PermissionRequest[];
-      } catch {
-        return [];
+      const trimmed = typeof directory === 'string' ? directory.trim() : '';
+      const result = await this.client.permission.list(trimmed ? { directory: trimmed } : undefined);
+      if (result.error) {
+        throw new Error(`permission.list failed: ${formatSdkError(result.error)}`);
       }
+      return (result.data || []) as unknown as PermissionRequest[];
     };
 
     // Try unscoped first (server may return global pending items).
@@ -1063,17 +1165,21 @@ class OpencodeService {
     return result.data || false;
   }
 
+  /**
+   * Throws on fetch/SDK failure. See {@link listPendingPermissions} for
+   * rationale — resync paths preserve state on throw via outer try/catch
+   * instead of conflating failure with an empty server response.
+   */
   async listPendingQuestions(options?: { directories?: Array<string | null | undefined> }): Promise<QuestionRequest[]> {
     const fetches: Array<Promise<QuestionRequest[]>> = [];
 
     const fetchForDirectory = async (directory?: string | null): Promise<QuestionRequest[]> => {
-      try {
-        const trimmed = typeof directory === 'string' ? directory.trim() : '';
-        const result = await this.client.question.list(trimmed ? { directory: trimmed } : undefined);
-        return (result.data || []) as unknown as QuestionRequest[];
-      } catch {
-        return [];
+      const trimmed = typeof directory === 'string' ? directory.trim() : '';
+      const result = await this.client.question.list(trimmed ? { directory: trimmed } : undefined);
+      if (result.error) {
+        throw new Error(`question.list failed: ${formatSdkError(result.error)}`);
       }
+      return (result.data || []) as unknown as QuestionRequest[];
     };
 
     // Try unscoped first (server may return global pending items).
@@ -1187,15 +1293,19 @@ class OpencodeService {
   }
 
   // Agent Management
+  /**
+   * Throws on fetch/SDK failure so caller-side retry loops (see
+   * useAgentsStore) can observe failure and retry; silently returning an
+   * empty list would defeat retries and clear the cached agent list.
+   */
   async listAgents(): Promise<Agent[]> {
-    try {
-      const response = await this.client.app.agents(
-        this.currentDirectory ? { directory: this.currentDirectory } : undefined
-      );
-      return response.data || [];
-    } catch {
-      return [];
+    const response = await this.client.app.agents(
+      this.currentDirectory ? { directory: this.currentDirectory } : undefined
+    );
+    if (response.error) {
+      throw new Error(`app.agents failed: ${formatSdkError(response.error)}`);
     }
+    return response.data || [];
   }
 
   // SSE infrastructure removed — EventPipeline in sync/event-pipeline.ts handles
@@ -1253,7 +1363,7 @@ class OpencodeService {
   }
 
   // Command Management
-  async listCommands(): Promise<Array<{ name: string; description?: string; agent?: string; model?: string }>> {
+  async listCommands(): Promise<Array<{ name: string; description?: string; agent?: string; model?: string; source?: string }>> {
     try {
       const response = await this.client.command.list(
         this.currentDirectory ? { directory: this.currentDirectory } : undefined
@@ -1263,7 +1373,8 @@ class OpencodeService {
         name: cmd.name as string,
         description: cmd.description as string | undefined,
         agent: cmd.agent as string | undefined,
-        model: cmd.model as string | undefined
+        model: cmd.model as string | undefined,
+        source: cmd.source as string | undefined,
         // Intentionally excluding template to keep memory usage low
       }));
     } catch {
@@ -1271,7 +1382,7 @@ class OpencodeService {
     }
   }
 
-  async listCommandsWithDetails(): Promise<Array<{ name: string; description?: string; agent?: string; model?: string; template?: string }>> {
+  async listCommandsWithDetails(): Promise<Array<{ name: string; description?: string; agent?: string; model?: string; source?: string; template?: string }>> {
     try {
       const response = await this.client.command.list(
         this.currentDirectory ? { directory: this.currentDirectory } : undefined
@@ -1282,8 +1393,37 @@ class OpencodeService {
         description: cmd.description as string | undefined,
         agent: cmd.agent as string | undefined,
         model: cmd.model as string | undefined,
+        source: cmd.source as string | undefined,
         template: cmd.template as string | undefined,
       }));
+    } catch {
+      return [];
+    }
+  }
+
+  async listSkillsWithDetails(): Promise<Array<{ name: string; description?: string; location: string; content?: string }>> {
+    try {
+      const response = await this.client.app.skills(
+        this.currentDirectory ? { directory: this.currentDirectory } : undefined,
+      );
+      const data = response.data;
+      if (!Array.isArray(data)) {
+        return [];
+      }
+
+      const skills: Array<{ name: string; description?: string; location: string; content?: string }> = [];
+      for (const item of data as Array<Record<string, unknown>>) {
+          const name = typeof item.name === 'string' ? item.name.trim() : '';
+          const location = typeof item.location === 'string' ? item.location : '';
+          if (!name || !location) {
+            continue;
+          }
+          const skill: { name: string; description?: string; location: string; content?: string } = { name, location };
+          if (typeof item.description === 'string') skill.description = item.description;
+          if (typeof item.content === 'string') skill.content = item.content;
+          skills.push(skill);
+      }
+      return skills;
     } catch {
       return [];
     }
@@ -1380,6 +1520,24 @@ class OpencodeService {
 
     const result = await response.json();
     return result;
+  }
+
+  async cloneRepository(input: { remoteUrl: string; destinationPath: string; gitIdentityId?: string | null }): Promise<{ success: boolean; path: string; output?: string }> {
+    const response = await fetch(`${this.baseUrl}/fs/clone`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to clone repository' }));
+      throw new Error(error.error || 'Failed to clone repository');
+    }
+
+    return await response.json();
   }
 
   async listLocalDirectory(directoryPath: string | null | undefined, options?: { respectGitignore?: boolean }): Promise<FilesystemEntry[]> {

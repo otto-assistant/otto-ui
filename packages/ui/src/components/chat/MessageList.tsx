@@ -5,7 +5,7 @@ import { measureElement as measureVirtualElement, type VirtualItem, useVirtualiz
 import ChatMessage from './ChatMessage';
 import { areOptionalRenderRelevantMessagesEqual, areRelevantTurnGroupingContextsEqual, areRenderRelevantMessagesEqual } from './message/renderCompare';
 import TurnItem from './components/TurnItem';
-import type { AnimationHandlers, ContentChangeReason } from '@/hooks/useChatScrollManager';
+import type { AnimationHandlers, ContentChangeReason } from '@/hooks/useChatAutoFollow';
 import { filterSyntheticParts } from '@/lib/messages/synthetic';
 import type { ChatMessageEntry, TurnRecord, TurnGroupingContext } from './lib/turns/types';
 import { useTurnRecords } from './hooks/useTurnRecords';
@@ -15,8 +15,9 @@ import { FadeInDisabledProvider } from './message/FadeInOnReveal';
 import { hasPendingUserSendAnimation, consumePendingUserSendAnimation } from '@/lib/userSendAnimation';
 import { streamPerfCount, streamPerfMeasure } from '@/stores/utils/streamDebug';
 import type { StreamPhase } from './message/types';
+import { normalizeParts } from './message/partUtils';
 
-const MESSAGE_LIST_VIRTUALIZE_THRESHOLD = 15;
+const MESSAGE_LIST_VIRTUALIZE_THRESHOLD = 5;
 const MESSAGE_LIST_OVERSCAN = 6;
 
 const estimateHistoryEntryHeight = (entry: RenderEntry | undefined): number => {
@@ -51,7 +52,7 @@ const resolveMessageRole = (message: ChatMessageEntry): string | null => {
 
 const hasCompactionPart = (message: ChatMessageEntry): boolean => {
     return message.parts.some((part) => {
-        const type = (part as { type?: unknown }).type;
+        const type = (part as { type?: unknown } | null | undefined)?.type;
         return type === 'compaction';
     });
 };
@@ -75,7 +76,7 @@ const normalizeCompactionCommandMessage = (message: ChatMessageEntry): ChatMessa
 
     let changedParts = false;
     const nextParts = message.parts.map((part) => {
-        const type = (part as { type?: unknown }).type;
+        const type = (part as { type?: unknown } | null | undefined)?.type;
         if (type !== 'compaction') {
             return part;
         }
@@ -202,7 +203,7 @@ const getShellBridgeAssistantDetails = (message: ChatMessageEntry, expectedParen
         };
     };
 
-    if (part.type !== 'tool') {
+    if (part?.type !== 'tool') {
         return { hide: false, details: null };
     }
 
@@ -270,9 +271,9 @@ const isSyntheticSubtaskBridgeAssistant = (message: ChatMessageEntry): { hide: b
     const onlyPart = message.parts[0] as unknown as {
         type?: unknown;
         tool?: unknown;
-    };
+    } | null | undefined;
 
-    if (onlyPart.type !== 'tool') {
+    if (onlyPart?.type !== 'tool') {
         return { hide: false, taskSessionId: null };
     }
 
@@ -352,6 +353,17 @@ const withShellBridgeDetails = (message: ChatMessageEntry, details: ShellBridgeD
     };
 };
 
+const normalizeMessageParts = (message: ChatMessageEntry): ChatMessageEntry => {
+    const parts = normalizeParts(message.parts);
+    if (parts.length === message.parts.length) {
+        return message;
+    }
+    return {
+        ...message,
+        parts,
+    };
+};
+
 const normalizedMessageBySource = new WeakMap<ChatMessageEntry, ChatMessageEntry>();
 
 const getNormalizedMessageForDisplay = (message: ChatMessageEntry): ChatMessageEntry => {
@@ -360,7 +372,8 @@ const getNormalizedMessageForDisplay = (message: ChatMessageEntry): ChatMessageE
         return cached;
     }
 
-    const normalizedCompactionMessage = normalizeCompactionCommandMessage(message);
+    const normalizedPartMessage = normalizeMessageParts(message);
+    const normalizedCompactionMessage = normalizeCompactionCommandMessage(normalizedPartMessage);
     const filteredParts = filterSyntheticParts(normalizedCompactionMessage.parts);
     const normalized = filteredParts === normalizedCompactionMessage.parts
         ? normalizedCompactionMessage
@@ -392,7 +405,7 @@ interface MessageListProps {
     hasMoreAbove: boolean;
     isLoadingOlder: boolean;
     onLoadOlder: () => void;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     scrollRef?: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -401,6 +414,7 @@ export interface MessageListHandle {
     scrollToMessageId: (messageId: string, options?: { behavior?: ScrollBehavior }) => boolean;
     captureViewportAnchor: () => { messageId: string; offsetTop: number } | null;
     restoreViewportAnchor: (anchor: { messageId: string; offsetTop: number }) => boolean;
+    scrollToBottom: () => void;
 }
 
 type RenderEntry =
@@ -429,7 +443,7 @@ interface MessageRowProps {
     onUserAnimationConsumed?: (messageId: string) => void;
     onContentChange: (reason?: ContentChangeReason) => void;
     animationHandlers: AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
 }
 
 const MessageRow = React.memo<MessageRowProps>(({ 
@@ -498,7 +512,7 @@ interface TurnBlockProps {
     chatRenderMode: 'sorted' | 'live';
     onMessageContentChange: (reason?: ContentChangeReason) => void;
     getAnimationHandlers: (messageId: string) => AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     stickyUserHeader?: boolean;
     shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
     onUserAnimationConsumed: (messageId: string) => void;
@@ -686,6 +700,7 @@ const TurnBlock = React.memo(({
             const isFirstAssistant = assistantIndex === 0;
             const isLastAssistant = assistantIndex === visibleAssistantMessages.length - 1;
             const isActivityOwner = Boolean(activityOwnerMessageId) && message.info.id === activityOwnerMessageId;
+            const hasAnchoredActivitySegment = visibleActivitySegments.some((segment) => segment.anchorMessageId === message.info.id);
             const shouldAttachFullTurnContext = chatRenderMode === 'sorted'
                 ? isAssistantMessage
                 : (isActivityOwner || isFirstAssistant || isLastAssistant);
@@ -708,7 +723,11 @@ const TurnBlock = React.memo(({
                     activityOwnerMessageId,
                     isFirstAssistantInTurn: isFirstAssistant,
                     isLastAssistantInTurn: isLastAssistant,
-                    isWorking: isLastTurn && sessionIsWorking && message.info.id === streamingAssistantMessageId,
+                    isWorking: isLastTurn && sessionIsWorking && (
+                        chatRenderMode === 'sorted'
+                            ? hasAnchoredActivitySegment
+                            : message.info.id === streamingAssistantMessageId
+                    ),
                     hasTools: turn.hasTools,
                     hasReasoning: turn.hasReasoning,
                     ...(shouldAttachFullTurnContext ? {
@@ -763,6 +782,7 @@ const TurnBlock = React.memo(({
             activeStreamingPhase,
             visibleAssistantMessages,
             visibleAssistantIds,
+            visibleActivitySegments,
             activityOwnerMessageId,
             shouldAnimateUserMessage,
             onUserAnimationConsumed,
@@ -793,7 +813,7 @@ interface UngroupedMessageRowProps {
     nextMessage?: ChatMessageEntry;
     onMessageContentChange: (reason?: ContentChangeReason) => void;
     getAnimationHandlers: (messageId: string) => AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
     onUserAnimationConsumed: (messageId: string) => void;
     activeStreamingMessageId?: string | null;
@@ -834,7 +854,7 @@ interface MessageListEntryProps {
     entry: RenderEntry;
     onMessageContentChange: (reason?: ContentChangeReason) => void;
     getAnimationHandlers: (messageId: string) => AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     stickyUserHeader?: boolean;
     sessionIsWorking: boolean;
     defaultActivityExpanded: boolean;
@@ -925,7 +945,7 @@ const StaticHistoryList: React.FC<{
     contentRef: React.RefObject<HTMLDivElement | null>;
     onMessageContentChange: (reason?: ContentChangeReason) => void;
     getAnimationHandlers: (messageId: string) => AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     stickyUserHeader: boolean;
     defaultActivityExpanded: boolean;
     turnUiStates: Map<string, TurnUiState>;
@@ -979,6 +999,27 @@ const StaticHistoryList: React.FC<{
         );
     }
 
+    if (virtualRows.length === 0 && entries.length > 0) {
+        const fallbackStart = Math.max(0, entries.length - MESSAGE_LIST_OVERSCAN * 2);
+        const fallbackEntries = entries.slice(fallbackStart);
+        const fallbackHeight = fallbackEntries.reduce((total, entry) => total + estimateHistoryEntryHeight(entry), 0);
+        const fallbackPaddingTop = Math.max(0, totalSize - fallbackHeight);
+
+        return (
+            <div ref={contentRef} className="relative w-full">
+                {fallbackPaddingTop > 0 ? <div aria-hidden="true" style={{ height: `${fallbackPaddingTop}px` }} /> : null}
+                {fallbackEntries.map((entry) => (
+                    <div
+                        key={entry.key}
+                        data-turn-entry={entry.key}
+                    >
+                        {renderEntry(entry)}
+                    </div>
+                ))}
+            </div>
+        );
+    }
+
     return (
         <div ref={contentRef} className="relative w-full">
             {paddingTop > 0 ? <div aria-hidden="true" style={{ height: `${paddingTop}px` }} /> : null}
@@ -1010,7 +1051,7 @@ const StreamingTailContent: React.FC<{
     entry: RenderEntry;
     onMessageContentChange: (reason?: ContentChangeReason) => void;
     getAnimationHandlers: (messageId: string) => AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     stickyUserHeader: boolean;
     sessionIsWorking: boolean;
     defaultActivityExpanded: boolean;
@@ -1090,8 +1131,8 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
     }>({ sessionKey: undefined, previousOrder: [], animatedIds: new Set() });
     const stableGetAnimationHandlers = useStableEvent(getAnimationHandlers);
     const stableOnLoadOlder = useStableEvent(onLoadOlder);
-    const stableScrollToBottom = useStableEvent((options?: { instant?: boolean; force?: boolean }) => {
-        scrollToBottom?.(options);
+    const stableScrollToBottom = useStableEvent(() => {
+        scrollToBottom?.();
     });
 
     React.useEffect(() => {
@@ -1256,57 +1297,110 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
 
     const historyEntries = staticRenderEntries;
     const shouldVirtualizeHistory = historyEntries.length >= MESSAGE_LIST_VIRTUALIZE_THRESHOLD;
-    const [historyWidthPx, setHistoryWidthPx] = React.useState<number | null>(null);
-    const historyMeasurementScopeKey = historyWidthPx === null ? 'width:unknown' : `width:${Math.round(historyWidthPx)}`;
+
+    const previousHistoryLenRef = React.useRef(historyEntries.length);
+    const previousFirstEntryKeyRef = React.useRef(historyEntries[0]?.key);
 
     React.useLayoutEffect(() => {
-        const historyContent = historyContentRef.current;
-        if (!historyContent || !shouldVirtualizeHistory) {
-            setHistoryWidthPx((previous) => (previous === null ? previous : null));
+        const previousLen = previousHistoryLenRef.current;
+        const currentLen = historyEntries.length;
+        const previousFirstKey = previousFirstEntryKeyRef.current;
+        const currentFirstKey = historyEntries[0]?.key;
+
+        previousHistoryLenRef.current = currentLen;
+        previousFirstEntryKeyRef.current = currentFirstKey;
+
+        const grew = currentLen > previousLen;
+        const firstChanged = previousFirstKey !== currentFirstKey;
+        if (!shouldVirtualizeHistory || !grew || !firstChanged || previousLen === 0) {
             return;
         }
 
-        const updateWidth = (nextWidth: number) => {
-            setHistoryWidthPx((previous) => {
-                if (previous !== null && Math.abs(previous - nextWidth) < 0.5) {
-                    return previous;
-                }
-                return nextWidth;
-            });
-        };
-
-        updateWidth(historyContent.getBoundingClientRect().width);
-
-        if (typeof ResizeObserver === 'undefined') {
+        const prependedCount = currentLen - previousLen;
+        const shiftedOldFirst = historyEntries[prependedCount]?.key;
+        if (shiftedOldFirst !== previousFirstKey) {
             return;
         }
 
-        const observer = new ResizeObserver(() => {
-            updateWidth(historyContent.getBoundingClientRect().width);
-        });
-        observer.observe(historyContent);
-        return () => {
-            observer.disconnect();
-        };
-    }, [historyEntries.length, shouldVirtualizeHistory]);
+        // Prepend detected: new entries added at the beginning of the list.
+        // The virtualizer renders based on the current scroll offset which
+        // now maps to different items. Compensate so the user sees the
+        // prepended content (scroll to top) or stays on the same content.
+        let prependedHeight = 0;
+        for (let i = 0; i < prependedCount; i++) {
+            prependedHeight += estimateHistoryEntryHeight(historyEntries[i]);
+        }
+
+        const scrollEl = resolveScrollContainer();
+        if (!scrollEl || prependedHeight <= 0) return;
+
+        scrollEl.scrollTop += prependedHeight;
+    });
 
     const historyVirtualizer = useVirtualizer({
         count: historyEntries.length,
         getScrollElement: resolveScrollContainer,
         estimateSize: (index) => estimateHistoryEntryHeight(historyEntries[index]),
-        getItemKey: (index) => `${historyMeasurementScopeKey}:${historyEntries[index]?.key ?? index}`,
+        getItemKey: (index) => historyEntries[index]?.key ?? String(index),
         measureElement: measureVirtualElement,
         useAnimationFrameWithResizeObserver: true,
         overscan: MESSAGE_LIST_OVERSCAN,
         enabled: shouldVirtualizeHistory,
     });
 
-    React.useEffect(() => {
-        if (!shouldVirtualizeHistory || historyWidthPx === null) {
+    React.useLayoutEffect(() => {
+        const historyContent = historyContentRef.current;
+        if (!historyContent || !shouldVirtualizeHistory) {
             return;
         }
+
+        if (typeof ResizeObserver === 'undefined') {
+            return;
+        }
+
+        const observer = new ResizeObserver(() => {
+            historyVirtualizer.measure();
+        });
+        observer.observe(historyContent);
+        return () => {
+            observer.disconnect();
+        };
+    }, [historyEntries.length, shouldVirtualizeHistory, historyVirtualizer]);
+
+    React.useEffect(() => {
+        if (!shouldVirtualizeHistory) {
+            return;
+        }
+        const scrollEl = resolveScrollContainer();
+        const prevTotal = historyVirtualizer.getTotalSize();
+        const nearBottom = scrollEl && prevTotal > 0
+            ? scrollEl.scrollTop + scrollEl.clientHeight >= prevTotal - 10
+            : false
+
         historyVirtualizer.measure();
-    }, [historyVirtualizer, historyWidthPx, shouldVirtualizeHistory]);
+
+        // measure() defers via useAnimationFrameWithResizeObserver.
+        // Wait two frames then, if we were near the estimated bottom, scroll
+        // to the real bottom after measurements settle.
+        let frame2: number | null = null;
+        const frame1 = requestAnimationFrame(() => {
+            frame2 = requestAnimationFrame(() => {
+                if (!nearBottom) return
+                const el = resolveScrollContainer()
+                if (!el) return
+                const target = Math.max(0, el.scrollHeight - el.clientHeight)
+                if (target > 0 && Math.abs(el.scrollTop - target) > 5) {
+                    el.scrollTop = target
+                }
+            })
+        })
+        return () => {
+            cancelAnimationFrame(frame1)
+            if (frame2 !== null) {
+                cancelAnimationFrame(frame2)
+            }
+        }
+    }, [historyVirtualizer, resolveScrollContainer, shouldVirtualizeHistory]);
 
     const scheduleVirtualMeasure = React.useCallback(() => {
         if (!shouldVirtualizeHistory) {
@@ -1577,6 +1671,16 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
 
                 return applyAnchor();
             },
+
+            scrollToBottom: () => {
+                if (shouldVirtualizeHistory && historyEntries.length > 0) {
+                    historyVirtualizer.scrollToIndex(historyEntries.length - 1, { align: 'end' });
+                    return;
+                }
+                const container = resolveScrollContainer();
+                if (!container) return;
+                container.scrollTop = container.scrollHeight;
+            },
         };
 
         if (typeof ref === 'function') {
@@ -1591,7 +1695,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         return () => {
             objectRef.current = null;
         };
-    }, [findMessageElement, historyEntries.length, messageIndexMap, resolveScrollContainer, scrollHistoryIndexIntoView, scrollMessageElementIntoView, trailingStreamingEntry, turnIndexMap, ref]);
+    }, [findMessageElement, historyEntries.length, historyVirtualizer, messageIndexMap, resolveScrollContainer, scrollHistoryIndexIntoView, scrollMessageElementIntoView, shouldVirtualizeHistory, trailingStreamingEntry, turnIndexMap, ref]);
 
     const disableFadeIn = false;
 

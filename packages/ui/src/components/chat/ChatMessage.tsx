@@ -10,19 +10,18 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useContextStore } from '@/stores/contextStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
-import * as sessionActions from '@/sync/session-actions';
 import { useDeviceInfo } from '@/lib/device';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { generateSyntaxTheme } from '@/lib/theme/syntaxThemeGenerator';
 import { cn } from '@/lib/utils';
 
-import type { AnimationHandlers, ContentChangeReason } from '@/hooks/useChatScrollManager';
+import type { AnimationHandlers, ContentChangeReason } from '@/hooks/useChatAutoFollow';
 import MessageHeader from './message/MessageHeader';
 import MessageBody from './message/MessageBody';
 import type { AgentMentionInfo } from './message/types';
 import type { StreamPhase, ToolPopupContent } from './message/types';
 import { deriveMessageRole } from './message/messageRole';
-import { filterVisibleParts } from './message/partUtils';
+import { filterVisibleParts, normalizeParts } from './message/partUtils';
 import { normalizeUserDisplayParts } from './message/normalizeUserDisplayParts';
 import { flattenAssistantTextParts } from '@/lib/messages/messageText';
 import { isLikelyProviderAuthFailure, PROVIDER_AUTH_FAILURE_MESSAGE } from '@/lib/messages/providerAuthError';
@@ -127,7 +126,7 @@ interface ChatMessageProps {
     };
     onContentChange?: (reason?: ContentChangeReason) => void;
     animationHandlers?: AnimationHandlers;
-    scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
+    scrollToBottom?: () => void;
     turnGroupingContext?: TurnGroupingContext;
     assistantHeaderMessageId?: string;
     isInActiveTurn?: boolean;
@@ -149,7 +148,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     animateUserOnMount = false,
     onUserAnimationConsumed,
 }) => {
-    const { isMobile, hasTouchInput } = useDeviceInfo();
+    const { isMobile, isTablet, hasTouchInput } = useDeviceInfo();
+    const alwaysShowMessageActions = isMobile || isTablet;
     const { currentTheme } = useThemeSystem();
     const messageContainerRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -157,8 +157,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
     const getAgentModelForSession = useSelectionStore((s) => s.getAgentModelForSession);
     const getSessionModelSelection = useSelectionStore((s) => s.getSessionModelSelection);
-    const revertToMessage = sessionActions.revertToMessage;
-    const forkFromMessage = sessionActions.forkFromMessage;
+    const revertToMessage = useSessionUIStore((s) => s.revertToMessage);
+    const forkFromMessage = useSessionUIStore((s) => s.forkFromMessage);
 
     streamPerfCount('ui.chat_message.render');
     if (isInActiveTurn) {
@@ -216,11 +216,12 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     );
 
     const normalizedParts = React.useMemo(() => {
+        const safeParts = normalizeParts(message.parts);
         if (!isUser) {
-            return message.parts;
+            return safeParts;
         }
 
-        return normalizeUserDisplayParts(message.parts, { planModeEnabled });
+        return normalizeUserDisplayParts(safeParts, { planModeEnabled });
     }, [isUser, message.parts, planModeEnabled]);
 
     const previousUserMetadata = React.useMemo(() => {
@@ -509,7 +510,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         if (!isUser) {
             return undefined;
         }
-        const mentionPart = message.parts.find((part) => part.type === 'agent');
+        const mentionPart = normalizedParts.find((part) => part.type === 'agent');
         if (!mentionPart) {
             return undefined;
         }
@@ -522,7 +523,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             ? partWithName.source.value
             : `@${name}`;
         return { name, token: rawValue } satisfies AgentMentionInfo;
-    }, [isUser, message.parts]);
+    }, [isUser, normalizedParts]);
 
     const shouldHideUserMessage = isUser && displayParts.length === 0;
 
@@ -659,7 +660,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
     // Summary body removed — flat rendering means text is always inline.
 
-    const assistantErrorText = React.useMemo(() => {
+    const assistantError = React.useMemo(() => {
         if (isUser) {
             return undefined;
         }
@@ -677,13 +678,31 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             return undefined;
         }
         if (errorName === 'SessionRetry') {
-            return `Opencode failed to send a message. Retry attempt info: \n\`${detail}\``;
+            return {
+                text: `Opencode failed to send a message. Retry attempt info: \n\`${detail}\``,
+                variant: 'info' as const,
+            };
         }
         if (isLikelyProviderAuthFailure(detail)) {
-            return PROVIDER_AUTH_FAILURE_MESSAGE;
+            return {
+                text: PROVIDER_AUTH_FAILURE_MESSAGE,
+                variant: 'error' as const,
+            };
         }
-        return `Opencode failed to send message with error:\n\`${detail}\``;
+        if (detail.trim().toLowerCase() === 'aborted') {
+            return {
+                text: 'The running turn was stopped before OpenCode could send the next message.',
+                variant: 'info' as const,
+            };
+        }
+        return {
+            text: `Opencode failed to send message with error:\n\`${detail}\``,
+            variant: 'error' as const,
+        };
     }, [isUser, message.info]);
+
+    const assistantErrorText = assistantError?.text;
+    const assistantErrorVariant = assistantError?.variant;
 
     const messageTextContent = React.useMemo(() => {
         if (isUser) {
@@ -1011,8 +1030,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                                 isMessageCompleted={isMessageCompleted}
                                                 messageFinish={messageFinish}
                                                 syntaxTheme={syntaxTheme}
-                                                isMobile={isMobile}
-                                                hasTouchInput={hasTouchInput}
+                                                 isMobile={isMobile}
+                                                 alwaysShowActions={alwaysShowMessageActions}
+                                                 hasTouchInput={hasTouchInput}
                                                 copiedCode={copiedCode}
                                                 onCopyCode={handleCopyCode}
                                                 expandedTools={expandedTools}
@@ -1031,6 +1051,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                                 onRevert={handleRevert}
                                                 onFork={isUser ? handleFork : undefined}
                                                 errorMessage={assistantErrorText}
+                                                errorVariant={assistantErrorVariant}
                                                 userActionsMode={useExternalUserActionsRow ? 'external-content' : 'inline'}
                                                 stickyUserHeaderEnabled={stickyUserHeader}
                                             />
@@ -1043,8 +1064,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                                 isMessageCompleted={isMessageCompleted}
                                                 messageFinish={messageFinish}
                                                 syntaxTheme={syntaxTheme}
-                                                isMobile={isMobile}
-                                                hasTouchInput={hasTouchInput}
+                                                 isMobile={isMobile}
+                                                 alwaysShowActions={alwaysShowMessageActions}
+                                                 hasTouchInput={hasTouchInput}
                                                 copiedCode={copiedCode}
                                                 onCopyCode={handleCopyCode}
                                                 expandedTools={expandedTools}
@@ -1063,6 +1085,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                                 onRevert={handleRevert}
                                                 onFork={isUser ? handleFork : undefined}
                                                 errorMessage={assistantErrorText}
+                                                errorVariant={assistantErrorVariant}
                                                 userActionsMode="external-actions"
                                                 stickyUserHeaderEnabled={stickyUserHeader}
                                             />
@@ -1094,8 +1117,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 messageCompletedAt={messageCompletedAt ?? undefined}
                                 messageCreatedAt={messageCreatedAt ?? undefined}
                                 syntaxTheme={syntaxTheme}
-                                isMobile={isMobile}
-                                hasTouchInput={hasTouchInput}
+                                 isMobile={isMobile}
+                                 alwaysShowActions={alwaysShowMessageActions}
+                                 hasTouchInput={hasTouchInput}
                                 copiedCode={copiedCode}
                                 onCopyCode={handleCopyCode}
                                 expandedTools={effectiveExpandedTools}
@@ -1113,6 +1137,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 agentMention={agentMention}
                                 turnGroupingContext={turnGroupingContext}
                                 errorMessage={assistantErrorText}
+                                errorVariant={assistantErrorVariant}
                             />
 
                         </div>

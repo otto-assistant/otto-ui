@@ -26,7 +26,9 @@ export type MagicPromptId =
   | 'session.summary.visible'
   | 'session.summary.instructions'
   | 'session.review.visible'
-  | 'session.review.instructions';
+  | 'session.review.instructions'
+  | 'session.fusion.visible'
+  | 'session.fusion.instructions';
 
 export interface MagicPromptDefinition {
   id: MagicPromptId;
@@ -60,7 +62,9 @@ export const MAGIC_PROMPT_DEFINITIONS: readonly MagicPromptDefinition[] = [
     placeholders: [
       { key: 'selected_files', description: 'Bullet list of currently selected file paths.' },
     ],
-    template: `Return JSON with exactly this shape:
+    template: `Return exactly one JSON object and nothing else. Do not include prose, markdown, explanations, or code fences.
+
+The JSON object must have exactly this shape:
 {"subject": string, "highlights": string[]}
 
 Rules:
@@ -69,6 +73,8 @@ Rules:
 - no scope in subject
 - keep subject concise and user-facing
 - highlights: 0-3 concise user-facing points
+- use double quotes for all JSON strings
+- do not include trailing commas or comments
 
 Selected files:
 {{selected_files}}`,
@@ -92,13 +98,18 @@ Selected files:
       { key: 'changed_files', description: 'Bullet list of changed files in base...head.' },
       { key: 'additional_context_block', description: 'Optional Additional context block (already formatted).' },
     ],
-    template: `Return JSON with exactly this shape:
+    template: `Return exactly one JSON object and nothing else. Do not include prose, markdown outside JSON, explanations, or code fences.
+
+The JSON object must have exactly this shape:
 {"title": string, "body": string}
 
 Rules:
 - title: concise, outcome-first, conventional style
 - body: markdown with sections: ## Summary, ## Why, ## Testing
 - keep output concrete and user-facing
+- put all markdown inside the body string
+- use double quotes for all JSON strings and escape newlines as \\n
+- do not include trailing commas or comments
 
 Base branch: {{base_branch}}
 Head branch: {{head_branch}}
@@ -288,7 +299,7 @@ Do not implement changes until I confirm; end with: "Next actions: <1 sentence>"
       { key: 'operation_label', description: 'Operation label in lower-case (merge/rebase).' },
       { key: 'head_ref', description: 'Head reference for preserving intent.' },
     ],
-    template: 'Resolve {{operation_label}} conflicts, stage the resolved files, and complete the {{operation_label}}. Preserve the intent of changes from {{head_ref}}.',
+    template: 'Investigate the {{operation_label}} conflicts and concisely report the intended resolution strategy without making modifications. Wait for confirmation before resolving, staging, or continuing the {{operation_label}}. Preserve the intent of changes from {{head_ref}}.',
   },
   {
     id: 'git.conflict.resolve.instructions',
@@ -307,13 +318,16 @@ Do not implement changes until I confirm; end with: "Next actions: <1 sentence>"
 - Operation: {{operation}}
 - Head Info: {{head_info}}
 
-Required steps:
+Required steps before confirmation:
 1. Read each conflicted file to understand the conflict markers (<<<<<<< HEAD, =======, >>>>>>> ...)
-2. Edit each file to resolve conflicts by choosing the correct code or merging both changes appropriately
-3. Stage all resolved files with: git add <file>
-4. Complete the {{operation_label}} with: {{continue_cmd}}
+2. Inspect the relevant surrounding code and changes from both sides
+3. Report a concise per-file resolution strategy and any assumptions or tradeoffs
+4. Wait for explicit user confirmation before editing files, staging files, or running: {{continue_cmd}}
 
 Important:
+- Do not modify files before the user confirms the proposed strategy
+- Do not stage files before the user confirms the proposed strategy
+- Do not continue the {{operation_label}} before the user confirms the proposed strategy
 - Remove ALL conflict markers from files (<<<<<<< HEAD, =======, >>>>>>>)
 - Make sure the final code is syntactically correct and preserves intent from both sides
 - Do not leave any files with unresolved conflict markers
@@ -557,6 +571,26 @@ Output:
   - category: bug or rule violation
 
 Keep the review concise and practical.`,
+  },
+  {
+    id: 'session.fusion.visible',
+    title: 'Fusion Visible Prompt',
+    group: 'Session',
+    description: 'Visible user message for multi-run fusion sessions.',
+    template: 'Create the best combined answer from the multi-run results.',
+  },
+  {
+    id: 'session.fusion.instructions',
+    title: 'Fusion Instructions',
+    group: 'Session',
+    description: 'Hidden instructions used before multi-run source outputs in fusion sessions.',
+    template: `You are performing fusion over multiple model outputs from the same original task.
+
+Goal: produce the strongest possible final answer by combining complementary information, resolving conflicts, removing duplicates, and preserving useful nuance.
+
+Use the results below as source material. Do not mention that the inputs were hidden parts. If sources disagree, prefer the most specific, well-supported, and internally consistent answer.
+
+--- FUSION INPUTS START ---`,
   },
 ] as const;
 

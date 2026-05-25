@@ -1,5 +1,5 @@
 import * as React from 'react';
-import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { ScrollShadow } from '@/components/ui/ScrollShadow';
 import { Input } from '@/components/ui/input';
@@ -9,12 +9,13 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { toast } from '@/components/ui';
-import { RiAddLine, RiCloseLine, RiCalendarLine, RiArrowLeftSLine, RiArrowRightSLine, RiArrowDownSLine } from '@remixicon/react';
 import { ModelSelector } from '@/components/sections/agents/ModelSelector';
 import { AgentSelector } from '@/components/sections/commands/AgentSelector';
 import { isPrimaryMode } from '@/components/chat/mobileControlsUtils';
 import { CommandAutocomplete, type CommandAutocompleteHandle, type CommandInfo } from '@/components/chat/CommandAutocomplete';
 import { FileMentionAutocomplete, type FileMentionHandle } from '@/components/chat/FileMentionAutocomplete';
+import { SnippetAutocomplete, type SnippetAutocompleteHandle } from '@/components/chat/SnippetAutocomplete';
+import { Icon } from "@/components/icon/Icon";
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import type { ScheduledTask } from '@/lib/scheduledTasksApi';
@@ -618,6 +619,8 @@ export function ScheduledTaskEditorDialog(props: {
   const [mentionQuery, setMentionQuery] = React.useState('');
   const [showCommandAutocomplete, setShowCommandAutocomplete] = React.useState(false);
   const [commandQuery, setCommandQuery] = React.useState('');
+  const [showSnippetAutocomplete, setShowSnippetAutocomplete] = React.useState(false);
+  const [snippetQuery, setSnippetQuery] = React.useState('');
   const [calendarMonth, setCalendarMonth] = React.useState<Date>(() => {
     const initialDate = parseISODateToLocal(task?.schedule?.date || '') || new Date();
     return new Date(initialDate.getFullYear(), initialDate.getMonth(), 1);
@@ -626,6 +629,7 @@ export function ScheduledTaskEditorDialog(props: {
   const promptTextareaRef = React.useRef<HTMLTextAreaElement>(null);
   const mentionRef = React.useRef<FileMentionHandle>(null);
   const commandRef = React.useRef<CommandAutocompleteHandle>(null);
+  const snippetRef = React.useRef<SnippetAutocompleteHandle>(null);
   const localeUse24Hour = React.useMemo(() => getUses24Hour(locale), [locale]);
   const localeWeekStartsOn = React.useMemo(() => getWeekStartsOn(locale), [locale]);
   const use24Hour = React.useMemo(() => {
@@ -699,7 +703,6 @@ export function ScheduledTaskEditorDialog(props: {
       document.removeEventListener('mousedown', onPointerDown);
     };
   }, [isDatePickerOpen]);
-
 
   const variantOptions = React.useMemo(() => {
     const provider = providers.find((item) => item.id === draft.execution.providerID);
@@ -829,6 +832,7 @@ export function ScheduledTaskEditorDialog(props: {
         setCommandQuery(value.substring(1, commandEnd));
         setShowCommandAutocomplete(true);
         setShowFileMention(false);
+        setShowSnippetAutocomplete(false);
         return;
       }
     }
@@ -836,6 +840,21 @@ export function ScheduledTaskEditorDialog(props: {
     setShowCommandAutocomplete(false);
 
     const textBeforeCursor = value.substring(0, cursorPosition);
+    const lastHashSymbol = textBeforeCursor.lastIndexOf('#');
+    if (lastHashSymbol !== -1) {
+      const charBefore = lastHashSymbol > 0 ? textBeforeCursor[lastHashSymbol - 1] : null;
+      const textAfterHash = textBeforeCursor.substring(lastHashSymbol + 1);
+      const isWordBoundary = !charBefore || /\s/.test(charBefore);
+      if (isWordBoundary && !textAfterHash.includes(' ') && !textAfterHash.includes('\n')) {
+        setSnippetQuery(textAfterHash);
+        setShowSnippetAutocomplete(true);
+        setShowFileMention(false);
+        return;
+      }
+    }
+
+    setShowSnippetAutocomplete(false);
+
     const lastAtSymbol = textBeforeCursor.lastIndexOf('@');
     if (lastAtSymbol !== -1) {
       const charBefore = lastAtSymbol > 0 ? textBeforeCursor[lastAtSymbol - 1] : null;
@@ -922,6 +941,7 @@ export function ScheduledTaskEditorDialog(props: {
     setPromptValue(nextPrompt);
     setShowCommandAutocomplete(false);
     setCommandQuery('');
+    setShowSnippetAutocomplete(false);
 
     requestAnimationFrame(() => {
       const currentTextarea = promptTextareaRef.current;
@@ -933,6 +953,31 @@ export function ScheduledTaskEditorDialog(props: {
       updateAutocompleteState(nextPrompt, nextPrompt.length);
     });
   }, [setPromptValue, updateAutocompleteState]);
+
+  const handleSnippetSelect = React.useCallback((_snippet: unknown, trigger: string) => {
+    const promptValue = draft.execution.prompt;
+    const textarea = promptTextareaRef.current;
+    const cursorPosition = textarea?.selectionStart ?? promptValue.length;
+    const textBeforeCursor = promptValue.substring(0, cursorPosition);
+    const lastHashSymbol = textBeforeCursor.lastIndexOf('#');
+    const startIndex = lastHashSymbol !== -1 ? lastHashSymbol : cursorPosition;
+    const nextPrompt = `${promptValue.substring(0, startIndex)}#${trigger} ${promptValue.substring(cursorPosition)}`;
+    const nextCursor = startIndex + trigger.length + 2;
+
+    setPromptValue(nextPrompt);
+    setShowSnippetAutocomplete(false);
+    setSnippetQuery('');
+
+    requestAnimationFrame(() => {
+      const currentTextarea = promptTextareaRef.current;
+      if (currentTextarea) {
+        currentTextarea.selectionStart = nextCursor;
+        currentTextarea.selectionEnd = nextCursor;
+        currentTextarea.focus();
+      }
+      updateAutocompleteState(nextPrompt, nextCursor);
+    });
+  }, [draft.execution.prompt, setPromptValue, updateAutocompleteState]);
 
   const handlePromptKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (showCommandAutocomplete && commandRef.current) {
@@ -949,7 +994,14 @@ export function ScheduledTaskEditorDialog(props: {
         mentionRef.current.handleKeyDown(event.key);
       }
     }
-  }, [showCommandAutocomplete, showFileMention]);
+
+    if (showSnippetAutocomplete && snippetRef.current) {
+      if (event.key === 'Enter' || event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Escape' || event.key === 'Tab') {
+        event.preventDefault();
+        snippetRef.current.handleKeyDown(event.key);
+      }
+    }
+  }, [showCommandAutocomplete, showFileMention, showSnippetAutocomplete]);
 
   const handleSubmit = React.useCallback(async () => {
     const validationError = validateDraft(draft, t);
@@ -1066,10 +1118,10 @@ export function ScheduledTaskEditorDialog(props: {
                     onClick={() => setIsDatePickerOpen((prev) => !prev)}
                   >
                     <span className="inline-flex items-center gap-2">
-                      <RiCalendarLine className="h-4 w-4 text-muted-foreground" />
+                      <Icon name="calendar" className="h-4 w-4 text-muted-foreground" />
                       <span className="typography-ui-label text-foreground">{formatDateLabel(draft.schedule.onceDate, t('sessions.scheduledTasks.editor.date.placeholder'), locale)}</span>
                     </span>
-                    <RiArrowDownSLine className="h-4 w-4 text-muted-foreground" />
+                    <Icon name="arrow-down-s" className="h-4 w-4 text-muted-foreground" />
                   </button>
 
                   {isDatePickerOpen ? (
@@ -1082,7 +1134,7 @@ export function ScheduledTaskEditorDialog(props: {
                           aria-label={t('sessions.scheduledTasks.editor.date.previousMonth')}
                           disabled={isAtCurrentMonth}
                         >
-                          <RiArrowLeftSLine className="h-4 w-4" />
+                          <Icon name="arrow-left-s" className="h-4 w-4" />
                         </button>
                         <div className="typography-ui-label text-foreground">
                           {new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(calendarMonth)}
@@ -1093,7 +1145,7 @@ export function ScheduledTaskEditorDialog(props: {
                           onClick={() => setCalendarMonth((prev) => shiftMonth(prev, 1))}
                           aria-label={t('sessions.scheduledTasks.editor.date.nextMonth')}
                         >
-                          <RiArrowRightSLine className="h-4 w-4" />
+                          <Icon name="arrow-right-s" className="h-4 w-4" />
                         </button>
                       </div>
 
@@ -1210,19 +1262,22 @@ export function ScheduledTaskEditorDialog(props: {
                     {orderedWeekdays.map((weekday) => {
                       const checked = draft.schedule.weekdays.includes(weekday.value);
                       return (
-                        <button
+                        <div
                           key={weekday.value}
-                          type="button"
-                          onClick={() => toggleWeekday(weekday.value, !checked)}
                           className={[
-                            'inline-flex items-center gap-1.5 px-0.5 py-0.5 typography-meta',
+                            'group inline-flex items-center gap-1.5 px-0.5 py-0.5 typography-meta',
                             checked ? 'text-foreground' : 'text-muted-foreground',
-                            'hover:text-foreground',
                           ].join(' ')}
                         >
                           <Checkbox checked={checked} onChange={(next) => toggleWeekday(weekday.value, next)} ariaLabel={weekday.label} />
-                          <span>{weekday.label}</span>
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => toggleWeekday(weekday.value, !checked)}
+                            className="group-hover:text-foreground"
+                          >
+                            {weekday.label}
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -1252,7 +1307,7 @@ export function ScheduledTaskEditorDialog(props: {
                           onClick={() => removeTimeAt(index)}
                           aria-label={t('sessions.scheduledTasks.editor.times.removeAria')}
                         >
-                          <RiCloseLine className="h-4 w-4" />
+                          <Icon name="close" className="h-4 w-4" />
                         </Button>
                       ) : null}
                     </div>
@@ -1260,7 +1315,7 @@ export function ScheduledTaskEditorDialog(props: {
                 </div>
                 <div>
                   <Button type="button" size="sm" variant="outline" onClick={addTime}>
-                    <RiAddLine className="mr-1 h-4 w-4" /> {t('sessions.scheduledTasks.editor.times.add')}
+                    <Icon name="add" className="mr-1 h-4 w-4" /> {t('sessions.scheduledTasks.editor.times.add')}
                   </Button>
                 </div>
               </div>
@@ -1405,6 +1460,22 @@ export function ScheduledTaskEditorDialog(props: {
                   }}
                 />
               ) : null}
+
+              {showSnippetAutocomplete ? (
+                <SnippetAutocomplete
+                  ref={snippetRef}
+                  searchQuery={snippetQuery}
+                  onSnippetSelect={handleSnippetSelect}
+                  onClose={() => setShowSnippetAutocomplete(false)}
+                  style={{
+                    left: 0,
+                    top: 'auto',
+                    bottom: 'calc(100% + 6px)',
+                    marginBottom: 0,
+                    maxWidth: '100%',
+                  }}
+                />
+              ) : null}
             </div>
           </div>
     </div>
@@ -1456,7 +1527,7 @@ export function ScheduledTaskEditorDialog(props: {
   }
 
   return (
-    <DialogPrimitive.Root
+    <Dialog
       open={open}
       onOpenChange={(next) => {
         if (!next && hasOpenFloatingMenu()) {
@@ -1465,55 +1536,35 @@ export function ScheduledTaskEditorDialog(props: {
         onOpenChange(next);
       }}
     >
-      <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 dark:bg-black/75" />
-        <DialogPrimitive.Content
-          aria-describedby={descriptionId}
-          className={cn(
-            'fixed z-50 top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%]',
-            'w-[90vw] max-w-[720px] h-[680px] max-h-[85vh]',
-            'flex flex-col rounded-xl border shadow-none overflow-hidden',
-            'bg-background'
-          )}
+      <DialogContent
+        aria-describedby={descriptionId}
+        className="!max-w-[720px] w-[90vw] h-[680px] max-h-[85vh] gap-0 p-0 overflow-hidden"
+      >
+        <DialogDescription id={descriptionId} className="sr-only">
+          {description}
+        </DialogDescription>
+
+        <header className="shrink-0 px-4 sm:px-6 pt-5 pb-3">
+          <div className="mx-auto w-full max-w-2xl">
+            <DialogTitle className="typography-ui-label font-medium text-foreground">
+              {title}
+            </DialogTitle>
+            <p className="typography-meta mt-0.5 text-muted-foreground">{description}</p>
+          </div>
+        </header>
+
+        <ScrollShadow
+          className="flex-1 min-h-0 overflow-auto [scrollbar-gutter:stable_both-edges]"
+          size={64}
+          hideTopShadow
         >
-          <div className="absolute right-0.5 top-0.5 z-50">
-            <button
-              type="button"
-              onClick={() => onOpenChange(false)}
-              aria-label={t('sessions.scheduledTasks.editor.actions.closeAria')}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md p-0.5 text-muted-foreground hover:bg-interactive-hover/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-            >
-              <RiCloseLine className="h-5 w-5" />
-            </button>
-          </div>
-          <DialogPrimitive.Description id={descriptionId} className="sr-only">
-            {description}
-          </DialogPrimitive.Description>
+          <div className="mx-auto w-full max-w-2xl px-4 sm:px-6 pb-5">{formBody}</div>
+        </ScrollShadow>
 
-          <header className="shrink-0 px-4 sm:px-6 pt-5 pb-3">
-            <div className="mx-auto w-full max-w-2xl">
-              <DialogPrimitive.Title className="typography-ui-label font-medium text-foreground">
-                {title}
-              </DialogPrimitive.Title>
-              <p className="typography-meta mt-0.5 text-muted-foreground">
-                {description}
-              </p>
-            </div>
-          </header>
-
-          <ScrollShadow className="flex-1 min-h-0 overflow-auto [scrollbar-gutter:stable_both-edges]" size={64} hideTopShadow>
-            <div className="mx-auto w-full max-w-2xl px-4 sm:px-6 pb-5">
-              {formBody}
-            </div>
-          </ScrollShadow>
-
-          <div className="shrink-0 px-4 sm:px-6 py-3">
-            <div className="mx-auto w-full max-w-2xl">
-              {footerRow}
-            </div>
-          </div>
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+        <div className="shrink-0 px-4 sm:px-6 py-3">
+          <div className="mx-auto w-full max-w-2xl">{footerRow}</div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -8,6 +8,7 @@ import {
   type VSCodeThemeKind,
   type VSCodeThemePayload,
 } from '@openchamber/ui/lib/theme/vscode/adapter';
+import type { VSCodeActiveEditorFile } from '@/sync/input-store';
 
 type ConnectionStatus = 'connecting' | 'connected' | 'error' | 'disconnected';
 type PanelType = 'chat' | 'agentManager';
@@ -23,6 +24,9 @@ declare global {
       theme: string;
       connectionStatus: string;
       cliAvailable?: boolean;
+      extensionVersion?: string;
+      platform?: string;
+      arch?: string;
       panelType?: PanelType;
       viewMode?: 'sidebar' | 'editor';
       initialSessionId?: string | null;
@@ -32,6 +36,7 @@ declare global {
     __OPENCHAMBER_CONNECTION__?: { status: ConnectionStatus; error?: string; cliAvailable?: boolean };
     __OPENCHAMBER_HOME__?: string;
     __OPENCHAMBER_PANEL_TYPE__?: PanelType;
+    __OPENCHAMBER_VSCODE_WINDOW_FOCUSED__?: boolean;
   }
 }
 
@@ -56,7 +61,7 @@ const bootstrapConnectionStatus = () => {
 
 bootstrapConnectionStatus();
 
-// Expose panel type globally for App.tsx to conditionally render
+// Expose panel type globally for the VS Code app root to conditionally render.
 window.__OPENCHAMBER_PANEL_TYPE__ = (window.__VSCODE_CONFIG__?.panelType as PanelType) || 'chat';
 
 const handleConnectionMessage = (event: MessageEvent) => {
@@ -322,10 +327,14 @@ const decodeBase64 = (value: string): Uint8Array => {
 const isNullBodyStatus = (status: number): boolean => status === 204 || status === 205 || status === 304;
 
 const buildProxiedResponse = (
-  proxied: { status: number; headers: Record<string, string>; bodyBase64?: string }
+  proxied: { status: number; headers: Record<string, string>; bodyBase64?: string; bodyText?: string }
 ): Response => {
   if (isNullBodyStatus(proxied.status)) {
     return new Response(null, { status: proxied.status, headers: proxied.headers });
+  }
+
+  if (typeof proxied.bodyText === 'string') {
+    return new Response(proxied.bodyText, { status: proxied.status, headers: proxied.headers });
   }
 
   const body = proxied.bodyBase64 ? decodeBase64(proxied.bodyBase64) : new Uint8Array();
@@ -431,6 +440,19 @@ const handleLocalApiRequest = async (url: URL, init?: RequestInit) => {
     });
   }
 
+  if (normalizedPathname === '/api/notifications/auto-accept' && method === 'POST') {
+    const bodyText = await extractBodyText(url, init, method);
+    const body = bodyText
+      ? JSON.parse(bodyText) as { sessionId?: unknown; enabled?: unknown }
+      : {};
+    const result = await sendBridgeMessage<{ success?: boolean }>('api:notifications/auto-accept', body)
+      .catch(() => ({ success: false }));
+    return new Response(JSON.stringify(result), {
+      status: result?.success === false ? 400 : 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   if (/^\/api\/sessions\/[^/]+\/message-sent$/.test(normalizedPathname) && method === 'POST') {
     const sessionId = normalizedPathname.split('/')[3] || '';
     return new Response(
@@ -523,7 +545,7 @@ const handleLocalApiRequest = async (url: URL, init?: RequestInit) => {
     });
   }
 
-  if ((pathname === '/api/tts/speak' || pathname === '/api/tts/say/speak' || pathname === '/api/text/summarize') && method === 'POST') {
+  if ((pathname === '/api/tts/speak' || pathname === '/api/tts/say/speak') && method === 'POST') {
     return new Response(JSON.stringify({ error: 'TTS endpoints are not available in VS Code runtime' }), {
       status: 501,
       headers: { 'Content-Type': 'application/json' },
@@ -843,6 +865,18 @@ const handleLocalApiRequest = async (url: URL, init?: RequestInit) => {
     return new Response(JSON.stringify(updated), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
 
+  if (normalizedPathname === '/api/behavior/agents-md') {
+    if (method === 'GET') {
+      const data = await sendBridgeMessage('api:behavior/agents-md:get');
+      return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (method === 'PUT') {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const data = await sendBridgeMessage('api:behavior/agents-md:save', body);
+      return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+  }
+
   if (pathname === '/api/magic-prompts') {
     if (method === 'GET') {
       const data = await sendBridgeMessage('api:magic-prompts:get');
@@ -907,8 +941,8 @@ const handleLocalApiRequest = async (url: URL, init?: RequestInit) => {
       const currentVersion = url.searchParams.get('currentVersion') || undefined;
       const instanceMode = url.searchParams.get('instanceMode') || 'local';
       const deviceClass = url.searchParams.get('deviceClass') || 'desktop';
-      const platform = url.searchParams.get('platform') || undefined;
-      const arch = url.searchParams.get('arch') || undefined;
+      const platform = url.searchParams.get('platform') || window.__VSCODE_CONFIG__?.platform || undefined;
+      const arch = url.searchParams.get('arch') || window.__VSCODE_CONFIG__?.arch || undefined;
       const reportUsageRaw = (url.searchParams.get('reportUsage') || 'true').toLowerCase();
       const reportUsage = !(reportUsageRaw === 'false' || reportUsageRaw === '0' || reportUsageRaw === 'no');
       const data = await sendBridgeMessage('api:openchamber:update-check', {
@@ -1129,12 +1163,21 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   return originalFetch(input as RequestInfo, init);
 };
 
-// Listen for addToContext command from extension
-onCommand('addToContext', (payload) => {
-  const { text } = payload as { text: string };
+onCommand('addContextSelection', (payload) => {
+  const { filePath, filename, text } = payload as { filePath?: unknown; filename?: unknown; text?: unknown };
+  if (typeof filePath !== 'string' || typeof filename !== 'string' || typeof text !== 'string') {
+    return;
+  }
+
+  const trimmedPath = filePath.trim();
+  const trimmedFilename = filename.trim();
+  if (!trimmedPath || !trimmedFilename || !text.trim()) {
+    return;
+  }
 
   import('@/sync/input-store').then(({ useInputStore }) => {
-    useInputStore.getState().setPendingInputText(text, 'append');
+    const file = new File([new Blob([text], { type: 'text/plain' })], trimmedFilename, { type: 'text/plain' });
+    void useInputStore.getState().addVSCodeSelectionAttachment(trimmedPath, file);
   });
 });
 
@@ -1158,6 +1201,33 @@ onCommand('addFileMentions', (payload) => {
   });
 });
 
+onCommand('addFileAttachments', (payload) => {
+  const rawFiles = Array.isArray((payload as { files?: unknown[] })?.files)
+    ? (payload as { files: unknown[] }).files
+    : [];
+
+  const files = rawFiles
+    .map((entry) => {
+      const record = entry as { filePath?: unknown; fileName?: unknown; fileSize?: unknown };
+      const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
+      const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+      const fileSize = typeof record.fileSize === 'number' && Number.isFinite(record.fileSize) ? record.fileSize : null;
+      return filePath && fileName ? { filePath, fileName, fileSize } : null;
+    })
+    .filter((entry): entry is { filePath: string; fileName: string; fileSize: number | null } => entry !== null);
+
+  if (files.length === 0) {
+    return;
+  }
+
+  import('@/sync/input-store').then(({ useInputStore }) => {
+    const inputStore = useInputStore.getState();
+    for (const file of files) {
+      inputStore.addVSCodeFileAttachment(file.filePath, file.fileName, file.fileSize);
+    }
+  });
+});
+
 // Listen for createSessionWithPrompt command from extension (Explain, Improve Code)
 onCommand('createSessionWithPrompt', (payload) => {
   const { prompt } = payload as { prompt: string };
@@ -1170,13 +1240,14 @@ onCommand('createSessionWithPrompt', (payload) => {
     const sessionStore = useSessionUIStore.getState();
     const configStore = useConfigStore.getState();
 
-    // Open a new session draft first
-    sessionStore.openNewSessionDraft();
-
     // Get current provider/model/agent configuration
     const { currentProviderId, currentModelId, currentAgentName } = configStore;
 
     if (currentProviderId && currentModelId) {
+      if (!sessionStore.currentSessionId) {
+        sessionStore.openNewSessionDraft();
+      }
+
       // Send the message - this will create the session from the draft and send
       sessionStore.sendMessage(
         prompt,
@@ -1212,6 +1283,376 @@ onCommand('showSettings', () => {
   window.dispatchEvent(new CustomEvent('openchamber:navigate', { detail: { view: 'settings' } }));
 });
 
+const getNotificationClaimKey = (payload: { title?: unknown; body?: unknown; sessionId?: unknown; tag?: unknown } | undefined): string => {
+  const tag = typeof payload?.tag === 'string' ? payload.tag.trim() : '';
+  if (tag) return tag;
+  return [payload?.sessionId, payload?.title, payload?.body]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim())
+    .join('|');
+};
+
+const claimOpenChamberNotification = async (payload: { title?: unknown; body?: unknown; sessionId?: unknown; tag?: unknown } | undefined): Promise<boolean> => {
+  const key = getNotificationClaimKey(payload);
+  if (!key) return true;
+  try {
+    const result = await sendBridgeMessage<{ claimed?: boolean }>('api:notifications:claim', { key });
+    return result?.claimed === true;
+  } catch {
+    return true;
+  }
+};
+
+const showOpenChamberNotification = (payload: { title?: unknown; body?: unknown; sessionId?: unknown; tag?: unknown; requireHidden?: unknown } | undefined) => {
+  if (typeof Notification === 'undefined') {
+    return false;
+  }
+
+  const show = async () => {
+    const isVSCodeWindowFocused = window.__OPENCHAMBER_VSCODE_WINDOW_FOCUSED__ ?? document.hasFocus();
+    if (payload?.requireHidden === true && isVSCodeWindowFocused) {
+      return false;
+    }
+    if (Notification.permission !== 'granted') {
+      return false;
+    }
+
+    const title = typeof payload?.title === 'string' && payload.title.trim().length > 0
+      ? payload.title.trim()
+      : 'OpenChamber';
+    const body = typeof payload?.body === 'string' ? payload.body : '';
+    const sessionId = typeof payload?.sessionId === 'string' && payload.sessionId.trim().length > 0
+      ? payload.sessionId.trim()
+      : '';
+    if (!await claimOpenChamberNotification({ ...payload, title, body, sessionId })) {
+      return false;
+    }
+
+    const notification = new Notification(title, { body });
+    notification.onclick = () => {
+      if (sessionId) {
+        import('@/sync/session-ui-store').then(({ useSessionUIStore }) => {
+          useSessionUIStore.getState().setCurrentSession(sessionId);
+        });
+      }
+      window.dispatchEvent(new CustomEvent('openchamber:navigate', { detail: { view: 'chat' } }));
+    };
+    return true;
+  };
+
+  if (Notification.permission === 'default') {
+    void Notification.requestPermission().then((permission) => {
+      if (permission === 'granted') {
+        void show();
+      }
+    });
+    return true;
+  }
+
+  void show();
+  return true;
+};
+
+onCommand('showNotification', (payload) => {
+  showOpenChamberNotification(payload as { title?: unknown; body?: unknown; sessionId?: unknown; requireHidden?: unknown } | undefined);
+});
+
+onCommand('windowFocusChanged', (payload) => {
+  if (typeof payload === 'object' && payload && typeof (payload as { focused?: unknown }).focused === 'boolean') {
+    window.__OPENCHAMBER_VSCODE_WINDOW_FOCUSED__ = (payload as { focused: boolean }).focused;
+  }
+});
+
+const readyNotificationCooldowns = new Map<string, number>();
+const READY_NOTIFICATION_COOLDOWN_MS = 5000;
+const DEFAULT_NOTIFICATION_MESSAGE_MAX_LENGTH = 250;
+let notificationSettingsSyncPromise: Promise<void> | null = null;
+
+const getPayloadString = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
+
+const normalizeNotificationPlainText = (text: string): string => text
+  .replace(/```[\s\S]*?```/g, ' ')
+  .replace(/`([^`]*)`/g, '$1')
+  .replace(/^[\t ]*[-*+]\s+/gm, '')
+  .replace(/^#{1,6}\s+/gm, '')
+  .replace(/\*\*(.*?)\*\*/g, '$1')
+  .replace(/__(.*?)__/g, '$1')
+  .replace(/\*(.*?)\*/g, '$1')
+  .replace(/_(.*?)_/g, '$1')
+  .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
+  .replace(/\s*\n\s*/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const truncateNotificationText = (text: string, maxLength: number): string => (
+  text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`
+);
+
+const resolvePositiveNotificationNumber = (value: unknown, fallback: number): number => (
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+);
+
+const ensureNotificationSettingsSynced = async () => {
+  if (!notificationSettingsSyncPromise) {
+    notificationSettingsSyncPromise = import('@/lib/persistence')
+      .then(({ syncDesktopSettings }) => syncDesktopSettings())
+      .catch((error) => {
+        console.warn('[OpenChamber] Failed to sync notification settings:', error);
+      });
+  }
+  await notificationSettingsSyncPromise;
+};
+
+const prepareNotificationLastMessage = (
+  message: string,
+  settings: { maxLastMessageLength: number },
+): string => {
+  const maxLength = resolvePositiveNotificationNumber(settings.maxLastMessageLength, DEFAULT_NOTIFICATION_MESSAGE_MAX_LENGTH);
+  return truncateNotificationText(normalizeNotificationPlainText(message), maxLength);
+};
+
+const resolveTemplate = (template: string, variables: Record<string, string>): string => (
+  template.replace(/\{(\w+)\}/g, (_match, key: string) => variables[key] ?? '')
+);
+
+const shouldApplyTemplateMessage = (template: string, resolved: string, variables: Record<string, string>) => {
+  if (!resolved) return false;
+  if (template.includes('{last_message}')) {
+    return variables.last_message.trim().length > 0;
+  }
+  return true;
+};
+
+const formatNotificationLabel = (raw: string, fallback: string): string => {
+  if (!raw) return fallback;
+  return raw.split(/[-_\s]+/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+};
+
+const extractNotificationTextFromParts = (parts: unknown): string => {
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .map((part) => {
+      if (!part || typeof part !== 'object') return '';
+      const entry = part as { type?: unknown; text?: unknown; content?: unknown };
+      if (entry.type === 'text' || typeof entry.text === 'string' || typeof entry.content === 'string') {
+        return typeof entry.text === 'string' ? entry.text : typeof entry.content === 'string' ? entry.content : '';
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+};
+
+const extractNotificationLastMessage = (payload: Record<string, unknown>): string => {
+  const properties = (payload.properties ?? payload) as Record<string, unknown>;
+  const info = properties.info as Record<string, unknown> | undefined;
+  if (!info) return '';
+  return extractNotificationTextFromParts(info.parts ?? properties.parts) || extractNotificationTextFromParts(info.content);
+};
+
+const fetchLastAssistantMessageText = async (sessionId: string, messageId?: string): Promise<string> => {
+  if (!sessionId) return '';
+
+  try {
+    const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/message?limit=5`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return '';
+
+    const messages = await response.json().catch(() => null) as unknown;
+    if (!Array.isArray(messages)) return '';
+
+    let target = messageId
+      ? messages.find((message) => {
+          const info = message && typeof message === 'object'
+            ? (message as { info?: { id?: unknown; role?: unknown } }).info
+            : undefined;
+          return info?.id === messageId && info?.role === 'assistant';
+        })
+      : null;
+
+    if (!target) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        const info = message && typeof message === 'object'
+          ? (message as { info?: { role?: unknown; finish?: unknown } }).info
+          : undefined;
+        if (info?.role === 'assistant' && info?.finish === 'stop') {
+          target = message;
+          break;
+        }
+      }
+    }
+
+    if (!target || typeof target !== 'object') return '';
+    const message = target as { parts?: unknown; content?: unknown; info?: { parts?: unknown; content?: unknown } };
+    return extractNotificationTextFromParts(message.parts ?? message.info?.parts)
+      || extractNotificationTextFromParts(message.content ?? message.info?.content);
+  } catch {
+    return '';
+  }
+};
+
+const getNotificationTemplate = (
+  settings: { notificationTemplates?: Record<string, { title?: string; message?: string }> },
+  key: 'completion' | 'error' | 'question',
+  fallback: { title: string; message: string },
+) => {
+  const candidate = settings.notificationTemplates?.[key];
+  return {
+    title: typeof candidate?.title === 'string' ? candidate.title : fallback.title,
+    message: typeof candidate?.message === 'string' ? candidate.message : fallback.message,
+  };
+};
+
+const buildNotificationVariables = (payload: Record<string, unknown>, sessionId: string, lastMessage: string): Record<string, string> => {
+  const properties = (payload.properties ?? payload) as Record<string, unknown>;
+  const info = properties.info as Record<string, unknown> | undefined;
+  const pathInfo = info?.path as { root?: unknown; cwd?: unknown } | undefined;
+  const worktree = getPayloadString(pathInfo?.root ?? pathInfo?.cwd);
+  const modelId = getPayloadString(info?.modelID ?? info?.modelId ?? (info?.model as { modelID?: unknown } | undefined)?.modelID);
+  return {
+    project_name: worktree.split(/[\\/]/).filter(Boolean).pop() || '',
+    worktree,
+    branch: '',
+    session_name: getPayloadString(properties.sessionTitle ?? (properties.session as { title?: unknown } | undefined)?.title ?? info?.sessionTitle),
+    agent_name: formatNotificationLabel(getPayloadString(info?.agent ?? info?.mode), 'Agent'),
+    model_name: formatNotificationLabel(modelId, 'Assistant'),
+    last_message: lastMessage,
+    session_id: sessionId,
+  };
+};
+
+const getNotificationSessionId = (payload: Record<string, unknown>): string => {
+  const properties = (payload.properties ?? payload) as Record<string, unknown>;
+  const info = properties.info as Record<string, unknown> | undefined;
+  return getPayloadString(info?.sessionID ?? info?.sessionId ?? properties.sessionID ?? properties.sessionId ?? properties.session);
+};
+
+window.addEventListener('openchamber:vscode-notification-event', (event) => {
+  const detail = (event as CustomEvent<{ payload?: unknown }>).detail;
+  const payload = detail?.payload;
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const type = getPayloadString(record.type);
+  const properties = (record.properties ?? record) as Record<string, unknown>;
+  const info = properties.info as Record<string, unknown> | undefined;
+  const sessionId = getNotificationSessionId(record);
+  if (!sessionId) {
+    return;
+  }
+
+  Promise.all([
+    import('@/stores/useUIStore'),
+    import('@/stores/permissionStore'),
+  ]).then(async ([{ useUIStore }, { usePermissionStore }]) => {
+    const localSettings = useUIStore.getState();
+    await ensureNotificationSettingsSynced();
+    const syncedSettings = useUIStore.getState();
+    const settings = {
+      ...syncedSettings,
+      nativeNotificationsEnabled: localSettings.nativeNotificationsEnabled,
+      notificationMode: localSettings.notificationMode,
+      notifyOnCompletion: localSettings.notifyOnCompletion,
+      notifyOnError: localSettings.notifyOnError,
+      notifyOnQuestion: localSettings.notifyOnQuestion,
+      notificationTemplates: localSettings.notificationTemplates,
+      summarizeLastMessage: localSettings.summarizeLastMessage,
+      summaryThreshold: localSettings.summaryThreshold,
+      summaryLength: localSettings.summaryLength,
+      maxLastMessageLength: localSettings.maxLastMessageLength,
+    };
+    if (!settings.nativeNotificationsEnabled) {
+      return;
+    }
+    const requireHidden = settings.notificationMode !== 'always';
+    const messageId = getPayloadString(info?.id);
+    const rawLastMessage = extractNotificationLastMessage(record) || await fetchLastAssistantMessageText(sessionId, messageId);
+    const lastMessage = prepareNotificationLastMessage(
+      rawLastMessage,
+      settings,
+    );
+    const variables = buildNotificationVariables(record, sessionId, lastMessage);
+
+    if (type === 'message.updated' && getPayloadString(info?.role) === 'assistant') {
+      const finish = getPayloadString(info?.finish);
+      if (finish === 'stop') {
+        if (!settings.notifyOnCompletion) return;
+        const now = Date.now();
+        const lastAt = readyNotificationCooldowns.get(sessionId) ?? 0;
+        if (now - lastAt < READY_NOTIFICATION_COOLDOWN_MS) return;
+        readyNotificationCooldowns.set(sessionId, now);
+        const template = getNotificationTemplate(settings, 'completion', { title: '{agent_name} is ready', message: '{model_name} completed the task' });
+        const title = resolveTemplate(template.title, variables) || 'Agent is ready';
+        const body = resolveTemplate(template.message, variables);
+        showOpenChamberNotification({
+          title,
+          body: shouldApplyTemplateMessage(template.message, body, variables) ? body : `${variables.model_name} completed the task`,
+          sessionId,
+          requireHidden,
+        });
+        return;
+      }
+
+      if (finish === 'error') {
+        if (!settings.notifyOnError) return;
+        const template = getNotificationTemplate(settings, 'error', { title: 'Tool error', message: '{last_message}' });
+        const title = resolveTemplate(template.title, variables) || 'Tool error';
+        const body = resolveTemplate(template.message, variables);
+        showOpenChamberNotification({
+          title,
+          body: shouldApplyTemplateMessage(template.message, body, variables) ? body : 'An error occurred',
+          sessionId,
+          requireHidden,
+        });
+      }
+    }
+
+    if (type === 'question.asked') {
+      if (!settings.notifyOnQuestion) return;
+      const questions = Array.isArray(properties.questions) ? properties.questions : [];
+      const firstQuestion = questions[0] as Record<string, unknown> | undefined;
+      const header = getPayloadString(firstQuestion?.header);
+      const questionText = getPayloadString(firstQuestion?.question);
+      const questionVariables = { ...variables, last_message: questionText || header };
+      const template = getNotificationTemplate(settings, 'question', { title: 'Input needed', message: '{last_message}' });
+      const title = resolveTemplate(template.title, questionVariables) || (/plan\s*mode/i.test(header) ? 'Switch to plan mode' : /build\s*agent/i.test(header) ? 'Switch to build mode' : header || 'Input needed');
+      const body = resolveTemplate(template.message, questionVariables);
+      showOpenChamberNotification({
+        title,
+        body: shouldApplyTemplateMessage(template.message, body, questionVariables) ? body : questionText || 'Agent is waiting for your response',
+        sessionId,
+        requireHidden,
+      });
+      return;
+    }
+
+    if (type === 'permission.asked') {
+      if (!settings.notifyOnQuestion) return;
+      if (usePermissionStore.getState().isSessionAutoAccepting(sessionId)) return;
+      const permission = getPayloadString(properties.permission);
+      const sessionTitle = getPayloadString(properties.sessionTitle);
+      const fallbackMessage = sessionTitle || permission || 'Agent is waiting for your approval';
+      const permissionVariables = { ...variables, last_message: fallbackMessage };
+      const template = getNotificationTemplate(settings, 'question', { title: 'Permission required', message: '{last_message}' });
+      const title = resolveTemplate(template.title, permissionVariables) || 'Permission required';
+      const body = resolveTemplate(template.message, permissionVariables);
+      showOpenChamberNotification({
+        title,
+        body: shouldApplyTemplateMessage(template.message, body, permissionVariables) ? body : fallbackMessage,
+        sessionId,
+        requireHidden,
+      });
+    }
+  });
+});
+
 // Listen for settings sync command from extension (broadcast to all VS Code webviews)
 onCommand('settingsSynced', () => {
   import('@openchamber/ui/lib/persistence').then(({ syncDesktopSettings }) => {
@@ -1219,8 +1660,16 @@ onCommand('settingsSynced', () => {
   });
 });
 
-import('@/main')
-  .then(async () => {
+// Listen for active editor file changes from the extension
+onCommand('activeEditorFile', (payload) => {
+  import('@/sync/input-store').then(({ useInputStore }) => {
+    useInputStore.getState().setActiveEditorFile((payload as VSCodeActiveEditorFile | null) ?? null);
+  });
+});
+
+import('@openchamber/ui/apps/renderVSCodeApp')
+  .then(async ({ renderVSCodeApp }) => {
+    renderVSCodeApp(window.__OPENCHAMBER_RUNTIME_APIS__ ?? createVSCodeAPIs());
     await waitForUiMount();
     uiMounted = true;
     maybeHideLoadingOverlay();

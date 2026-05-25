@@ -7,6 +7,7 @@ import { setDirectoryShowHidden } from '@/lib/directoryShowHidden';
 import { setFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
 import { loadAppearancePreferences, applyAppearancePreferences } from '@/lib/appearancePersistence';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
+import { normalizeMobileKeyboardMode, setStoredMobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 
 const persistToLocalStorage = (settings: DesktopSettings) => {
   if (typeof window === 'undefined') {
@@ -92,6 +93,37 @@ const persistToLocalStorage = (settings: DesktopSettings) => {
       localStorage.removeItem('openchamber.pwaName');
     }
   }
+  if (typeof settings.mobileKeyboardMode === 'string') {
+    setStoredMobileKeyboardMode(settings.mobileKeyboardMode);
+  }
+  if (settings.sttProvider === 'browser' || settings.sttProvider === 'server') {
+    localStorage.setItem('sttProvider', settings.sttProvider);
+  }
+  if (typeof settings.sttServerUrl === 'string') {
+    localStorage.setItem('sttServerUrl', settings.sttServerUrl);
+  }
+  if (typeof settings.sttModel === 'string') {
+    localStorage.setItem('sttModel', settings.sttModel);
+  }
+  if (typeof settings.sttLanguage === 'string') {
+    localStorage.setItem('sttLanguage', settings.sttLanguage);
+  }
+  if (typeof settings.sttSilenceThresholdDb === 'number' && Number.isFinite(settings.sttSilenceThresholdDb)) {
+    localStorage.setItem('sttSilenceThresholdDb', String(settings.sttSilenceThresholdDb));
+  }
+  if (typeof settings.sttSilenceHoldMs === 'number' && Number.isFinite(settings.sttSilenceHoldMs)) {
+    localStorage.setItem('sttSilenceHoldMs', String(settings.sttSilenceHoldMs));
+  }
+  if (typeof settings.sttTranscribeOnStop === 'boolean') {
+    localStorage.setItem('sttTranscribeOnStop', String(settings.sttTranscribeOnStop));
+  }
+};
+
+const dispatchSettingsSynced = (settings: DesktopSettings): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent<DesktopSettings>('openchamber:settings-synced', { detail: settings }));
 };
 
 type PersistApi = {
@@ -312,10 +344,16 @@ const applyDesktopUiPreferences = (settings: DesktopSettings) => {
   const configStore = typeof window !== 'undefined'
     ? window.__zustand_config_store__?.getState?.() ?? null
     : null;
+  const configStoreApi = typeof window !== 'undefined'
+    ? window.__zustand_config_store__ ?? null
+    : null;
   const queueStore = useMessageQueueStore.getState();
 
   if (typeof settings.showReasoningTraces === 'boolean' && settings.showReasoningTraces !== store.showReasoningTraces) {
     store.setShowReasoningTraces(settings.showReasoningTraces);
+  }
+  if (typeof settings.collapsibleThinkingBlocks === 'boolean' && settings.collapsibleThinkingBlocks !== store.collapsibleThinkingBlocks) {
+    store.setCollapsibleThinkingBlocks(settings.collapsibleThinkingBlocks);
   }
   if (typeof settings.autoDeleteEnabled === 'boolean' && settings.autoDeleteEnabled !== store.autoDeleteEnabled) {
     store.setAutoDeleteEnabled(settings.autoDeleteEnabled);
@@ -431,6 +469,9 @@ const applyDesktopUiPreferences = (settings: DesktopSettings) => {
   if (typeof settings.stickyUserHeader === 'boolean' && settings.stickyUserHeader !== store.stickyUserHeader) {
     store.setStickyUserHeader(settings.stickyUserHeader);
   }
+  if (typeof settings.wideChatLayoutEnabled === 'boolean' && settings.wideChatLayoutEnabled !== store.wideChatLayoutEnabled) {
+    store.setWideChatLayoutEnabled(settings.wideChatLayoutEnabled);
+  }
   if (
     typeof settings.showSplitAssistantMessageActions === 'boolean'
     && settings.showSplitAssistantMessageActions !== store.showSplitAssistantMessageActions
@@ -460,6 +501,39 @@ const applyDesktopUiPreferences = (settings: DesktopSettings) => {
   }
   if (typeof settings.inputBarOffset === 'number' && Number.isFinite(settings.inputBarOffset) && settings.inputBarOffset !== store.inputBarOffset) {
     store.setInputBarOffset(settings.inputBarOffset);
+  }
+  if (typeof settings.mobileKeyboardMode === 'string') {
+    const mode = normalizeMobileKeyboardMode(settings.mobileKeyboardMode, store.mobileKeyboardMode);
+    if (mode !== store.mobileKeyboardMode) {
+      store.setMobileKeyboardMode(mode);
+    }
+  }
+  if (configStoreApi && configStore) {
+    const nextConfigState: Partial<typeof configStore> = {};
+    if ((settings.sttProvider === 'browser' || settings.sttProvider === 'server') && settings.sttProvider !== configStore.sttProvider) {
+      nextConfigState.sttProvider = settings.sttProvider;
+    }
+    if (typeof settings.sttServerUrl === 'string' && settings.sttServerUrl !== configStore.sttServerUrl) {
+      nextConfigState.sttServerUrl = settings.sttServerUrl;
+    }
+    if (typeof settings.sttModel === 'string' && settings.sttModel !== configStore.sttModel) {
+      nextConfigState.sttModel = settings.sttModel;
+    }
+    if (typeof settings.sttLanguage === 'string' && settings.sttLanguage !== configStore.sttLanguage) {
+      nextConfigState.sttLanguage = settings.sttLanguage;
+    }
+    if (typeof settings.sttSilenceThresholdDb === 'number' && Number.isFinite(settings.sttSilenceThresholdDb) && settings.sttSilenceThresholdDb !== configStore.sttSilenceThresholdDb) {
+      nextConfigState.sttSilenceThresholdDb = settings.sttSilenceThresholdDb;
+    }
+    if (typeof settings.sttSilenceHoldMs === 'number' && Number.isFinite(settings.sttSilenceHoldMs) && settings.sttSilenceHoldMs !== configStore.sttSilenceHoldMs) {
+      nextConfigState.sttSilenceHoldMs = settings.sttSilenceHoldMs;
+    }
+    if (typeof settings.sttTranscribeOnStop === 'boolean' && settings.sttTranscribeOnStop !== configStore.sttTranscribeOnStop) {
+      nextConfigState.sttTranscribeOnStop = settings.sttTranscribeOnStop;
+    }
+    if (Object.keys(nextConfigState).length > 0) {
+      configStoreApi.setState(nextConfigState);
+    }
   }
 
   if (Array.isArray(settings.favoriteModels)) {
@@ -574,6 +648,9 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   }
   if (typeof candidate.showReasoningTraces === 'boolean') {
     result.showReasoningTraces = candidate.showReasoningTraces;
+  }
+  if (typeof candidate.collapsibleThinkingBlocks === 'boolean') {
+    result.collapsibleThinkingBlocks = candidate.collapsibleThinkingBlocks;
   }
   if (typeof candidate.autoDeleteEnabled === 'boolean') {
     result.autoDeleteEnabled = candidate.autoDeleteEnabled;
@@ -859,6 +936,9 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   if (typeof candidate.stickyUserHeader === 'boolean') {
     result.stickyUserHeader = candidate.stickyUserHeader;
   }
+  if (typeof candidate.wideChatLayoutEnabled === 'boolean') {
+    result.wideChatLayoutEnabled = candidate.wideChatLayoutEnabled;
+  }
   if (typeof candidate.showSplitAssistantMessageActions === 'boolean') {
     result.showSplitAssistantMessageActions = candidate.showSplitAssistantMessageActions;
   }
@@ -882,6 +962,12 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   }
   if (typeof candidate.inputBarOffset === 'number' && Number.isFinite(candidate.inputBarOffset)) {
     result.inputBarOffset = candidate.inputBarOffset;
+  }
+  if (typeof candidate.mobileKeyboardMode === 'string') {
+    const mode = normalizeMobileKeyboardMode(candidate.mobileKeyboardMode, undefined);
+    if (mode) {
+      result.mobileKeyboardMode = mode;
+    }
   }
 
   const favoriteModels = sanitizeModelRefs(candidate.favoriteModels, 64);
@@ -934,6 +1020,50 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
 
   if (typeof candidate.reportUsage === 'boolean') {
     result.reportUsage = candidate.reportUsage;
+  }
+
+  if (typeof candidate.globalBehaviorPrompt === 'string') {
+    result.globalBehaviorPrompt = candidate.globalBehaviorPrompt;
+  }
+  if (typeof candidate.responseStyleEnabled === 'boolean') {
+    result.responseStyleEnabled = candidate.responseStyleEnabled;
+  }
+  if (
+    typeof candidate.responseStylePreset === 'string'
+    && (candidate.responseStylePreset === 'concise'
+      || candidate.responseStylePreset === 'detailed'
+      || candidate.responseStylePreset === 'mentor'
+      || candidate.responseStylePreset === 'pushback'
+      || candidate.responseStylePreset === 'noFiller'
+      || candidate.responseStylePreset === 'matchEnergy'
+      || candidate.responseStylePreset === 'warmPeer'
+      || candidate.responseStylePreset === 'custom')
+  ) {
+    result.responseStylePreset = candidate.responseStylePreset;
+  }
+  if (typeof candidate.responseStyleCustomInstructions === 'string') {
+    result.responseStyleCustomInstructions = candidate.responseStyleCustomInstructions;
+  }
+  if (candidate.sttProvider === 'browser' || candidate.sttProvider === 'server') {
+    result.sttProvider = candidate.sttProvider;
+  }
+  if (typeof candidate.sttServerUrl === 'string') {
+    result.sttServerUrl = candidate.sttServerUrl.trim();
+  }
+  if (typeof candidate.sttModel === 'string') {
+    result.sttModel = candidate.sttModel.trim();
+  }
+  if (typeof candidate.sttLanguage === 'string') {
+    result.sttLanguage = candidate.sttLanguage.trim();
+  }
+  if (typeof candidate.sttSilenceThresholdDb === 'number' && Number.isFinite(candidate.sttSilenceThresholdDb)) {
+    result.sttSilenceThresholdDb = candidate.sttSilenceThresholdDb;
+  }
+  if (typeof candidate.sttSilenceHoldMs === 'number' && Number.isFinite(candidate.sttSilenceHoldMs)) {
+    result.sttSilenceHoldMs = candidate.sttSilenceHoldMs;
+  }
+  if (typeof candidate.sttTranscribeOnStop === 'boolean') {
+    result.sttTranscribeOnStop = candidate.sttTranscribeOnStop;
   }
 
   return result;
@@ -1042,9 +1172,7 @@ export const syncDesktopSettings = async (): Promise<void> => {
       console.warn('applyDesktopUiPreferences failed:', error);
     }
 
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent<DesktopSettings>('openchamber:settings-synced', { detail: settings }));
-    }
+    dispatchSettingsSynced(settings);
   };
 
   try {
@@ -1075,6 +1203,7 @@ const _flushSettingsUpdate = async (): Promise<void> => {
       if (updated) {
         persistToLocalStorage(updated);
         applyDesktopUiPreferences(updated);
+        dispatchSettingsSynced(updated);
       }
       return;
     } catch (error) {
@@ -1101,6 +1230,7 @@ const _flushSettingsUpdate = async (): Promise<void> => {
     if (updated) {
       persistToLocalStorage(updated);
       applyDesktopUiPreferences(updated);
+      dispatchSettingsSynced(updated);
       // Invalidate GET cache so next read sees the fresh data
       _settingsCache = null;
     }

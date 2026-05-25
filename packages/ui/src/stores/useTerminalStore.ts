@@ -16,10 +16,14 @@ export type TerminalTab = {
   terminalSessionId: string | null;
   lifecycle: TerminalTabLifecycle;
   label: string;
+  iconKey: string | null;
   bufferChunks: TerminalChunk[];
   bufferLength: number;
   isConnecting: boolean;
   createdAt: number;
+  previewUrl: string | null;
+  previewAutoOpened: boolean;
+  previewUrlLocked: boolean;
 };
 
 export type DirectoryTerminalState = {
@@ -27,8 +31,18 @@ export type DirectoryTerminalState = {
   activeTabId: string | null;
 };
 
+export type TerminalProjectActionRun = {
+  key: string;
+  directory: string;
+  actionId: string;
+  tabId: string;
+  sessionId: string;
+  status: 'running' | 'waiting-for-preview' | 'stopping';
+};
+
 interface TerminalStore {
   sessions: Map<string, DirectoryTerminalState>;
+  projectActionRuns: Record<string, TerminalProjectActionRun>;
   nextChunkId: number;
   nextTabId: number;
   hasHydrated: boolean;
@@ -40,6 +54,7 @@ interface TerminalStore {
   createTab: (directory: string) => string;
   setActiveTab: (directory: string, tabId: string) => void;
   setTabLabel: (directory: string, tabId: string, label: string) => void;
+  setTabIconKey: (directory: string, tabId: string, iconKey: string | null) => void;
   closeTab: (directory: string, tabId: string) => Promise<void>;
 
   setTabSessionId: (directory: string, tabId: string, sessionId: string | null) => void;
@@ -47,6 +62,11 @@ interface TerminalStore {
   setConnecting: (directory: string, tabId: string, isConnecting: boolean) => void;
   appendToBuffer: (directory: string, tabId: string, chunk: string) => void;
   clearBuffer: (directory: string, tabId: string) => void;
+  setTabPreviewUrl: (directory: string, tabId: string, url: string | null, options?: { locked?: boolean; autoOpened?: boolean }) => void;
+  markPreviewAutoOpened: (directory: string, tabId: string) => void;
+  setProjectActionRun: (run: TerminalProjectActionRun) => void;
+  updateProjectActionRunStatus: (runKey: string, status: TerminalProjectActionRun['status']) => void;
+  removeProjectActionRun: (runKey: string) => void;
 
   removeDirectory: (directory: string) => void;
   clearAll: () => void;
@@ -56,7 +76,7 @@ const TERMINAL_BUFFER_LIMIT = 1_000_000;
 const TERMINAL_STORE_NAME = 'terminal-store';
 let hydrationListenerAttached = false;
 
-type PersistedTerminalTab = Pick<TerminalTab, 'id' | 'label' | 'terminalSessionId' | 'lifecycle' | 'createdAt'>;
+type PersistedTerminalTab = Pick<TerminalTab, 'id' | 'label' | 'iconKey' | 'terminalSessionId' | 'lifecycle' | 'createdAt'>;
 
 type PersistedDirectoryTerminalState = {
   tabs: PersistedTerminalTab[];
@@ -91,10 +111,14 @@ const createEmptyTab = (id: string, label: string): TerminalTab => ({
   terminalSessionId: null,
   lifecycle: 'idle',
   label,
+  iconKey: null,
   bufferChunks: [],
   bufferLength: 0,
   isConnecting: false,
   createdAt: Date.now(),
+  previewUrl: null,
+  previewAutoOpened: false,
+  previewUrlLocked: false,
 });
 
 const createEmptyDirectoryState = (firstTab: TerminalTab): DirectoryTerminalState => ({
@@ -110,6 +134,7 @@ export const useTerminalStore = create<TerminalStore>()(
     persist(
       (set, get) => ({
         sessions: new Map(),
+        projectActionRuns: {},
         nextChunkId: 1,
         nextTabId: 1,
         hasHydrated: typeof window === 'undefined',
@@ -235,6 +260,39 @@ export const useTerminalStore = create<TerminalStore>()(
           });
         },
 
+        setTabIconKey: (directory: string, tabId: string, iconKey: string | null) => {
+          const key = normalizeDirectory(directory);
+          set((state) => {
+            const newSessions = new Map(state.sessions);
+            const existing = newSessions.get(key);
+            if (!existing) {
+              return state;
+            }
+
+            const idx = findTabIndex(existing, tabId);
+            if (idx < 0) {
+              return state;
+            }
+
+            const normalizedIconKey = iconKey?.trim() || null;
+            if (existing.tabs[idx]?.iconKey === normalizedIconKey) {
+              return state;
+            }
+
+            const nextTabs = [...existing.tabs];
+            nextTabs[idx] = {
+              ...nextTabs[idx],
+              iconKey: normalizedIconKey,
+            };
+
+            newSessions.set(key, {
+              ...existing,
+              tabs: nextTabs,
+            });
+            return { sessions: newSessions };
+          });
+        },
+
         closeTab: async (directory: string, tabId: string) => {
           const key = normalizeDirectory(directory);
           const entry = get().sessions.get(key);
@@ -262,12 +320,20 @@ export const useTerminalStore = create<TerminalStore>()(
             }
 
             const nextTabs = existing.tabs.filter((t) => t.id !== tabId);
+            const nextRuns = Object.fromEntries(
+              Object.entries(state.projectActionRuns).filter(([, run]) => !(run.directory === key && run.tabId === tabId))
+            );
+            const runsChanged = Object.keys(nextRuns).length !== Object.keys(state.projectActionRuns).length;
 
             if (nextTabs.length === 0) {
               const newTabId = `tab-${state.nextTabId}`;
               const newTab = createEmptyTab(newTabId, 'Terminal');
               newSessions.set(key, createEmptyDirectoryState(newTab));
-              return { sessions: newSessions, nextTabId: state.nextTabId + 1 };
+              return {
+                sessions: newSessions,
+                nextTabId: state.nextTabId + 1,
+                ...(runsChanged ? { projectActionRuns: nextRuns } : {}),
+              };
             }
 
             let nextActive = existing.activeTabId;
@@ -282,7 +348,10 @@ export const useTerminalStore = create<TerminalStore>()(
               activeTabId: nextActive,
             });
 
-            return { sessions: newSessions };
+            return {
+              sessions: newSessions,
+              ...(runsChanged ? { projectActionRuns: nextRuns } : {}),
+            };
           });
         },
 
@@ -409,6 +478,106 @@ export const useTerminalStore = create<TerminalStore>()(
           });
         },
 
+        setTabPreviewUrl: (directory: string, tabId: string, url: string | null, options = {}) => {
+          const key = normalizeDirectory(directory);
+          set((state) => {
+            const newSessions = new Map(state.sessions);
+            const existing = newSessions.get(key);
+            if (!existing) {
+              return state;
+            }
+
+            const idx = findTabIndex(existing, tabId);
+            if (idx < 0) {
+              return state;
+            }
+
+            const tab = existing.tabs[idx];
+            const nextPreviewAutoOpened = options.autoOpened ?? tab.previewAutoOpened;
+            const nextPreviewUrlLocked = options.locked ?? tab.previewUrlLocked;
+            if (tab.previewUrl === url && tab.previewAutoOpened === nextPreviewAutoOpened && tab.previewUrlLocked === nextPreviewUrlLocked) {
+              return state;
+            }
+
+            const nextTabs = [...existing.tabs];
+            nextTabs[idx] = {
+              ...tab,
+              previewUrl: url,
+              previewAutoOpened: nextPreviewAutoOpened,
+              previewUrlLocked: nextPreviewUrlLocked,
+            };
+            newSessions.set(key, { ...existing, tabs: nextTabs });
+            return { sessions: newSessions };
+          });
+        },
+
+        markPreviewAutoOpened: (directory: string, tabId: string) => {
+          const key = normalizeDirectory(directory);
+          set((state) => {
+            const newSessions = new Map(state.sessions);
+            const existing = newSessions.get(key);
+            if (!existing) {
+              return state;
+            }
+
+            const idx = findTabIndex(existing, tabId);
+            if (idx < 0) {
+              return state;
+            }
+
+            const tab = existing.tabs[idx];
+            if (!tab.previewUrl || tab.previewAutoOpened) {
+              return state;
+            }
+
+            const nextTabs = [...existing.tabs];
+            nextTabs[idx] = { ...tab, previewAutoOpened: true };
+            newSessions.set(key, { ...existing, tabs: nextTabs });
+            return { sessions: newSessions };
+          });
+        },
+
+        setProjectActionRun: (run: TerminalProjectActionRun) => {
+          set((state) => {
+            const existing = state.projectActionRuns[run.key];
+            if (existing
+              && existing.directory === run.directory
+              && existing.actionId === run.actionId
+              && existing.tabId === run.tabId
+              && existing.sessionId === run.sessionId
+              && existing.status === run.status) {
+              return state;
+            }
+            return { projectActionRuns: { ...state.projectActionRuns, [run.key]: run } };
+          });
+        },
+
+        updateProjectActionRunStatus: (runKey: string, status: TerminalProjectActionRun['status']) => {
+          set((state) => {
+            const existing = state.projectActionRuns[runKey];
+            if (!existing || existing.status === status) {
+              return state;
+            }
+            return {
+              projectActionRuns: {
+                ...state.projectActionRuns,
+                [runKey]: { ...existing, status },
+              },
+            };
+          });
+        },
+
+        removeProjectActionRun: (runKey: string) => {
+          set((state) => {
+            if (!state.projectActionRuns[runKey]) {
+              return state;
+            }
+            const next = { ...state.projectActionRuns };
+            delete next[runKey];
+            return { projectActionRuns: next };
+          });
+        },
+
         clearBuffer: (directory: string, tabId: string) => {
           const key = normalizeDirectory(directory);
           set((state) => {
@@ -439,12 +608,15 @@ export const useTerminalStore = create<TerminalStore>()(
           set((state) => {
             const newSessions = new Map(state.sessions);
             newSessions.delete(key);
-            return { sessions: newSessions };
+            const nextRuns = Object.fromEntries(
+              Object.entries(state.projectActionRuns).filter(([, run]) => run.directory !== key)
+            );
+            return { sessions: newSessions, projectActionRuns: nextRuns };
           });
         },
 
         clearAll: () => {
-          set({ sessions: new Map(), nextChunkId: 1, nextTabId: 1 });
+          set({ sessions: new Map(), projectActionRuns: {}, nextChunkId: 1, nextTabId: 1 });
         },
       }),
       {
@@ -458,6 +630,7 @@ export const useTerminalStore = create<TerminalStore>()(
               tabs: dirState.tabs.map((tab) => ({
                 id: tab.id,
                 label: tab.label,
+                iconKey: tab.iconKey,
                 terminalSessionId: tab.terminalSessionId,
                 lifecycle: tab.lifecycle,
                 createdAt: tab.createdAt,
@@ -519,12 +692,16 @@ export const useTerminalStore = create<TerminalStore>()(
               tabs.push({
                 id,
                 label: typeof rawTab.label === 'string' ? rawTab.label : 'Terminal',
+                iconKey: typeof rawTab.iconKey === 'string' ? rawTab.iconKey : null,
                 terminalSessionId,
                 lifecycle,
                 createdAt: typeof rawTab.createdAt === 'number' ? rawTab.createdAt : Date.now(),
                 bufferChunks: [],
                 bufferLength: 0,
                 isConnecting: false,
+                previewUrl: null,
+                previewAutoOpened: false,
+                previewUrlLocked: false,
               });
             }
 

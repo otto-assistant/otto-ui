@@ -3,10 +3,10 @@
 import * as React from "react"
 import { Select as BaseSelect } from "@base-ui/react/select"
 import type { SelectRootChangeEventDetails } from "@base-ui/react/select";
-import { RiArrowDownSLine, RiArrowUpSLine, RiCheckLine } from '@remixicon/react';
 
 import { cn } from "@/lib/utils"
 import { ScrollableOverlay } from "@/components/ui/ScrollableOverlay";
+import { Icon } from "@/components/icon/Icon";
 
 type AsChildProps = { asChild?: boolean };
 type AsChildRenderProps = {
@@ -145,7 +145,7 @@ function SelectTrigger({
       {asChildRender ? undefined : (<>
         {children}
         <BaseSelect.Icon>
-          <RiArrowDownSLine className="size-4 opacity-50" />
+          <Icon name="arrow-down-s" className="size-4 opacity-50" />
         </BaseSelect.Icon>
       </>)}
     </BaseSelect.Trigger>
@@ -155,6 +155,7 @@ function SelectTrigger({
 type SelectContentExtra = {
   position?: "popper" | "item-aligned";
   fitContent?: boolean;
+  portalToBody?: boolean;
   sideOffset?: number;
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
@@ -165,6 +166,7 @@ function SelectContent({
   children,
   position = "popper",
   fitContent = false,
+  portalToBody = false,
   sideOffset,
   side,
   align,
@@ -175,13 +177,13 @@ function SelectContent({
   const portalContainer = portalContext?.portalContainer ?? null;
 
   return (
-    <BaseSelect.Portal container={portalContainer || undefined}>
+    <BaseSelect.Portal container={portalToBody ? undefined : portalContainer || undefined}>
       <BaseSelect.Positioner
         alignItemWithTrigger={alignItemWithTrigger}
         sideOffset={sideOffset}
         side={side}
         align={align}
-        className="z-[120] pointer-events-auto"
+        className="absolute z-[120] pointer-events-auto"
       >
         <BaseSelect.Popup
           data-slot="select-content"
@@ -190,7 +192,7 @@ function SelectContent({
             color: 'var(--surface-elevated-foreground)',
           }}
           className={cn(
-            "pointer-events-auto data-[open]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[open]:fade-in-0 data-[closed]:zoom-out-95 data-[open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 relative z-[120] max-h-[var(--available-height)] min-w-[8rem] origin-[var(--transform-origin)] overflow-x-hidden rounded-xl transform-gpu will-change-transform shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
+            "pointer-events-auto transition-all duration-150 ease-out data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95 relative z-[120] max-h-[var(--available-height)] min-w-[8rem] origin-[var(--transform-origin)] overflow-x-hidden rounded-xl shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
             !alignItemWithTrigger &&
               "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
             fitContent && "w-max min-w-0",
@@ -249,7 +251,7 @@ function SelectItem({
     >
       <span className="absolute right-2 flex size-3.5 items-center justify-center">
         <BaseSelect.ItemIndicator>
-          <RiCheckLine className="size-4"/>
+          <Icon name="check" className="size-4" />
         </BaseSelect.ItemIndicator>
       </span>
       <BaseSelect.ItemText>{children}</BaseSelect.ItemText>
@@ -283,7 +285,7 @@ function SelectScrollUpButton({
       )}
       {...props}
     >
-      <RiArrowUpSLine className="size-4" />
+      <Icon name="arrow-up-s" className="size-4" />
     </BaseSelect.ScrollUpArrow>
   )
 }
@@ -301,7 +303,7 @@ function SelectScrollDownButton({
       )}
       {...props}
     >
-      <RiArrowDownSLine className="size-4" />
+      <Icon name="arrow-down-s" className="size-4" />
     </BaseSelect.ScrollDownArrow>
   )
 }

@@ -1,11 +1,12 @@
 import React from 'react';
-import { RiFileEditLine, RiArrowDownSLine, RiArrowUpSLine } from '@remixicon/react';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGitStore, useIsGitRepo } from '@/stores/useGitStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { normalizePath } from '@/components/session/sidebar/utils';
+import { Icon } from "@/components/icon/Icon";
+import { cn } from '@/lib/utils';
 import {
     type ChangedFileEntry,
     type GitChangedFile,
@@ -19,6 +20,7 @@ import { useI18n } from '@/lib/i18n';
 export const PendingChangesBar: React.FC = React.memo(() => {
     const { t } = useI18n();
     const [isExpanded, setIsExpanded] = React.useState(false);
+    const popoverRef = React.useRef<HTMLDivElement>(null);
     const currentDirectory = useDirectoryStore((s) => s.currentDirectory);
     const runtime = React.useContext(RuntimeAPIContext);
     const isGitRepo = useIsGitRepo(currentDirectory);
@@ -27,7 +29,20 @@ export const PendingChangesBar: React.FC = React.memo(() => {
     );
     const ensureStatus = useGitStore((s) => s.ensureStatus);
     const fetchStatus = useGitStore((s) => s.fetchStatus);
-    const popoverRef = React.useRef<HTMLDivElement>(null);
+
+    // Close popover when clicking outside
+    React.useEffect(() => {
+        if (!isExpanded) return;
+
+        const handleClickOutside = (event: MouseEvent) => {
+            if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
+                setIsExpanded(false);
+            }
+        };
+
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, [isExpanded]);
 
     // Seed git store for currentDirectory so the bar can render independently of
     // DiffView/GitView/right-sidebar mounting. ensureStatus has a 5s staleness
@@ -64,19 +79,6 @@ export const PendingChangesBar: React.FC = React.memo(() => {
         return { totalAdded: added, totalRemoved: removed };
     }, [gitChangedFiles]);
 
-    React.useEffect(() => {
-        if (!isExpanded) return;
-
-        const handleClickOutside = (event: MouseEvent) => {
-            if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
-                setIsExpanded(false);
-            }
-        };
-
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [isExpanded]);
-
     if (isGitRepo !== true) return null;
     if (gitChangedFiles.length === 0) return null;
 
@@ -95,11 +97,12 @@ export const PendingChangesBar: React.FC = React.memo(() => {
         }
 
         const store = useUIStore.getState();
+        const openStagedDiff = file.hasStagedChanges && !file.hasWorkingChanges;
         if (!store.isMobile) {
-            store.openContextDiff(currentDirectory, file.relativePath);
+            store.openContextDiff(currentDirectory, file.relativePath, openStagedDiff);
             return;
         }
-        store.navigateToDiff(file.relativePath);
+        store.navigateToDiff(file.relativePath, openStagedDiff);
         store.setRightSidebarOpen(false);
     };
 
@@ -109,13 +112,14 @@ export const PendingChangesBar: React.FC = React.memo(() => {
         : t('chat.pendingChanges.fileCountPlural', { count: fileCount });
 
     return (
-        <div className="relative flex min-w-0 items-center" ref={popoverRef}>
+        <div className="relative" ref={popoverRef}>
             <button
                 type="button"
-                onClick={() => setIsExpanded((prev) => !prev)}
                 className="flex min-w-0 max-w-full items-center gap-1 text-left text-muted-foreground"
+                onClick={() => setIsExpanded((value) => !value)}
+                aria-expanded={isExpanded}
             >
-                <RiFileEditLine className="h-3.5 w-3.5 flex-shrink-0 text-[var(--status-warning)]" />
+                <Icon name="file-edit" className="h-3.5 w-3.5 flex-shrink-0 text-[var(--status-warning)]" />
                 <span className="min-w-0 typography-ui-label text-foreground flex-shrink-0">{labelHead}</span>
                 <span className="status-row__changed-label min-w-0 typography-ui-label text-foreground truncate">
                     {t('chat.pendingChanges.changedInWorkspace')}
@@ -125,16 +129,23 @@ export const PendingChangesBar: React.FC = React.memo(() => {
                     {totalRemoved > 0 ? <span style={{ color: 'var(--status-error)' }}>-{totalRemoved}</span> : null}
                 </span>
                 {isExpanded ? (
-                    <RiArrowUpSLine className="h-3.5 w-3.5 flex-shrink-0" />
+                    <Icon name="arrow-up-s" className="h-3.5 w-3.5 flex-shrink-0" />
                 ) : (
-                    <RiArrowDownSLine className="h-3.5 w-3.5 flex-shrink-0" />
+                    <Icon name="arrow-down-s" className="h-3.5 w-3.5 flex-shrink-0" />
                 )}
             </button>
-
-            {isExpanded ? (
+            {isExpanded && (
                 <div
-                    style={changedFilesPopoverStyle}
-                    className={`${changedFilesPopoverClassName} absolute z-50 left-0 bottom-full mb-1 slide-in-from-bottom-2`}
+                    style={{
+                        ...changedFilesPopoverStyle,
+                        maxWidth: 'min(28rem, calc(100cqw - 4ch))',
+                    }}
+                    className={cn(
+                        changedFilesPopoverClassName,
+                        "absolute left-0 bottom-full mb-1 z-50",
+                        "animate-in fade-in-0 zoom-in-95 slide-in-from-bottom-2",
+                        "duration-150"
+                    )}
                 >
                     <ChangedFilesList
                         files={gitChangedFiles}
@@ -142,7 +153,7 @@ export const PendingChangesBar: React.FC = React.memo(() => {
                         onOpenFile={handleOpenFile}
                     />
                 </div>
-            ) : null}
+            )}
         </div>
     );
 });

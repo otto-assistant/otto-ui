@@ -1,7 +1,13 @@
 import React from 'react';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
-import { useSessions, useAllSessionStatuses } from '@/sync/sync-context';
+import {
+  useSessions,
+  useAllSessionStatuses,
+  useLiveSessionStatusCounts,
+  useSession,
+  useDirectorySync,
+} from '@/sync/sync-context';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -9,15 +15,6 @@ import type { Session } from '@opencode-ai/sdk/v2';
 import type { ProjectEntry } from '@/lib/api/types';
 import { cn, formatDirectoryName } from '@/lib/utils';
 import { getAgentColor } from '@/lib/agentColors';
-import {
-  RiLoader4Line,
-  RiAddLine,
-  RiDragMove2Line,
-  RiDeleteBinLine,
-  RiEditLine,
-  RiArrowUpLine,
-  RiArrowDownLine,
-} from '@remixicon/react';
 import {
   DndContext,
   closestCenter,
@@ -51,6 +48,7 @@ import { Button } from '@/components/ui/button';
 import { ProjectEditDialog } from '@/components/layout/ProjectEditDialog';
 import { useDrawerSwipe } from '@/hooks/useDrawerSwipe';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
+import { Icon } from "@/components/icon/Icon";
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { useNotificationStore } from '@/sync/notification-store';
 import { useI18n } from '@/lib/i18n';
@@ -72,6 +70,62 @@ const normalize = (value: string): string => {
   const replaced = value.replace(/\\/g, '/');
   return replaced === '/' ? '/' : replaced.replace(/\/+$/, '');
 };
+
+const getDisplaySessionTitle = (session: Session): string => {
+  const title = session.title;
+  if (title && title.trim()) return title;
+  return 'New session';
+};
+
+const countUnreadSessions = (unseenCounts: Record<string, number>): number => {
+  let count = 0;
+  for (const value of Object.values(unseenCounts)) {
+    if (value > 0) count += 1;
+  }
+  return count;
+};
+
+function useCurrentContextUsage(): SessionContextUsage | null {
+  const getContextUsage = useSessionUIStore((state) => state.getContextUsage);
+  const getCurrentModel = useConfigStore((state) => state.getCurrentModel);
+
+  const currentModel = getCurrentModel();
+  const limit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
+    ? (currentModel.limit as Record<string, unknown>)
+    : null;
+  const contextLimit = (limit && typeof limit.context === 'number' ? limit.context : 0);
+  const outputLimit = (limit && typeof limit.output === 'number' ? limit.output : 0);
+  return getContextUsage(contextLimit, outputLimit);
+}
+
+function useCurrentProjectDisplay() {
+  const { currentTheme } = useThemeSystem();
+  const projects = useProjectsStore((state) => state.projects);
+  const activeProjectId = useProjectsStore((state) => state.activeProjectId);
+  const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
+  const activeProject = React.useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? null,
+    [activeProjectId, projects],
+  );
+
+  const currentProjectIconImageUrl = activeProject
+    ? getProjectIconImageUrl(activeProject, {
+      themeVariant: currentTheme.metadata.variant,
+      iconColor: currentTheme.colors.surface.foreground,
+    })
+    : null;
+
+  return {
+    projects,
+    activeProjectId,
+    homeDirectory,
+    currentProjectLabel: activeProject?.label || formatDirectoryName(activeProject?.path || '', homeDirectory),
+    currentProjectIcon: activeProject?.icon,
+    currentProjectIconImageUrl,
+    currentProjectIconBackground: activeProject?.iconBackground ?? null,
+    currentProjectColor: activeProject?.color,
+  };
+}
 
 function useSessionGrouping(
   sessions: Session[],
@@ -185,9 +239,7 @@ function useSessionHelpers(
   }, [agents]);
 
   const getSessionTitle = React.useCallback((session: Session): string => {
-    const title = session.title;
-    if (title && title.trim()) return title;
-    return 'New session';
+    return getDisplaySessionTitle(session);
   }, []);
 
   const isRunning = React.useCallback((sessionId: string): boolean => {
@@ -275,7 +327,7 @@ function useProjectStatus(
 
 function StatusIndicator({ isRunning, needsAttention }: { isRunning: boolean; needsAttention: boolean }) {
   if (isRunning) {
-    return <RiLoader4Line className="h-2.5 w-2.5 animate-spin text-[var(--status-info)]" />;
+    return <Icon name="loader-4" className="h-2.5 w-2.5 animate-spin text-[var(--status-info)]" />;
   }
   if (needsAttention) {
     return <div className="h-1.5 w-1.5 rounded-full bg-[var(--status-error)]" />;
@@ -287,7 +339,7 @@ function RunningIndicator({ count }: { count: number }) {
   if (count === 0) return null;
   return (
     <span className="flex items-center gap-1 text-[13px] text-[var(--status-info)]">
-      <RiLoader4Line className="h-3.5 w-3.5 animate-spin" />
+      <Icon name="loader-4" className="h-3.5 w-3.5 animate-spin" />
       {count}
     </span>
   );
@@ -310,27 +362,60 @@ function SessionItem({
   getSessionTitle,
   onClick,
   onDoubleClick,
-  needsAttention
+  needsAttention,
+  isEditing = false,
+  editingTitle = '',
+  onEditingTitleChange,
+  onEditSave,
+  onEditCancel,
 }: {
   session: SessionWithStatus;
   isCurrent: boolean;
   getSessionAgentName: (s: Session) => string;
   getSessionTitle: (s: Session) => string;
   onClick: () => void;
-  onDoubleClick?: () => void;
+  onDoubleClick?: (sessionId: string, sessionTitle: string) => void;
   needsAttention: (sessionId: string) => boolean;
+  isEditing?: boolean;
+  editingTitle?: string;
+  onEditingTitleChange?: (value: string) => void;
+  onEditSave?: () => void;
+  onEditCancel?: () => void;
 }) {
   const agentName = getSessionAgentName(session);
   const agentColor = getAgentColor(agentName);
   const extraCount = (session._runningChildrenCount || 0) + (session._statusType !== 'idle' ? 1 : 0) - 1 - (session._childIndicators?.length || 0);
+  const sessionTitle = getSessionTitle(session);
+  const editInputRef = React.useRef<HTMLInputElement>(null);
+  const editCancelledRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (isEditing) {
+      editCancelledRef.current = false;
+      const node = editInputRef.current;
+      if (node) {
+        node.focus();
+        node.select();
+      }
+    }
+  }, [isEditing]);
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
+      role={isEditing ? undefined : 'button'}
+      tabIndex={isEditing ? undefined : 0}
+      onClick={isEditing ? undefined : onClick}
       onDoubleClick={(e) => {
+        if (isEditing) return;
         e.stopPropagation();
-        onDoubleClick?.();
+        onDoubleClick?.(session.id, sessionTitle);
+      }}
+      onKeyDown={(e) => {
+        if (isEditing) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
       }}
       className={cn(
         "flex items-center gap-0.5 px-1.5 py-px text-left transition-colors",
@@ -350,12 +435,48 @@ function SessionItem({
         style={{ backgroundColor: `var(${agentColor.var})` }}
       />
 
-      <span className={cn(
-        "text-[13px] truncate leading-tight",
-        isCurrent ? "text-[var(--interactive-selection-foreground)] font-medium" : "text-[var(--surface-foreground)]"
-      )}>
-        {getSessionTitle(session)}
-      </span>
+      {isEditing ? (
+        <input
+          ref={editInputRef}
+          type="text"
+          value={editingTitle}
+          onChange={(e) => onEditingTitleChange?.(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              e.stopPropagation();
+              onEditSave?.();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              editCancelledRef.current = true;
+              onEditCancel?.();
+            }
+          }}
+          onBlur={() => {
+            if (editCancelledRef.current) {
+              editCancelledRef.current = false;
+              return;
+            }
+            onEditSave?.();
+          }}
+          className={cn(
+            "flex-1 min-w-0 text-[13px] leading-tight px-1 py-px rounded",
+            "bg-background border border-[var(--interactive-border)]",
+            "text-[var(--surface-foreground)] outline-none",
+            "focus:border-[var(--primary-base)]"
+          )}
+        />
+      ) : (
+        <span className={cn(
+          "text-[13px] truncate leading-tight",
+          isCurrent ? "text-[var(--interactive-selection-foreground)] font-medium" : "text-[var(--surface-foreground)]"
+        )}>
+          {sessionTitle}
+        </span>
+      )}
 
       {(session._childIndicators?.length || 0) > 0 && (
         <div className="flex items-center gap-0.5 text-[var(--surface-mutedForeground)]">
@@ -369,10 +490,9 @@ function SessionItem({
                   className="flex-shrink-0"
                   title={`Sub-session: ${getSessionTitle(child)}`}
                 >
-                  <RiLoader4Line
-                    className="h-2.5 w-2.5 animate-spin"
-                    style={{ color: `var(${childColor.var})` }}
-                  />
+                  <Icon name="loader-4" className="h-2.5 w-2.5 animate-spin"
+                    
+                    style={{ color: `var(${childColor.var})` }}/>
                 </div>
               );
             })}
@@ -385,7 +505,7 @@ function SessionItem({
           <span className="text-[10px]">]</span>
         </div>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -405,6 +525,7 @@ function TokenUsageIndicator({ contextUsage }: { contextUsage: SessionContextUsa
 }
 
 interface SessionStatusHeaderProps {
+  currentSessionId?: string | null;
   currentSessionTitle: string;
   currentProjectLabel?: string;
   currentProjectIcon?: string | null;
@@ -414,9 +535,16 @@ interface SessionStatusHeaderProps {
   onToggle: () => void;
   isExpanded?: boolean;
   childIndicators?: Array<{ session: Session; isRunning: boolean }>;
+  isEditing?: boolean;
+  editingTitle?: string;
+  onTitleDoubleClick?: (sessionId: string, sessionTitle: string) => void;
+  onEditingTitleChange?: (value: string) => void;
+  onEditSave?: () => void;
+  onEditCancel?: () => void;
 }
 
 function SessionStatusHeader({
+  currentSessionId,
   currentSessionTitle,
   currentProjectLabel,
   currentProjectIcon,
@@ -425,22 +553,49 @@ function SessionStatusHeader({
   currentProjectColor,
   onToggle,
   isExpanded = false,
-  childIndicators = []
+  childIndicators = [],
+  isEditing = false,
+  editingTitle = '',
+  onTitleDoubleClick,
+  onEditingTitleChange,
+  onEditSave,
+  onEditCancel,
 }: SessionStatusHeaderProps) {
   const [imageFailed, setImageFailed] = React.useState(false);
-  const ProjectIcon = currentProjectIcon ? PROJECT_ICON_MAP[currentProjectIcon] : null;
+  const projectIconName = currentProjectIcon ? PROJECT_ICON_MAP[currentProjectIcon] : null;
   const imageUrl = !imageFailed ? currentProjectIconImageUrl : null;
   const projectColorVar = currentProjectColor ? (PROJECT_COLOR_MAP[currentProjectColor] ?? null) : null;
   const extraCount = childIndicators.length > 3 ? childIndicators.length - 3 : 0;
+  const editInputRef = React.useRef<HTMLInputElement>(null);
+  const editCancelledRef = React.useRef(false);
 
   React.useEffect(() => {
     setImageFailed(false);
   }, [currentProjectIconImageUrl]);
 
+  React.useEffect(() => {
+    if (isEditing) {
+      editCancelledRef.current = false;
+      const node = editInputRef.current;
+      if (node) {
+        node.focus();
+        node.select();
+      }
+    }
+  }, [isEditing]);
+
   return (
-    <button
-      type="button"
-      onClick={onToggle}
+    <div
+      role={isEditing ? undefined : 'button'}
+      tabIndex={isEditing ? undefined : 0}
+      onClick={isEditing ? undefined : onToggle}
+      onKeyDown={(e) => {
+        if (isEditing) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onToggle();
+        }
+      }}
       className="w-full flex flex-col px-2 py-0.5 text-left transition-colors hover:bg-[var(--interactive-hover)]"
     >
       {!isExpanded && currentProjectLabel && (
@@ -459,8 +614,8 @@ function SessionStatusHeader({
                   onError={() => setImageFailed(true)}
                 />
               </span>
-            ) : ProjectIcon && (
-              <ProjectIcon
+            ) : projectIconName && (
+              <Icon name={projectIconName}
                 className="h-2.5 w-2.5"
                 style={projectColorVar ? { color: projectColorVar } : undefined}
               />
@@ -476,9 +631,53 @@ function SessionStatusHeader({
         </div>
       )}
       <div className="flex items-center gap-1.5 min-w-0">
-        <span className="flex-1 min-w-0 text-[13px] text-[var(--surface-foreground)] truncate leading-none">
-          {currentSessionTitle}
-        </span>
+        {isEditing ? (
+          <input
+            ref={editInputRef}
+            type="text"
+            value={editingTitle}
+            onChange={(e) => onEditingTitleChange?.(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                onEditSave?.();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                editCancelledRef.current = true;
+                onEditCancel?.();
+              }
+            }}
+            onBlur={() => {
+              if (editCancelledRef.current) {
+                editCancelledRef.current = false;
+                return;
+              }
+              onEditSave?.();
+            }}
+            className={cn(
+              "flex-1 min-w-0 text-[13px] leading-none px-1 py-0.5 rounded",
+              "bg-background border border-[var(--interactive-border)]",
+              "text-[var(--surface-foreground)] outline-none",
+              "focus:border-[var(--primary-base)]"
+            )}
+          />
+        ) : (
+          <span
+            className="flex-1 min-w-0 text-[13px] text-[var(--surface-foreground)] truncate leading-none"
+            onDoubleClick={(e) => {
+              if (!currentSessionId || !onTitleDoubleClick) return;
+              e.preventDefault();
+              e.stopPropagation();
+              onTitleDoubleClick(currentSessionId, currentSessionTitle);
+            }}
+          >
+            {currentSessionTitle}
+          </span>
+        )}
         {childIndicators.length > 0 && (
           <div className="flex items-center gap-0.5 text-[var(--surface-mutedForeground)]">
             <span className="text-[10px]">[</span>
@@ -492,10 +691,9 @@ function SessionStatusHeader({
                     className="flex-shrink-0"
                     title={`Sub-session: ${child.session.title || 'Untitled'}`}
                   >
-                    <RiLoader4Line
-                      className="h-2.5 w-2.5 animate-spin"
-                      style={{ color: `var(${childColor.var})` }}
-                    />
+                    <Icon name="loader-4" className="h-2.5 w-2.5 animate-spin"
+                      
+                      style={{ color: `var(${childColor.var})` }}/>
                   </div>
                 );
               })}
@@ -509,11 +707,9 @@ function SessionStatusHeader({
           </div>
         )}
       </div>
-    </button>
+    </div>
   );
 }
-
-
 
 // Hook for long press with movement detection
 function useLongPress(
@@ -625,7 +821,7 @@ function SortableProjectItem({
   };
 
   const [imageFailed, setImageFailed] = React.useState(false);
-  const ProjectIcon = project.icon ? PROJECT_ICON_MAP[project.icon] : null;
+  const projectIconName = project.icon ? PROJECT_ICON_MAP[project.icon] : null;
   const projectIconImageUrl = !imageFailed
     ? getProjectIconImageUrl(project, {
       themeVariant: currentTheme.metadata.variant,
@@ -650,7 +846,7 @@ function SortableProjectItem({
         {...attributes}
         {...listeners}
       >
-        <RiDragMove2Line className="h-4 w-4" />
+        <Icon name="drag-move-2" className="h-4 w-4" />
       </button>
 
       {/* Project info */}
@@ -668,8 +864,8 @@ function SortableProjectItem({
               onError={() => setImageFailed(true)}
             />
           </span>
-        ) : ProjectIcon ? (
-          <ProjectIcon
+        ) : projectIconName ? (
+          <Icon name={projectIconName}
             className="h-5 w-5 flex-shrink-0"
             style={projectColorVar ? { color: projectColorVar } : undefined}
           />
@@ -690,7 +886,7 @@ function SortableProjectItem({
           disabled={isFirst}
           className="p-1.5 rounded text-[var(--surface-mutedForeground)] hover:text-[var(--surface-foreground)] hover:bg-[var(--interactive-hover)] disabled:opacity-30 disabled:cursor-not-allowed"
         >
-          <RiArrowUpLine className="h-4 w-4" />
+          <Icon name="arrow-up" className="h-4 w-4" />
         </button>
         <button
           type="button"
@@ -698,7 +894,7 @@ function SortableProjectItem({
           disabled={isLast}
           className="p-1.5 rounded text-[var(--surface-mutedForeground)] hover:text-[var(--surface-foreground)] hover:bg-[var(--interactive-hover)] disabled:opacity-30 disabled:cursor-not-allowed"
         >
-          <RiArrowDownLine className="h-4 w-4" />
+          <Icon name="arrow-down" className="h-4 w-4" />
         </button>
 
         <div className="w-px h-5 bg-[var(--interactive-border)] mx-1" />
@@ -709,7 +905,7 @@ function SortableProjectItem({
           onClick={onEdit}
           className="p-1.5 rounded text-[var(--surface-mutedForeground)] hover:text-[var(--primary-base)] hover:bg-[var(--primary-base)]/10"
         >
-          <RiEditLine className="h-4 w-4" />
+          <Icon name="edit" className="h-4 w-4" />
         </button>
 
         {/* Delete button */}
@@ -718,7 +914,7 @@ function SortableProjectItem({
           onClick={onDelete}
           className="p-1.5 rounded text-[var(--surface-mutedForeground)] hover:text-[var(--status-error)] hover:bg-[var(--status-error)]/10"
         >
-          <RiDeleteBinLine className="h-4 w-4" />
+          <Icon name="delete-bin" className="h-4 w-4" />
         </button>
       </div>
     </div>
@@ -863,7 +1059,7 @@ function ProjectButton({
 }: ProjectButtonProps) {
   const { currentTheme } = useThemeSystem();
   const [imageFailed, setImageFailed] = React.useState(false);
-  const ProjectIcon = project.icon ? PROJECT_ICON_MAP[project.icon] : null;
+  const projectIconName = project.icon ? PROJECT_ICON_MAP[project.icon] : null;
   const projectIconImageUrl = !imageFailed
     ? getProjectIconImageUrl(project, {
       themeVariant: currentTheme.metadata.variant,
@@ -900,7 +1096,7 @@ function ProjectButton({
       {/* Status indicators */}
       <div className="flex items-center gap-0.5">
         {status.hasRunning && (
-          <RiLoader4Line className="h-2.5 w-2.5 animate-spin text-[var(--status-info)]" />
+          <Icon name="loader-4" className="h-2.5 w-2.5 animate-spin text-[var(--status-info)]" />
         )}
         {!status.hasRunning && status.hasUnread && (
           <div className="h-1.5 w-1.5 rounded-full bg-[var(--status-error)]" />
@@ -921,8 +1117,8 @@ function ProjectButton({
             onError={() => setImageFailed(true)}
           />
         </span>
-      ) : ProjectIcon && (
-        <ProjectIcon
+      ) : projectIconName && (
+        <Icon name={projectIconName}
           className="h-3.5 w-3.5"
           style={projectColorVar ? { color: projectColorVar } : undefined}
         />
@@ -1021,7 +1217,7 @@ function ProjectBar({
           className="flex items-center justify-center !py-1.5 px-2 rounded-md border border-[var(--primary-base)]/60 bg-[var(--primary-base)]/5 text-[var(--primary-base)]/80 hover:text-[var(--primary-base)] hover:bg-[var(--primary-base)]/10 !min-h-0"
           aria-label={t('chat.mobileStatus.projects.addAria')}
         >
-          <RiAddLine className="h-3 w-3" />
+          <Icon name="add" className="h-3 w-3" />
         </button>
       </div>
     );
@@ -1097,7 +1293,7 @@ function ProjectBar({
         className="flex items-center justify-center !py-1.5 px-2 rounded-md border border-[var(--primary-base)]/60 bg-[var(--primary-base)]/5 text-[var(--primary-base)]/80 hover:text-[var(--primary-base)] hover:bg-[var(--primary-base)]/10 shrink-0 !min-h-0"
         aria-label={t('chat.mobileStatus.projects.addAria')}
       >
-        <RiAddLine className="h-3.5 w-3.5" />
+        <Icon name="add" className="h-3.5 w-3.5" />
       </button>
 
       {/* Delete confirmation dialog */}
@@ -1154,6 +1350,7 @@ function ProjectBar({
 function CollapsedView({
   runningCount,
   unreadCount,
+  currentSessionId,
   currentSessionTitle,
   currentProjectLabel,
   currentProjectIcon,
@@ -1164,9 +1361,16 @@ function CollapsedView({
   onNewSession,
   contextUsage,
   childIndicators = [],
+  editingSessionId = null,
+  editingTitle = '',
+  onTitleDoubleClick,
+  onEditingTitleChange,
+  onEditSave,
+  onEditCancel,
 }: {
   runningCount: number;
   unreadCount: number;
+  currentSessionId?: string | null;
   currentSessionTitle: string;
   currentProjectLabel?: string;
   currentProjectIcon?: string | null;
@@ -1177,6 +1381,12 @@ function CollapsedView({
   onNewSession: () => void;
   contextUsage: SessionContextUsage | null;
   childIndicators?: Array<{ session: Session; isRunning: boolean }>;
+  editingSessionId?: string | null;
+  editingTitle?: string;
+  onTitleDoubleClick?: (sessionId: string, sessionTitle: string) => void;
+  onEditingTitleChange?: (value: string) => void;
+  onEditSave?: () => void;
+  onEditCancel?: () => void;
 }) {
   const { t } = useI18n();
   const { handleTouchStart, handleTouchMove, handleTouchEnd } = useDrawerSwipe();
@@ -1194,6 +1404,7 @@ function CollapsedView({
     >
       <div className="flex-1 min-w-0 mr-1">
         <SessionStatusHeader
+          currentSessionId={currentSessionId}
           currentSessionTitle={currentSessionTitle}
           currentProjectLabel={currentProjectLabel}
           currentProjectIcon={currentProjectIcon}
@@ -1202,6 +1413,12 @@ function CollapsedView({
           currentProjectColor={currentProjectColor}
           onToggle={onToggle}
           childIndicators={childIndicators}
+          isEditing={Boolean(currentSessionId) && editingSessionId === currentSessionId}
+          editingTitle={editingTitle}
+          onTitleDoubleClick={onTitleDoubleClick}
+          onEditingTitleChange={onEditingTitleChange}
+          onEditSave={onEditSave}
+          onEditCancel={onEditCancel}
         />
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
@@ -1257,6 +1474,11 @@ function ExpandedView({
   getProjectStatus,
   homeDirectory,
   childIndicators = [],
+  editingSessionId = null,
+  editingTitle = '',
+  onEditingTitleChange,
+  onEditSave,
+  onEditCancel,
 }: {
   sessions: SessionWithStatus[];
   currentSessionId: string;
@@ -1272,7 +1494,7 @@ function ExpandedView({
   onToggleCollapse: () => void;
   onNewSession: () => void;
   onSessionClick: (id: string) => void;
-  onSessionDoubleClick?: () => void;
+  onSessionDoubleClick?: (sessionId: string, sessionTitle: string) => void;
   onProjectSwitch: (projectId: string) => void;
   onAddProject: () => void;
   onRemoveProject?: (projectId: string) => void;
@@ -1285,6 +1507,11 @@ function ExpandedView({
   getProjectStatus: (path: string) => { hasRunning: boolean; hasUnread: boolean };
   homeDirectory: string | null;
   childIndicators?: Array<{ session: Session; isRunning: boolean }>;
+  editingSessionId?: string | null;
+  editingTitle?: string;
+  onEditingTitleChange?: (value: string) => void;
+  onEditSave?: () => void;
+  onEditCancel?: () => void;
 }) {
   const { t } = useI18n();
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -1346,6 +1573,7 @@ function ExpandedView({
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-[var(--interactive-border)]">
         <div className="flex-1 min-w-0 mr-1">
           <SessionStatusHeader
+            currentSessionId={currentSessionId}
             currentSessionTitle={currentSessionTitle}
             currentProjectLabel={currentProjectLabel}
             currentProjectIcon={currentProjectIcon}
@@ -1355,6 +1583,12 @@ function ExpandedView({
             onToggle={onToggleCollapse}
             isExpanded={true}
             childIndicators={childIndicators}
+            isEditing={editingSessionId === currentSessionId}
+            editingTitle={editingTitle}
+            onTitleDoubleClick={onSessionDoubleClick}
+            onEditingTitleChange={onEditingTitleChange}
+            onEditSave={onEditSave}
+            onEditCancel={onEditCancel}
           />
         </div>
         <div
@@ -1407,52 +1641,142 @@ function ExpandedView({
             <span>{t('chat.mobileStatus.noSessionsInProject')}</span>
           </div>
         ) : (
-          displaySessions.map((session) => (
-            <SessionItem
-              key={session.id}
-              session={session}
-              isCurrent={session.id === currentSessionId}
-              getSessionAgentName={getSessionAgentName}
-              getSessionTitle={getSessionTitle}
-              onClick={() => onSessionClick(session.id)}
-              onDoubleClick={onSessionDoubleClick}
-              needsAttention={needsAttention}
-            />
-          ))
+          displaySessions.map((session) => {
+            // When the current session is being edited, the sticky header
+            // already renders the rename input; suppress the duplicate
+            // input on this row to avoid two simultaneous editors.
+            const isCurrent = session.id === currentSessionId;
+            const isEditingHere = editingSessionId === session.id && !isCurrent;
+            return (
+              <SessionItem
+                key={session.id}
+                session={session}
+                isCurrent={isCurrent}
+                getSessionAgentName={getSessionAgentName}
+                getSessionTitle={getSessionTitle}
+                onClick={() => onSessionClick(session.id)}
+                onDoubleClick={onSessionDoubleClick}
+                needsAttention={needsAttention}
+                isEditing={isEditingHere}
+                editingTitle={editingTitle}
+                onEditingTitleChange={onEditingTitleChange}
+                onEditSave={onEditSave}
+                onEditCancel={onEditCancel}
+              />
+            );
+          })
         )}
       </div>
     </div>
   );
 }
 
-export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
-  onSessionSwitch,
+const MobileSessionStatusBarCollapsed: React.FC<{ onExpand: () => void }> = ({
+  onExpand,
 }) => {
   const { t } = useI18n();
-  const { currentTheme } = useThemeSystem();
+  const sessionCount = useDirectorySync(React.useCallback((state) => state.session.length, []));
+  const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
+  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
+  const currentSession = useSession(currentSessionId, currentDirectory || undefined);
+  const statusCounts = useLiveSessionStatusCounts();
+  const unseenCounts = useNotificationStore((state) => state.index.session.unseenCount);
+  const openNewSessionDraft = useSessionUIStore((state) => state.openNewSessionDraft);
+  const updateSessionTitle = useSessionUIStore((state) => state.updateSessionTitle);
+  const contextUsage = useCurrentContextUsage();
+  const {
+    currentProjectLabel,
+    currentProjectIcon,
+    currentProjectIconImageUrl,
+    currentProjectIconBackground,
+    currentProjectColor,
+  } = useCurrentProjectDisplay();
+
+  const totalUnread = React.useMemo(() => countUnreadSessions(unseenCounts), [unseenCounts]);
+  const currentSessionTitle = currentSession
+    ? getDisplaySessionTitle(currentSession)
+    : t('chat.mobileStatus.swipeHint');
+
+  const [editingSessionId, setEditingSessionId] = React.useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = React.useState('');
+
+  if (sessionCount === 0) {
+    return null;
+  }
+
+  const handleSessionDoubleClick = (sessionId: string, sessionTitle: string) => {
+    setEditingSessionId(sessionId);
+    setEditingTitle(sessionTitle);
+  };
+
+  const handleEditCancel = () => {
+    setEditingSessionId(null);
+    setEditingTitle('');
+  };
+
+  const handleEditSave = () => {
+    if (!editingSessionId) return;
+    const trimmed = editingTitle.trim();
+    const originalTitle = currentSession && currentSession.id === editingSessionId
+      ? getDisplaySessionTitle(currentSession)
+      : '';
+    if (trimmed && trimmed !== originalTitle) {
+      void updateSessionTitle(editingSessionId, trimmed);
+    }
+    setEditingSessionId(null);
+    setEditingTitle('');
+  };
+
+  return (
+    <CollapsedView
+      runningCount={statusCounts.running}
+      unreadCount={totalUnread}
+      currentSessionId={currentSessionId}
+      currentSessionTitle={currentSessionTitle}
+      currentProjectLabel={currentProjectLabel}
+      currentProjectIcon={currentProjectIcon}
+      currentProjectIconImageUrl={currentProjectIconImageUrl}
+      currentProjectIconBackground={currentProjectIconBackground}
+      currentProjectColor={currentProjectColor}
+      onToggle={onExpand}
+      onNewSession={() => openNewSessionDraft()}
+      contextUsage={contextUsage}
+      editingSessionId={editingSessionId}
+      editingTitle={editingTitle}
+      onTitleDoubleClick={handleSessionDoubleClick}
+      onEditingTitleChange={setEditingTitle}
+      onEditSave={handleEditSave}
+      onEditCancel={handleEditCancel}
+    />
+  );
+};
+
+const MobileSessionStatusBarExpanded: React.FC<MobileSessionStatusBarProps & { onCollapse: () => void }> = ({
+  onSessionSwitch,
+  onCollapse,
+}) => {
+  const { t } = useI18n();
   const sessions = useSessions();
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const sessionStatus = useAllSessionStatuses();
   const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
   const openNewSessionDraft = useSessionUIStore((state) => state.openNewSessionDraft);
-  const getContextUsage = useSessionUIStore((state) => state.getContextUsage);
+  const updateSessionTitle = useSessionUIStore((state) => state.updateSessionTitle);
   const agents = useConfigStore((state) => state.agents);
-  const getCurrentModel = useConfigStore((state) => state.getCurrentModel);
-  const isMobile = useUIStore((state) => state.isMobile);
-  const showMobileSessionStatusBar = useUIStore((state) => state.showMobileSessionStatusBar);
-  const isMobileSessionStatusBarCollapsed = useUIStore((state) => state.isMobileSessionStatusBarCollapsed);
-  const setIsMobileSessionStatusBarCollapsed = useUIStore((state) => state.setIsMobileSessionStatusBarCollapsed);
-  const setActiveMainTab = useUIStore((state) => state.setActiveMainTab);
-
-  // Project store
-  const projects = useProjectsStore((state) => state.projects);
-  const activeProjectId = useProjectsStore((state) => state.activeProjectId);
   const setActiveProject = useProjectsStore((state) => state.setActiveProject);
+  const setActiveProjectIdOnly = useProjectsStore((state) => state.setActiveProjectIdOnly);
   const removeProject = useProjectsStore((state) => state.removeProject);
-  const getActiveProject = useProjectsStore((state) => state.getActiveProject);
-
-  // Directory store
-  const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
+  const contextUsage = useCurrentContextUsage();
+  const {
+    projects,
+    activeProjectId,
+    homeDirectory,
+    currentProjectLabel,
+    currentProjectIcon,
+    currentProjectIconImageUrl,
+    currentProjectIconBackground,
+    currentProjectColor,
+  } = useCurrentProjectDisplay();
 
   const { sessions: sortedSessions, totalRunning, totalUnread, totalCount } = useSessionGrouping(sessions, sessionStatus);
   const { getSessionAgentName, getSessionTitle, needsAttention } = useSessionHelpers(agents, sessionStatus);
@@ -1467,42 +1791,45 @@ export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
   const currentSessionWithStatus = sortedSessions.find((s) => s.id === currentSessionId);
   const currentSessionChildIndicators = currentSessionWithStatus?._childIndicators ?? [];
 
-  const activeProject = getActiveProject();
-  const currentProjectLabel = activeProject?.label || formatDirectoryName(activeProject?.path || '', homeDirectory);
-  const currentProjectIcon = activeProject?.icon;
-  const currentProjectIconImageUrl = activeProject
-    ? getProjectIconImageUrl(activeProject, {
-      themeVariant: currentTheme.metadata.variant,
-      iconColor: currentTheme.colors.surface.foreground,
-    })
-    : null;
-  const currentProjectIconBackground = activeProject?.iconBackground ?? null;
-  const currentProjectColor = activeProject?.color;
-
-  // Calculate token usage for current session
-  const currentModel = getCurrentModel();
-  const limit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
-    ? (currentModel.limit as Record<string, unknown>)
-    : null;
-  const contextLimit = (limit && typeof limit.context === 'number' ? limit.context : 0);
-  const outputLimit = (limit && typeof limit.output === 'number' ? limit.output : 0);
-  const contextUsage = getContextUsage(contextLimit, outputLimit);
-
   const [isExpanded, setIsExpanded] = React.useState(false);
+  const [editingSessionId, setEditingSessionId] = React.useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = React.useState('');
 
-  if (!isMobile || !showMobileSessionStatusBar || totalCount === 0) {
+  if (totalCount === 0) {
     return null;
   }
 
   const handleSessionClick = (sessionId: string) => {
+    if (editingSessionId) return;
     setCurrentSession(sessionId);
     onSessionSwitch?.(sessionId);
     setIsExpanded(false);
   };
 
-  const handleSessionDoubleClick = () => {
-    // On double-tap, switch to the Chat tab
-    setActiveMainTab('chat');
+  const handleSessionDoubleClick = (sessionId: string, sessionTitle: string) => {
+    setEditingSessionId(sessionId);
+    setEditingTitle(sessionTitle);
+  };
+
+  const handleEditCancel = () => {
+    setEditingSessionId(null);
+    setEditingTitle('');
+  };
+
+  const handleEditSave = () => {
+    if (!editingSessionId) return;
+    const trimmed = editingTitle.trim();
+    const target = sessions.find((s) => s.id === editingSessionId);
+    const originalTitle = target ? getSessionTitle(target) : '';
+    if (trimmed && trimmed !== originalTitle) {
+      void updateSessionTitle(editingSessionId, trimmed);
+    }
+    setEditingSessionId(null);
+    setEditingTitle('');
+  };
+
+  const handleEditingTitleChange = (value: string) => {
+    setEditingTitle(value);
   };
 
   const handleCreateSession = () => {
@@ -1510,33 +1837,34 @@ export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
   };
 
   const handleProjectSwitch = (projectId: string) => {
-    if (projectId !== activeProjectId) {
-      setActiveProject(projectId);
+    if (projectId === activeProjectId) {
+      return;
     }
+    const draft = useSessionUIStore.getState().newSessionDraft;
+    if (draft?.open) {
+      if (
+        draft.pendingWorktreeRequestId ||
+        draft.bootstrapPendingDirectory ||
+        draft.preserveDirectoryOverride
+      ) {
+        return;
+      }
+      const project = projects.find((p) => p.id === projectId);
+      if (project) {
+        setActiveProjectIdOnly(projectId);
+        useSessionUIStore.getState().setNewSessionDraftTarget({
+          projectId,
+          directoryOverride: project.path,
+        });
+      }
+      return;
+    }
+    setActiveProject(projectId);
   };
 
   const handleAddProject = () => {
     sessionEvents.requestDirectoryDialog();
   };
-
-  if (isMobileSessionStatusBarCollapsed) {
-    return (
-      <CollapsedView
-        runningCount={totalRunning}
-        unreadCount={totalUnread}
-        currentSessionTitle={currentSessionTitle}
-        currentProjectLabel={currentProjectLabel}
-        currentProjectIcon={currentProjectIcon}
-        currentProjectIconImageUrl={currentProjectIconImageUrl}
-        currentProjectIconBackground={currentProjectIconBackground}
-        currentProjectColor={currentProjectColor}
-        onToggle={() => setIsMobileSessionStatusBarCollapsed(false)}
-        onNewSession={handleCreateSession}
-        contextUsage={contextUsage}
-        childIndicators={currentSessionChildIndicators}
-      />
-    );
-  }
 
   return (
     <ExpandedView
@@ -1552,7 +1880,7 @@ export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
       currentProjectColor={currentProjectColor}
       isExpanded={isExpanded}
       onToggleCollapse={() => {
-        setIsMobileSessionStatusBarCollapsed(true);
+        onCollapse();
         setIsExpanded(false);
       }}
       onNewSession={handleCreateSession}
@@ -1570,6 +1898,39 @@ export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
       getProjectStatus={getProjectStatus}
       homeDirectory={homeDirectory}
       childIndicators={currentSessionChildIndicators}
+      editingSessionId={editingSessionId}
+      editingTitle={editingTitle}
+      onEditingTitleChange={handleEditingTitleChange}
+      onEditSave={handleEditSave}
+      onEditCancel={handleEditCancel}
+    />
+  );
+};
+
+export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
+  onSessionSwitch,
+}) => {
+  const isMobile = useUIStore((state) => state.isMobile);
+  const showMobileSessionStatusBar = useUIStore((state) => state.showMobileSessionStatusBar);
+  const isMobileSessionStatusBarCollapsed = useUIStore((state) => state.isMobileSessionStatusBarCollapsed);
+  const setIsMobileSessionStatusBarCollapsed = useUIStore((state) => state.setIsMobileSessionStatusBarCollapsed);
+
+  if (!isMobile || !showMobileSessionStatusBar) {
+    return null;
+  }
+
+  if (isMobileSessionStatusBarCollapsed) {
+    return (
+      <MobileSessionStatusBarCollapsed
+        onExpand={() => setIsMobileSessionStatusBarCollapsed(false)}
+      />
+    );
+  }
+
+  return (
+    <MobileSessionStatusBarExpanded
+      onSessionSwitch={onSessionSwitch}
+      onCollapse={() => setIsMobileSessionStatusBarCollapsed(true)}
     />
   );
 };

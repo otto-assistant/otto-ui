@@ -1,15 +1,15 @@
 import React from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Session } from '@opencode-ai/sdk/v2';
-import {
-  RiAddLine,
-  RiArchiveLine,
-  RiArrowDownSLine,
-  RiArrowLeftLongLine,
-  RiArrowRightSLine,
-  RiDeleteBinLine,
-  RiGitBranchLine,
-} from '@remixicon/react';
+
+// Archived buckets routinely grow into the hundreds/thousands; virtualize
+// when we cross this row count so the DOM stays bounded.
+const ARCHIVED_VIRTUALIZE_THRESHOLD = 50;
+// Compact rows in the archived bucket without nested subagents render
+// around 24-32px; tanstack-virtual will measure precisely via the row ref.
+const ARCHIVED_ROW_ESTIMATE_PX = 28;
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
 import { sessionEvents } from '@/lib/sessionEvents';
 import type { MainTab } from '@/stores/useUIStore';
@@ -55,6 +55,7 @@ type Props = {
   lastRepoStatus: boolean;
   toggleGroupSessionLimit: (groupKey: string) => void;
   mobileVariant: boolean;
+  alwaysShowActions: boolean;
   activeProjectId: string | null;
   setActiveProjectIdOnly: (id: string) => void;
   setActiveMainTab: (tab: MainTab) => void;
@@ -120,6 +121,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
     lastRepoStatus,
     toggleGroupSessionLimit,
     mobileVariant,
+    alwaysShowActions,
     activeProjectId,
     setActiveProjectIdOnly,
     setActiveMainTab,
@@ -248,10 +250,6 @@ export function SessionGroupSection(props: Props): React.ReactNode {
   const ungroupedSessions = React.useMemo(() => sourceGroupNodes.filter((node) => !sessionIdsInFolders.has(node.session.id)), [sourceGroupNodes, sessionIdsInFolders]);
   const rootFolders = React.useMemo(() => allFoldersForGroup.filter(({ folder }) => !folder.parentId), [allFoldersForGroup]);
 
-  if (hasSessionSearchQuery && !groupMatchesSearch && rootFolders.length === 0 && ungroupedSessions.length === 0) {
-    return null;
-  }
-
   const totalSessions = ungroupedSessions.length;
   const visibleSessions = group.isArchivedBucket
     ? ungroupedSessions
@@ -259,6 +257,115 @@ export function SessionGroupSection(props: Props): React.ReactNode {
       ? ungroupedSessions
       : (isExpanded ? ungroupedSessions : ungroupedSessions.slice(0, maxVisible));
   const remainingCount = totalSessions - visibleSessions.length;
+
+  // Virtualize the archived bucket once it grows past a threshold. The
+  // archived list is the only group that can routinely hit hundreds or
+  // thousands of rows (projects accumulate archived sessions over time);
+  // every other group renders eagerly because they're small. All hooks
+  // below MUST stay above the search-empty early-return so they fire in
+  // the same order every render — rules-of-hooks.
+  const shouldVirtualizeArchived = group.isArchivedBucket === true
+    && !hasSessionSearchQuery
+    && visibleSessions.length >= ARCHIVED_VIRTUALIZE_THRESHOLD;
+
+  const archivedVirtualContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const [archivedScrollEl, setArchivedScrollEl] = React.useState<HTMLElement | null>(null);
+  // Offset of the virtual container from the scroll element's content origin.
+  // tanstack-virtual reads scrollMargin from useVirtualizer options and uses it
+  // to translate scrollTop into container-relative coordinates. Without this,
+  // when the scroll element is an ancestor (the sidebar's ScrollableOverlay),
+  // the virtualizer assumes the container starts at the top of the scroll
+  // element and renders rows in the wrong subset / position.
+  const [archivedScrollMargin, setArchivedScrollMargin] = React.useState(0);
+
+  // Find the nearest scrolling ancestor by walking up the DOM. The sidebar
+  // routes its scroll through `ScrollableOverlay` higher up the tree;
+  // threading a ref through every intermediate component would be invasive
+  // for this single use case.
+  const archivedVirtualizer = useVirtualizer({
+    count: visibleSessions.length,
+    getScrollElement: () => archivedScrollEl,
+    estimateSize: () => ARCHIVED_ROW_ESTIMATE_PX,
+    overscan: 8,
+    enabled: shouldVirtualizeArchived && archivedScrollEl !== null,
+    scrollMargin: archivedScrollMargin,
+  });
+
+  // Resolve the scrolling ancestor and measure the virtual container's offset
+  // from its content origin, both on every render. The container ref is null
+  // while the archived bucket is collapsed (the body isn't mounted), so a
+  // dep-gated effect that only fires when shouldVirtualizeArchived flips
+  // would miss the eventual mount and leave the scroll element null forever.
+  // Running on every render lets us pick up the container as soon as
+  // expanding the bucket mounts it; the cached scroll element is reused as
+  // long as it still contains the container. Both state setters compare
+  // before writing, so a stable layout produces no state churn.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  React.useLayoutEffect(() => {
+    if (!shouldVirtualizeArchived) {
+      if (archivedScrollEl !== null) setArchivedScrollEl(null);
+      if (archivedScrollMargin !== 0) setArchivedScrollMargin(0);
+      return;
+    }
+    const container = archivedVirtualContainerRef.current;
+    if (!container) {
+      // Bucket still collapsed — body not mounted. We'll re-run on the
+      // render that mounts it.
+      return;
+    }
+    let scrollEl: HTMLElement | null = archivedScrollEl;
+    if (!scrollEl || !scrollEl.contains(container)) {
+      // Walk up to find the nearest scrolling ancestor. Only happens on
+      // first mount or if the DOM tree restructured.
+      let el: HTMLElement | null = container.parentElement;
+      while (el) {
+        const style = window.getComputedStyle(el);
+        if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+          scrollEl = el;
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (scrollEl !== archivedScrollEl) {
+        setArchivedScrollEl(scrollEl);
+        // setState triggers a re-render; bail out and let the next pass
+        // measure the margin against the fresh element.
+        return;
+      }
+    }
+    if (!scrollEl) return;
+    const offset = container.getBoundingClientRect().top
+      - scrollEl.getBoundingClientRect().top
+      + scrollEl.scrollTop;
+    setArchivedScrollMargin((prev) => (Math.abs(prev - offset) < 1 ? prev : offset));
+  });
+
+  // Re-measure when the sidebar's scroll container resizes (e.g. window
+  // resize, sidebar width change). Mirrors the pattern in ChangesSection.
+  React.useEffect(() => {
+    if (!shouldVirtualizeArchived || !archivedScrollEl) return;
+    const observer = new ResizeObserver(() => {
+      archivedVirtualizer.measure();
+    });
+    observer.observe(archivedScrollEl);
+    return () => observer.disconnect();
+  }, [shouldVirtualizeArchived, archivedScrollEl, archivedVirtualizer]);
+
+  const archivedTotalSize = archivedVirtualizer.getTotalSize();
+  // Read virtual rows directly in render rather than via useMemo. The
+  // virtualizer instance is a stable reference across renders, and on a
+  // pure scroll event neither it nor `archivedTotalSize` change — only the
+  // virtualizer's internal scroll offset does. Memoizing here would return
+  // stale rows after every scroll. tanstack-virtual v3 expects callers to
+  // read getVirtualItems() inline; it's cheap and returns [] when the
+  // virtualizer is disabled.
+  const archivedVirtualRows = shouldVirtualizeArchived && archivedScrollEl !== null
+    ? archivedVirtualizer.getVirtualItems()
+    : [];
+
+  if (hasSessionSearchQuery && !groupMatchesSearch && rootFolders.length === 0 && ungroupedSessions.length === 0) {
+    return null;
+  }
 
   const collectGroupSessions = (nodes: SessionNode[]): Session[] => {
     const collected: Session[] = [];
@@ -405,6 +512,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
             groupDirectory={group.directory}
             projectId={projectId}
             mobileVariant={mobileVariant}
+            alwaysShowActions={alwaysShowActions}
             isRenaming={renamingFolderId === folder.id}
             renameDraft={renamingFolderId === folder.id ? renameFolderDraft : undefined}
             onRenameDraftChange={(value) => setRenameFolderDraft(value)}
@@ -443,7 +551,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
 
   const renderFolderItems = () => rootFolders.map(({ folder, nodes }) => renderOneFolderItem(folder, nodes, 0));
   const hasWorktreeDeleteAction = Boolean(!group.isMain && group.worktree);
-  const groupHeaderRightPadding = mobileVariant
+  const groupHeaderRightPadding = alwaysShowActions
     ? (hasWorktreeDeleteAction ? 'pr-14' : 'pr-7')
     : isMinimalMode
       ? (hasWorktreeDeleteAction
@@ -462,11 +570,46 @@ export function SessionGroupSection(props: Props): React.ReactNode {
       }}
     >
       {renderFolderItems()}
-      {visibleSessions.map((node) => (
-        <React.Fragment key={node.session.id}>
-          {renderSessionNode(node, 0, group.directory, projectId, group.isArchivedBucket === true)}
-        </React.Fragment>
-      ))}
+      {shouldVirtualizeArchived ? (
+        <div
+          ref={archivedVirtualContainerRef}
+          style={{
+            position: 'relative',
+            // Reserve scroll height for all archived rows so the parent
+            // scroll thumb reflects the full list. Individual rows are
+            // absolutely positioned by translateY.
+            height: archivedTotalSize > 0 ? archivedTotalSize : undefined,
+            width: '100%',
+          }}
+        >
+          {archivedVirtualRows.map((virtualRow) => {
+            const node = visibleSessions[virtualRow.index];
+            if (!node) return null;
+            return (
+              <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={archivedVirtualizer.measureElement}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  // virtualRow.start is in scroll-element coordinates (offset by
+                  // scrollMargin). Subtract scrollMargin to position within the
+                  // container, which itself starts at scrollMargin in the scroll
+                  // element.
+                  transform: `translateY(${virtualRow.start - archivedScrollMargin}px)`,
+                }}
+              >
+                {renderSessionNode(node, 0, group.directory, projectId, true)}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        visibleSessions.map((node) => renderSessionNode(node, 0, group.directory, projectId, group.isArchivedBucket === true))
+      )}
       {totalSessions === 0 && allFoldersForGroup.length === 0 ? (
         <div className="py-1 text-left typography-micro text-muted-foreground">
           {group.isArchivedBucket
@@ -537,12 +680,15 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                     <TooltipTrigger asChild>
                       <span className="inline-flex shrink-0 items-center gap-1 leading-none align-middle">
                         <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                          <RiGitBranchLine
-                            className="h-3.5 w-3.5 shrink-0 group-hover/gh:hidden"
+                          <Icon name="git-branch"
+                            className={cn('h-3.5 w-3.5 shrink-0', alwaysShowActions ? 'hidden' : 'group-hover/gh:hidden')}
                             style={branchIconColor ? { color: branchIconColor } : undefined}
                           />
-                          <span className="hidden text-muted-foreground group-hover/gh:inline-flex h-3.5 w-3.5 items-center justify-center">
-                            {isCollapsed ? <RiArrowRightSLine className="h-3.5 w-3.5" /> : <RiArrowDownSLine className="h-3.5 w-3.5" />}
+                          <span className={cn(
+                            'text-muted-foreground h-3.5 w-3.5 items-center justify-center',
+                            alwaysShowActions ? 'inline-flex' : 'hidden group-hover/gh:inline-flex',
+                          )}>
+                            {isCollapsed ? <Icon name="arrow-right-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-down-s" className="h-3.5 w-3.5" />}
                           </span>
                         </span>
                         {prIndicator.url ? (
@@ -566,7 +712,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                             {baseBranchLabel && headBranchLabel ? (
                               <>
                                 <span>{baseBranchLabel}</span>
-                                <RiArrowLeftLongLine className="mx-0.5 inline h-3 w-3 align-[-2px]" />
+                                <Icon name="arrow-left-long" className="mx-0.5 inline h-3 w-3 align-[-2px]" />
                                 <span>{headBranchLabel}</span>
                               </>
                             ) : (
@@ -591,9 +737,12 @@ export function SessionGroupSection(props: Props): React.ReactNode {
               ) : group.isArchivedBucket ? (
                 <span className="inline-flex min-w-0 max-w-full items-center gap-1">
                   <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                    <RiArchiveLine className="h-3.5 w-3.5 shrink-0 text-muted-foreground group-hover/gh:hidden" />
-                    <span className="hidden text-muted-foreground group-hover/gh:inline-flex h-3.5 w-3.5 items-center justify-center">
-                      {isCollapsed ? <RiArrowRightSLine className="h-3.5 w-3.5" /> : <RiArrowDownSLine className="h-3.5 w-3.5" />}
+                    <Icon name="archive" className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground', alwaysShowActions ? 'hidden' : 'group-hover/gh:hidden')} />
+                    <span className={cn(
+                      'text-muted-foreground h-3.5 w-3.5 items-center justify-center',
+                      alwaysShowActions ? 'inline-flex' : 'hidden group-hover/gh:inline-flex',
+                    )}>
+                      {isCollapsed ? <Icon name="arrow-right-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-down-s" className="h-3.5 w-3.5" />}
                     </span>
                   </span>
                   <span className="min-w-0 flex-1 truncate">{renderHighlightedText(group.label, normalizedSessionSearchQuery)}</span>
@@ -601,12 +750,15 @@ export function SessionGroupSection(props: Props): React.ReactNode {
               ) : (!group.isMain || group.worktree) ? (
                 <span className="inline-flex min-w-0 max-w-full items-center gap-1">
                   <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                    <RiGitBranchLine
-                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground group-hover/gh:hidden"
+                    <Icon name="git-branch"
+                      className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground', alwaysShowActions ? 'hidden' : 'group-hover/gh:hidden')}
                       style={branchIconColor ? { color: branchIconColor } : undefined}
                     />
-                    <span className="hidden text-muted-foreground group-hover/gh:inline-flex h-3.5 w-3.5 items-center justify-center">
-                      {isCollapsed ? <RiArrowRightSLine className="h-3.5 w-3.5" /> : <RiArrowDownSLine className="h-3.5 w-3.5" />}
+                    <span className={cn(
+                      'text-muted-foreground h-3.5 w-3.5 items-center justify-center',
+                      alwaysShowActions ? 'inline-flex' : 'hidden group-hover/gh:inline-flex',
+                    )}>
+                      {isCollapsed ? <Icon name="arrow-right-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-down-s" className="h-3.5 w-3.5" />}
                     </span>
                   </span>
                   <span className="min-w-0 flex-1 truncate">{renderHighlightedText(group.label, normalizedSessionSearchQuery)}</span>
@@ -618,16 +770,15 @@ export function SessionGroupSection(props: Props): React.ReactNode {
             {showBranchSubtitle && statusLine ? (
               <span className="inline-flex min-w-0 items-center gap-1.5 leading-tight">
                 {group.isArchivedBucket ? (
-                  <RiArchiveLine className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+                  <Icon name="archive" className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
                 ) : (!group.isMain || isGitProject) ? (
                   showInlinePrTitle && prIndicator ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
-                          <RiGitBranchLine
-                            className="h-3.5 w-3.5 text-muted-foreground"
-                            style={branchIconColor ? { color: branchIconColor } : undefined}
-                          />
+                          <Icon name="git-branch" className="h-3.5 w-3.5 text-muted-foreground"
+                            
+                            style={branchIconColor ? { color: branchIconColor } : undefined}/>
                         </span>
                       </TooltipTrigger>
                       <TooltipContent side="top" sideOffset={6} align="start" className="max-w-sm">
@@ -637,7 +788,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                               {baseBranchLabel && headBranchLabel ? (
                                 <>
                                   <span>{baseBranchLabel}</span>
-                                  <RiArrowLeftLongLine className="mx-0.5 inline h-3 w-3 align-[-2px]" />
+                                  <Icon name="arrow-left-long" className="mx-0.5 inline h-3 w-3 align-[-2px]" />
                                   <span>{headBranchLabel}</span>
                                 </>
                               ) : (
@@ -658,10 +809,9 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                       </TooltipContent>
                     </Tooltip>
                   ) : (
-                    <RiGitBranchLine
-                      className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground"
-                      style={branchIconColor ? { color: branchIconColor } : undefined}
-                    />
+                    <Icon name="git-branch" className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground"
+                      
+                      style={branchIconColor ? { color: branchIconColor } : undefined}/>
                   )
                 ) : null}
                 <span
@@ -675,7 +825,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
           </div>
         </div>
         {group.isArchivedBucket && allGroupSessions.length > 0 ? (
-          <div className={cn('absolute right-0.5 top-1/2 -translate-y-1/2 z-10 transition-opacity', mobileVariant ? 'opacity-100' : 'opacity-0 group-hover/gh:opacity-100 group-focus-within/gh:opacity-100')}>
+          <div className={cn('absolute right-0.5 top-1/2 -translate-y-1/2 z-10 transition-opacity', alwaysShowActions ? 'opacity-100' : 'opacity-0 group-hover/gh:opacity-100 group-focus-within/gh:opacity-100')}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -690,7 +840,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                   className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                   aria-label={t('sessions.sidebar.group.actions.deleteArchivedInGroupAria', { label: group.label })}
                 >
-                  <RiDeleteBinLine className="h-4 w-4" />
+                  <Icon name="delete-bin" className="h-4 w-4" />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" sideOffset={4}><p>{t('sessions.sidebar.group.actions.deleteArchivedSessions')}</p></TooltipContent>
@@ -698,7 +848,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
           </div>
         ) : null}
         {group.directory && !group.isMain && group.worktree ? (
-          <div className={cn('absolute right-7 top-1/2 -translate-y-1/2 z-10 transition-opacity', mobileVariant ? 'opacity-100' : 'opacity-0 group-hover/gh:opacity-100 group-focus-within/gh:opacity-100')}>
+          <div className={cn('absolute right-7 top-1/2 -translate-y-1/2 z-10 transition-opacity', alwaysShowActions ? 'opacity-100' : 'opacity-0 group-hover/gh:opacity-100 group-focus-within/gh:opacity-100')}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -714,7 +864,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                   className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                   aria-label={t('sessions.sidebar.group.actions.deleteGroupAria', { label: group.label })}
                 >
-                  <RiDeleteBinLine className="h-4 w-4" />
+                  <Icon name="delete-bin" className="h-4 w-4" />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" sideOffset={4}><p>{t('sessions.sidebar.group.actions.deleteWorktree')}</p></TooltipContent>
@@ -722,7 +872,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
           </div>
         ) : null}
         {group.directory ? (
-          <div className={cn('absolute right-0.5 top-1/2 -translate-y-1/2 z-10 transition-opacity', mobileVariant ? 'opacity-100' : 'opacity-0 group-hover/gh:opacity-100 group-focus-within/gh:opacity-100')}>
+          <div className={cn('absolute right-0.5 top-1/2 -translate-y-1/2 z-10 transition-opacity', alwaysShowActions ? 'opacity-100' : 'opacity-0 group-hover/gh:opacity-100 group-focus-within/gh:opacity-100')}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -737,7 +887,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                   className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                   aria-label={t('sessions.sidebar.group.actions.newDraftInGroupAria', { label: group.label })}
                  >
-                   <RiAddLine className="h-4 w-4" />
+                   <Icon name="add" className="h-4 w-4" />
                  </button>
                </TooltipTrigger>
                <TooltipContent side="bottom" sideOffset={4}><p>{t('sessions.sidebar.project.actions.newDraftSession')}</p></TooltipContent>

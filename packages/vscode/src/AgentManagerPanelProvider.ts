@@ -97,6 +97,10 @@ export class AgentManagerPanelProvider {
         context: this._context,
       });
       this._panel?.webview.postMessage(response);
+
+      if (message.type === 'api:config/settings:save' && response.success) {
+        void vscode.commands.executeCommand('openchamber.internal.settingsSynced', response.data);
+      }
     }, null, this._context.subscriptions);
   }
 
@@ -121,6 +125,30 @@ export class AgentManagerPanelProvider {
     this._sendCachedState();
   }
 
+  public notifySettingsSynced(settings: unknown): void {
+    if (!this._panel) {
+      return;
+    }
+
+    this._panel.webview.postMessage({
+      type: 'command',
+      command: 'settingsSynced',
+      payload: settings,
+    });
+  }
+
+  public notifyWindowFocusChanged(focused: boolean): void {
+    if (!this._panel) {
+      return;
+    }
+
+    this._panel.webview.postMessage({
+      type: 'command',
+      command: 'windowFocusChanged',
+      payload: { focused },
+    });
+  }
+
   private _sendCachedState() {
     if (!this._panel) {
       return;
@@ -131,6 +159,7 @@ export class AgentManagerPanelProvider {
       status: this._cachedStatus,
       error: this._cachedError,
     });
+    this.notifyWindowFocusChanged(vscode.window.state.focused);
   }
 
   private _buildSseHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -234,6 +263,7 @@ export class AgentManagerPanelProvider {
       initialStatus: this._cachedStatus,
       cliAvailable,
       panelType: 'agentManager',
+      extensionVersion: String(this._context.extension?.packageJSON?.version || ''),
       devServerUrl: this._webviewDevServerUrl,
     });
   }

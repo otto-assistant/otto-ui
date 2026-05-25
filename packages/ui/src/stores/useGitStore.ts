@@ -22,6 +22,7 @@ const DIFF_PREFETCH_LARGE_FILE_THRESHOLD = 500; // skip prefetch for files with 
 // Diff cache limits to prevent memory bloat with many modified files
 const DIFF_CACHE_MAX_ENTRIES = 30;
 const DIFF_CACHE_MAX_TOTAL_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+type GitStatusFetchMode = 'full' | 'light';
 
 interface DirectoryGitState {
   isGitRepo: boolean | null;
@@ -30,6 +31,7 @@ interface DirectoryGitState {
   log: GitLogResponse | null;
   identity: GitIdentitySummary | null;
   diffCache: Map<string, { original: string; modified: string; fetchedAt: number; isBinary?: boolean }>;
+  indexRevision: number;
   lastRepoCheckAt: number;
   lastStatusFetch: number;
   lastStatusChange: number;
@@ -60,6 +62,9 @@ interface GitStore {
 
   ensureStatus: (directory: string, git: GitAPI) => Promise<void>;
   ensureAll: (directory: string, git: GitAPI) => Promise<void>;
+  moveStatusPathsOptimistically: (directory: string, paths: string[], direction: 'stage' | 'unstage') => GitStatus | null;
+  restoreStatus: (directory: string, status: GitStatus | null) => void;
+  bumpIndexRevision: (directory: string) => void;
 
   getDiff: (directory: string, filePath: string) => { original: string; modified: string; fetchedAt: number; isBinary?: boolean } | null;
   setDiff: (directory: string, filePath: string, diff: { original: string; modified: string; isBinary?: boolean }) => void;
@@ -90,8 +95,10 @@ interface GitAPI {
 
 const inFlightDiffFetchesByDirectory = new Map<string, Set<string>>();
 const diffFetchGenerationByDirectory = new Map<string, number>();
-const inFlightStatusFetchesByDirectory = new Map<string, Promise<boolean>>();
+const inFlightStatusFetches = new Map<string, Promise<boolean>>();
 const inFlightEnsureAllByDirectory = new Map<string, Promise<void>>();
+
+const getStatusFetchKey = (directory: string, mode: GitStatusFetchMode): string => `${mode}:${directory}`;
 
 const getDiffFetchGeneration = (directory: string): number =>
   diffFetchGenerationByDirectory.get(directory) ?? 0;
@@ -119,6 +126,7 @@ const createEmptyDirectoryState = (): DirectoryGitState => ({
   log: null,
   identity: null,
   diffCache: new Map(),
+  indexRevision: 0,
   lastRepoCheckAt: 0,
   lastStatusFetch: 0,
   lastStatusChange: 0,
@@ -277,6 +285,72 @@ const getChangedFilePaths = (oldStatus: GitStatus | null, newStatus: GitStatus |
   return changed;
 };
 
+const hasIndexStatusChanged = (oldStatus: GitStatus | null, newStatus: GitStatus | null): boolean => {
+  if (!oldStatus && !newStatus) return false;
+  if (!oldStatus || !newStatus) return true;
+
+  const oldFiles = oldStatus.files ?? [];
+  const newFiles = newStatus.files ?? [];
+  const normalizeIndexStatus = (value?: string | null): string => {
+    const trimmed = value?.trim() ?? '';
+    return trimmed === '?' ? '' : trimmed;
+  };
+
+  const oldIndexByPath = new Map(oldFiles.map((file) => [file.path, normalizeIndexStatus(file.index)] as const));
+  const newIndexByPath = new Map(newFiles.map((file) => [file.path, normalizeIndexStatus(file.index)] as const));
+  const paths = new Set<string>([...oldIndexByPath.keys(), ...newIndexByPath.keys()]);
+
+  for (const path of paths) {
+    if ((oldIndexByPath.get(path) ?? '') !== (newIndexByPath.get(path) ?? '')) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const isBlankStatusCode = (value?: string | null): boolean => !value || value.trim().length === 0;
+const isConflictStatusCode = (value?: string | null): boolean => (value || '').trim() === 'U';
+
+const toStagedStatusFile = (file: GitStatus['files'][number]): GitStatus['files'][number] => {
+  const index = (file.index || '').trim();
+  const workingDir = (file.working_dir || '').trim();
+
+  if (isConflictStatusCode(index) || isConflictStatusCode(workingDir)) {
+    return file;
+  }
+
+  const nextIndex = index === '?' || workingDir === '?'
+    ? 'A'
+    : index || workingDir || ' ';
+
+  return {
+    ...file,
+    index: nextIndex,
+    working_dir: ' ',
+  };
+};
+
+const toUnstagedStatusFile = (file: GitStatus['files'][number]): GitStatus['files'][number] => {
+  const index = (file.index || '').trim();
+  const workingDir = (file.working_dir || '').trim();
+
+  if (isConflictStatusCode(index) || isConflictStatusCode(workingDir)) {
+    return file;
+  }
+
+  const nextWorkingDir = workingDir || (index === 'A' || index === '?' ? '?' : index) || ' ';
+
+  return {
+    ...file,
+    index: ' ',
+    working_dir: nextWorkingDir,
+  };
+};
+
+const isCleanStatusFile = (file: GitStatus['files'][number]): boolean =>
+  isBlankStatusCode(file.index) && isBlankStatusCode(file.working_dir);
+
 export const useGitStore = create<GitStore>()(
   devtools(
     (set, get) => ({
@@ -308,7 +382,10 @@ export const useGitStore = create<GitStore>()(
       },
 
       fetchStatus: async (directory, git, options = {}) => {
-        const existing = inFlightStatusFetchesByDirectory.get(directory);
+        const statusFetchMode: GitStatusFetchMode = options.mode ?? 'full';
+        const statusFetchKey = getStatusFetchKey(directory, statusFetchMode);
+        const existing = inFlightStatusFetches.get(statusFetchKey)
+          ?? (statusFetchMode === 'light' ? inFlightStatusFetches.get(getStatusFetchKey(directory, 'full')) : undefined);
         if (existing) {
           return existing;
         }
@@ -365,6 +442,7 @@ export const useGitStore = create<GitStore>()(
               const currentDirState = newDirectories.get(directory) ?? createEmptyDirectoryState();
 
               const changedPaths = getChangedFilePaths(currentDirState.status, newStatus);
+              const indexStatusChanged = hasIndexStatusChanged(currentDirState.status, newStatus);
 
               const oldPaths = new Set((currentDirState.status?.files ?? []).map((f) => f.path));
               const newPaths = new Set((newStatus.files ?? []).map((f) => f.path));
@@ -398,6 +476,7 @@ export const useGitStore = create<GitStore>()(
                 isGitRepo: true,
                 status: mergedStatus,
                 diffCache: nextDiffCache,
+                indexRevision: indexStatusChanged ? currentDirState.indexRevision + 1 : currentDirState.indexRevision,
                 lastRepoCheckAt: shouldProbeRepository ? now : currentDirState.lastRepoCheckAt,
                 lastStatusFetch: Date.now(),
                 lastStatusChange: hasFileContentChange ? Date.now() : currentDirState.lastStatusChange,
@@ -430,15 +509,104 @@ export const useGitStore = create<GitStore>()(
           return statusChanged;
         })();
 
-        inFlightStatusFetchesByDirectory.set(directory, fetchPromise);
+        inFlightStatusFetches.set(statusFetchKey, fetchPromise);
 
         try {
           return await fetchPromise;
         } finally {
-          if (inFlightStatusFetchesByDirectory.get(directory) === fetchPromise) {
-            inFlightStatusFetchesByDirectory.delete(directory);
+          if (inFlightStatusFetches.get(statusFetchKey) === fetchPromise) {
+            inFlightStatusFetches.delete(statusFetchKey);
           }
         }
+      },
+
+      moveStatusPathsOptimistically: (directory, paths, direction) => {
+        const normalizedPaths = new Set(paths.map((path) => path.trim()).filter(Boolean));
+        if (normalizedPaths.size === 0) {
+          return null;
+        }
+
+        const { directories } = get();
+        const dirState = directories.get(directory);
+        const previousStatus = dirState?.status ?? null;
+        if (!dirState || !previousStatus) {
+          return previousStatus;
+        }
+
+        let didChange = false;
+        const nextFiles: GitStatus['files'] = [];
+
+        for (const file of previousStatus.files) {
+          if (!normalizedPaths.has(file.path)) {
+            nextFiles.push(file);
+            continue;
+          }
+
+          const nextFile = direction === 'stage'
+            ? toStagedStatusFile(file)
+            : toUnstagedStatusFile(file);
+
+          if (nextFile !== file) {
+            didChange = true;
+          }
+
+          if (!isCleanStatusFile(nextFile)) {
+            nextFiles.push(nextFile);
+          } else {
+            didChange = true;
+          }
+        }
+
+        if (!didChange) {
+          return previousStatus;
+        }
+
+        const nextDirectories = new Map(directories);
+        nextDirectories.set(directory, {
+          ...dirState,
+          status: {
+            ...previousStatus,
+            files: nextFiles,
+            isClean: nextFiles.length === 0,
+          },
+          indexRevision: dirState.indexRevision + 1,
+          lastStatusChange: Date.now(),
+        });
+        set({ directories: nextDirectories });
+
+        return previousStatus;
+      },
+
+      restoreStatus: (directory, status) => {
+        const { directories } = get();
+        const dirState = directories.get(directory);
+        if (!dirState) {
+          return;
+        }
+
+        const nextDirectories = new Map(directories);
+        nextDirectories.set(directory, {
+          ...dirState,
+          status,
+          indexRevision: dirState.indexRevision + 1,
+          lastStatusChange: Date.now(),
+        });
+        set({ directories: nextDirectories });
+      },
+
+      bumpIndexRevision: (directory) => {
+        const { directories } = get();
+        const dirState = directories.get(directory);
+        if (!dirState) {
+          return;
+        }
+
+        const nextDirectories = new Map(directories);
+        nextDirectories.set(directory, {
+          ...dirState,
+          indexRevision: dirState.indexRevision + 1,
+        });
+        set({ directories: nextDirectories });
       },
 
       fetchBranches: async (directory, git) => {

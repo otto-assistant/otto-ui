@@ -72,10 +72,11 @@ type MenuAction =
   | 'new-session'
   | 'new-worktree-session'
   | 'change-workspace'
-  | 'open-git-tab'
-  | 'open-diff-tab'
-  | 'open-files-tab'
-  | 'open-terminal-tab'
+  | 'toggle-right-sidebar'
+  | 'open-right-sidebar-git'
+  | 'open-right-sidebar-files'
+  | 'toggle-terminal'
+  | 'toggle-terminal-expanded'
   | 'copy'
   | 'theme-light'
   | 'theme-dark'
@@ -90,13 +91,18 @@ export const useMenuActions = (
 ) => {
   const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
   const toggleCommandPalette = useUIStore((s) => s.toggleCommandPalette);
-  const setQuickOpenOpen = useUIStore((s) => s.setQuickOpenOpen);
+  const setCommandPaletteOpen = useUIStore((s) => s.setCommandPaletteOpen);
   const toggleHelpDialog = useUIStore((s) => s.toggleHelpDialog);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const setSessionSwitcherOpen = useUIStore((s) => s.setSessionSwitcherOpen);
   const setActiveMainTab = useUIStore((s) => s.setActiveMainTab);
   const setSettingsDialogOpen = useUIStore((s) => s.setSettingsDialogOpen);
   const setAboutDialogOpen = useUIStore((s) => s.setAboutDialogOpen);
+  const toggleRightSidebar = useUIStore((s) => s.toggleRightSidebar);
+  const setRightSidebarOpen = useUIStore((s) => s.setRightSidebarOpen);
+  const setRightSidebarTab = useUIStore((s) => s.setRightSidebarTab);
+  const toggleBottomTerminal = useUIStore((s) => s.toggleBottomTerminal);
+  const setBottomTerminalExpanded = useUIStore((s) => s.setBottomTerminalExpanded);
   const checkForUpdates = useUpdateStore((state) => state.checkForUpdates);
   const { setThemeMode } = useThemeSystem();
   const checkUpdatesInFlightRef = React.useRef(false);
@@ -146,7 +152,7 @@ export const useMenuActions = (
           break;
 
         case 'quick-open':
-          setQuickOpenOpen(true);
+          setCommandPaletteOpen(true);
           break;
 
         case 'new-session':
@@ -165,29 +171,27 @@ export const useMenuActions = (
           handleChangeWorkspace();
           break;
 
-        case 'open-git-tab': {
-          const { activeMainTab } = useUIStore.getState();
-          setActiveMainTab(activeMainTab === 'git' ? 'chat' : 'git');
+        case 'toggle-right-sidebar':
+          toggleRightSidebar();
           break;
-        }
 
-        case 'open-diff-tab': {
-          const { activeMainTab } = useUIStore.getState();
-          setActiveMainTab(activeMainTab === 'diff' ? 'chat' : 'diff');
+        case 'open-right-sidebar-git':
+          setRightSidebarOpen(true);
+          setRightSidebarTab('git');
           break;
-        }
 
-        case 'open-files-tab': {
-          const { activeMainTab } = useUIStore.getState();
-          setActiveMainTab(activeMainTab === 'files' ? 'chat' : 'files');
+        case 'open-right-sidebar-files':
+          setRightSidebarOpen(true);
+          setRightSidebarTab('files');
           break;
-        }
 
-        case 'open-terminal-tab': {
-          const { activeMainTab } = useUIStore.getState();
-          setActiveMainTab(activeMainTab === 'terminal' ? 'chat' : 'terminal');
+        case 'toggle-terminal':
+          toggleBottomTerminal();
           break;
-        }
+
+        case 'toggle-terminal-expanded':
+          setBottomTerminalExpanded(!useUIStore.getState().isBottomTerminalExpanded);
+          break;
 
         case 'copy': {
           const copyEvent = new Event('openchamber:copy', { cancelable: true });
@@ -237,11 +241,16 @@ export const useMenuActions = (
       setAboutDialogOpen,
       setActiveMainTab,
       setSessionSwitcherOpen,
-      setQuickOpenOpen,
+      setCommandPaletteOpen,
       setSettingsDialogOpen,
+      setBottomTerminalExpanded,
+      setRightSidebarOpen,
+      setRightSidebarTab,
       setThemeMode,
+      toggleBottomTerminal,
       toggleCommandPalette,
       toggleHelpDialog,
+      toggleRightSidebar,
       toggleSidebar,
     ]
   );

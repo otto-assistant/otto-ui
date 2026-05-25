@@ -85,7 +85,7 @@ export interface OpenChamberProjectContextData extends OpenChamberProjectNotesTo
   plans: OpenChamberProjectPlanFileLink[];
 }
 
-export const OPENCHAMBER_PROJECT_NOTES_MAX_LENGTH = 1000;
+export const OPENCHAMBER_PROJECT_NOTES_MAX_LENGTH = 3000;
 export const OPENCHAMBER_PROJECT_TODO_TEXT_MAX_LENGTH = 120;
 export const OPENCHAMBER_PROJECT_ACTION_NAME_MAX_LENGTH = 80;
 export const OPENCHAMBER_PROJECT_ACTION_COMMAND_MAX_LENGTH = 4000;
@@ -169,7 +169,12 @@ const readTextFile = async (path: string): Promise<string | null> => {
   }
 
   try {
-    const response = await fetch(`${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}`);
+    const response = await fetch(`${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}`,
+      {
+        // Avoid conditional requests (304 + empty body).
+        cache: 'no-store',
+      }
+    );
     if (!response.ok) {
       return null;
     }
@@ -201,7 +206,10 @@ const resolveHomeDirectory = async (): Promise<string | null> => {
   // In some runtimes, window.__OPENCHAMBER_HOME__ can be workspace/project-root
   // scoped, which would incorrectly route writes into the project directory.
   try {
-    const response = await fetch(`${getBaseUrl()}/fs/home`);
+    const response = await fetch(`${getBaseUrl()}/fs/home`, {
+      // Avoid conditional requests (304 + empty body).
+      cache: 'no-store',
+    });
     if (!response.ok) {
       throw new Error('Failed to resolve home directory from API');
     }

@@ -18,7 +18,11 @@ export const createSettingsHelpers = (dependencies) => {
   } = dependencies;
 
   const PWA_APP_NAME_MAX_LENGTH = 64;
+  const STT_SERVER_URL_MAX_LENGTH = 2048;
+  const STT_MODEL_MAX_LENGTH = 256;
+  const STT_LANGUAGE_MAX_LENGTH = 64;
   const PWA_ORIENTATION_VALUES = new Set(['system', 'portrait', 'landscape']);
+  const MOBILE_KEYBOARD_MODE_VALUES = new Set(['native', 'resize-content']);
 
   const normalizePwaAppName = (value, fallback = '') => {
     if (typeof value !== 'string') {
@@ -37,6 +41,17 @@ export const createSettingsHelpers = (dependencies) => {
     }
     const normalized = value.trim();
     if (PWA_ORIENTATION_VALUES.has(normalized)) {
+      return normalized;
+    }
+    return fallback;
+  };
+
+  const normalizeMobileKeyboardMode = (value, fallback = 'native') => {
+    if (typeof value !== 'string') {
+      return fallback;
+    }
+    const normalized = value.trim();
+    if (MOBILE_KEYBOARD_MODE_VALUES.has(normalized)) {
       return normalized;
     }
     return fallback;
@@ -152,6 +167,9 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.showReasoningTraces === 'boolean') {
       result.showReasoningTraces = candidate.showReasoningTraces;
+    }
+    if (typeof candidate.collapsibleThinkingBlocks === 'boolean') {
+      result.collapsibleThinkingBlocks = candidate.collapsibleThinkingBlocks;
     }
     if (typeof candidate.showTextJustificationActivity === 'boolean') {
       result.showTextJustificationActivity = candidate.showTextJustificationActivity;
@@ -309,6 +327,12 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.pwaOrientation === 'string') {
       result.pwaOrientation = normalizePwaOrientation(candidate.pwaOrientation, undefined);
+    }
+    if (typeof candidate.mobileKeyboardMode === 'string') {
+      const mode = normalizeMobileKeyboardMode(candidate.mobileKeyboardMode, undefined);
+      if (mode) {
+        result.mobileKeyboardMode = mode;
+      }
     }
     if (typeof candidate.toolCallExpansion === 'string') {
       const mode = candidate.toolCallExpansion.trim();
@@ -555,6 +579,72 @@ export const createSettingsHelpers = (dependencies) => {
       result.reportUsage = candidate.reportUsage;
     }
 
+    // Global behavior prompt — synced to ~/.config/opencode/AGENTS.md
+    if (typeof candidate.globalBehaviorPrompt === 'string') {
+      const value = candidate.globalBehaviorPrompt;
+      if (value.length <= 1024 * 1024) {
+        result.globalBehaviorPrompt = value;
+      }
+    }
+
+    if (typeof candidate.responseStyleEnabled === 'boolean') {
+      result.responseStyleEnabled = candidate.responseStyleEnabled;
+    }
+
+    if (
+      typeof candidate.responseStylePreset === 'string' &&
+      ['concise', 'detailed', 'mentor', 'pushback', 'noFiller', 'matchEnergy', 'warmPeer', 'custom'].includes(candidate.responseStylePreset)
+    ) {
+      result.responseStylePreset = candidate.responseStylePreset;
+    }
+
+    if (typeof candidate.responseStyleCustomInstructions === 'string') {
+      const value = candidate.responseStyleCustomInstructions;
+      if (value.length <= 50_000) {
+        result.responseStyleCustomInstructions = value;
+      }
+    }
+
+    if (typeof candidate.sttProvider === 'string') {
+      const provider = candidate.sttProvider.trim();
+      if (provider === 'browser' || provider === 'server' || provider === 'wasm') {
+        result.sttProvider = provider;
+      }
+    }
+    if (typeof candidate.sttServerUrl === 'string') {
+      const trimmed = candidate.sttServerUrl.trim();
+      if (trimmed.length <= STT_SERVER_URL_MAX_LENGTH) {
+        result.sttServerUrl = trimmed;
+      }
+    }
+    if (typeof candidate.sttModel === 'string') {
+      const trimmed = candidate.sttModel.trim();
+      if (trimmed.length <= STT_MODEL_MAX_LENGTH) {
+        result.sttModel = trimmed;
+      }
+    }
+    if (typeof candidate.wasmSttModel === 'string') {
+      const trimmed = candidate.wasmSttModel.trim();
+      if (trimmed.length <= 256) {
+        result.wasmSttModel = trimmed;
+      }
+    }
+    if (typeof candidate.sttLanguage === 'string') {
+      const trimmed = candidate.sttLanguage.trim();
+      if (trimmed.length <= STT_LANGUAGE_MAX_LENGTH) {
+        result.sttLanguage = trimmed;
+      }
+    }
+    if (typeof candidate.sttSilenceThresholdDb === 'number' && Number.isFinite(candidate.sttSilenceThresholdDb)) {
+      result.sttSilenceThresholdDb = Math.max(-100, Math.min(0, candidate.sttSilenceThresholdDb));
+    }
+    if (typeof candidate.sttSilenceHoldMs === 'number' && Number.isFinite(candidate.sttSilenceHoldMs)) {
+      result.sttSilenceHoldMs = Math.max(250, Math.min(10000, Math.round(candidate.sttSilenceHoldMs)));
+    }
+    if (typeof candidate.sttTranscribeOnStop === 'boolean') {
+      result.sttTranscribeOnStop = candidate.sttTranscribeOnStop;
+    }
+
     return result;
   };
 
@@ -624,12 +714,14 @@ export const createSettingsHelpers = (dependencies) => {
     const hasManagedRemoteTunnelToken = typeof settings?.managedRemoteTunnelToken === 'string' && settings.managedRemoteTunnelToken.trim().length > 0;
     const pwaAppName = normalizePwaAppName(settings?.pwaAppName, '');
     const pwaOrientation = normalizePwaOrientation(settings?.pwaOrientation, 'system');
+    const mobileKeyboardMode = normalizeMobileKeyboardMode(settings?.mobileKeyboardMode, 'native');
 
     return {
       ...sanitized,
       hasManagedRemoteTunnelToken,
       ...(pwaAppName ? { pwaAppName } : {}),
       pwaOrientation,
+      mobileKeyboardMode,
       approvedDirectories: approved,
       securityScopedBookmarks: bookmarks,
       pinnedDirectories: normalizeStringArray(settings.pinnedDirectories),
@@ -639,13 +731,20 @@ export const createSettingsHelpers = (dependencies) => {
           ? settings.showReasoningTraces
           : typeof sanitized.showReasoningTraces === 'boolean'
             ? sanitized.showReasoningTraces
-            : false
+            : false,
+      collapsibleThinkingBlocks:
+        typeof settings.collapsibleThinkingBlocks === 'boolean'
+          ? settings.collapsibleThinkingBlocks
+          : typeof sanitized.collapsibleThinkingBlocks === 'boolean'
+            ? sanitized.collapsibleThinkingBlocks
+            : true,
     };
   };
 
   return {
     normalizePwaAppName,
     normalizePwaOrientation,
+    normalizeMobileKeyboardMode,
     sanitizeSettingsUpdate,
     mergePersistedSettings,
     formatSettingsResponse,

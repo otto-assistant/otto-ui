@@ -129,7 +129,6 @@ export const MainLayout: React.FC = () => {
     React.useEffect(() => { preloadAllViewChunks(); }, []);
     const sidebarWidth = useUIStore((state) => state.sidebarWidth);
     const rightSidebarWidth = useUIStore((state) => state.rightSidebarWidth);
-    const [desktopRightSidebarActionsHost, setDesktopRightSidebarActionsHost] = React.useState<HTMLDivElement | null>(null);
     const effectiveDirectory = useEffectiveDirectory() ?? '';
     const directoryKey = React.useMemo(() => normalizeDirectoryKey(effectiveDirectory), [effectiveDirectory]);
     const isContextPanelOpen = useUIStore((state) => {
@@ -764,7 +763,7 @@ export const MainLayout: React.FC = () => {
                                 isSidebarOpen && 'border-l border-border/50 rounded-tl-[10px] rounded-bl-[10px]',
                                 isRightSidebarOpen && 'border-r border-border/50 rounded-tr-[10px] rounded-br-[10px]'
                             )} data-page-scroll-lock="true">
-                                <Header desktopRightSidebarActionsHost={desktopRightSidebarActionsHost} />
+                                <Header />
                                 <div className={cn(
                                     'flex flex-1 min-h-0 overflow-hidden',
                                     isSidebarOpen || isChatActive ? '' : 'border-l border-border/50',
@@ -805,7 +804,6 @@ export const MainLayout: React.FC = () => {
                             <RightSidebar
                                 isOpen={isRightSidebarOpen}
                                 className="border-0"
-                                onTopActionsHostChange={setDesktopRightSidebarActionsHost}
                             >
                                 <ErrorBoundary><RightSidebarTabs /></ErrorBoundary>
                             </RightSidebar>

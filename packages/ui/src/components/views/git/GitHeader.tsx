@@ -1,18 +1,6 @@
 import React from 'react';
-import {
-  RiArrowDownSLine,
-  RiCheckLine,
-  RiLoader4Line,
-  RiGitBranchLine,
-  RiBriefcaseLine,
-  RiHomeLine,
-  RiGraduationCapLine,
-  RiCodeLine,
-  RiHeartLine,
-  RiHistoryLine,
-  RiUser3Line,
-} from '@remixicon/react';
 import { Button } from '@/components/ui/button';
+import { SortableTabsStrip, type SortableTabsStripItem } from '@/components/ui/sortable-tabs-strip';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,14 +8,15 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Icon } from "@/components/icon/Icon";
+import type { IconName } from "@/components/icon/icons";
 import { BranchSelector } from './BranchSelector';
 import { WorktreeBranchDisplay } from './WorktreeBranchDisplay';
 import { SyncActions } from './SyncActions';
 import type { GitStatus, GitIdentityProfile, GitRemote } from '@/lib/api/types';
-import { useUIStore } from '@/stores/useUIStore';
 import { useI18n } from '@/lib/i18n';
 
-type SyncAction = 'fetch' | 'pull' | 'push' | null;
+type SyncAction = 'fetch' | 'pull' | 'push' | 'sync' | null;
 
 interface GitHeaderProps {
   status: GitStatus | null;
@@ -37,8 +26,7 @@ interface GitHeaderProps {
   syncAction: SyncAction;
   remotes: GitRemote[];
   onFetch: (remote: GitRemote) => void;
-  onPull: (remote: GitRemote) => void;
-  onPush: () => void;
+  onSync: (remote: GitRemote) => void;
   onRemoveRemote: (remote: GitRemote) => void;
   removingRemoteName: string | null;
   onCheckoutBranch: (branch: string) => void;
@@ -50,19 +38,20 @@ interface GitHeaderProps {
   isApplyingIdentity: boolean;
   isWorktreeMode: boolean;
   onOpenHistory?: () => void;
+  onOpenStashes?: () => void;
+  actionTabItems?: SortableTabsStripItem[];
+  activeActionTab?: string;
+  onSelectActionTab?: (tabID: string) => void;
 }
 
-const IDENTITY_ICON_MAP: Record<
-  string,
-  React.ComponentType<React.ComponentProps<typeof RiGitBranchLine>>
-> = {
-  branch: RiGitBranchLine,
-  briefcase: RiBriefcaseLine,
-  house: RiHomeLine,
-  graduation: RiGraduationCapLine,
-  code: RiCodeLine,
-  heart: RiHeartLine,
-  user: RiUser3Line,
+const IDENTITY_ICON_MAP: Record<string, IconName> = {
+  branch: 'git-branch',
+  briefcase: 'briefcase',
+  house: 'home',
+  graduation: 'graduation-cap',
+  code: 'code',
+  heart: 'heart',
+  user: 'user-3',
 };
 
 const IDENTITY_COLOR_MAP: Record<string, string> = {
@@ -90,9 +79,10 @@ interface IdentityIconProps {
 }
 
 const IdentityIcon: React.FC<IdentityIconProps> = ({ icon, className, colorToken }) => {
-  const IconComponent = IDENTITY_ICON_MAP[icon ?? 'branch'] ?? RiUser3Line;
+  const iconName = IDENTITY_ICON_MAP[icon ?? 'branch'] ?? 'user-3';
   return (
-    <IconComponent
+    <Icon
+      name={iconName}
       className={className}
       style={{ color: getIdentityColor(colorToken) }}
     />
@@ -104,16 +94,14 @@ interface IdentityDropdownProps {
   identities: GitIdentityProfile[];
   onSelect: (profile: GitIdentityProfile) => void;
   isApplying: boolean;
-  tooltipDelayMs?: number;
   iconOnly?: boolean;
 }
 
-const IdentityDropdown: React.FC<IdentityDropdownProps> = ({
+export const IdentityDropdown: React.FC<IdentityDropdownProps> = ({
   activeProfile,
   identities,
   onSelect,
   isApplying,
-  tooltipDelayMs = 1000,
   iconOnly = false,
 }) => {
   const { t } = useI18n();
@@ -121,7 +109,7 @@ const IdentityDropdown: React.FC<IdentityDropdownProps> = ({
 
   return (
     <DropdownMenu>
-      <Tooltip delayDuration={tooltipDelayMs}>
+      <Tooltip>
         <TooltipTrigger asChild>
           <DropdownMenuTrigger asChild>
             <Button
@@ -132,7 +120,7 @@ const IdentityDropdown: React.FC<IdentityDropdownProps> = ({
               disabled={isDisabled}
             >
               {isApplying ? (
-                <RiLoader4Line className="size-4 animate-spin" />
+                <Icon name="loader-4" className="size-4 animate-spin" />
               ) : (
                 <IdentityIcon
                   icon={activeProfile?.icon}
@@ -145,7 +133,7 @@ const IdentityDropdown: React.FC<IdentityDropdownProps> = ({
                   {activeProfile?.name || t('gitView.header.noIdentity')}
                 </span>
               )}
-              <RiArrowDownSLine className="size-4 opacity-60" />
+              <Icon name="arrow-down-s" className="size-4 opacity-60" />
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
@@ -178,7 +166,7 @@ const IdentityDropdown: React.FC<IdentityDropdownProps> = ({
                     </span>
                   </span>
                   {isSelected ? (
-                    <RiCheckLine className="ml-auto size-4 text-foreground" />
+                    <Icon name="check" className="ml-auto size-4 text-foreground" />
                   ) : null}
                 </span>
               </DropdownMenuItem>
@@ -198,8 +186,7 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
   syncAction,
   remotes,
   onFetch,
-  onPull,
-  onPush,
+  onSync,
   onRemoveRemote,
   removingRemoteName,
   onCheckoutBranch,
@@ -211,32 +198,50 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
   isApplyingIdentity,
   isWorktreeMode,
   onOpenHistory,
+  onOpenStashes,
+  actionTabItems,
+  activeActionTab,
+  onSelectActionTab,
 }) => {
   const { t } = useI18n();
-  const isMobile = useUIStore((state) => state.isMobile);
-
   if (!status) {
     return null;
   }
 
-  const useTwoRowHeader = isMobile;
-
   const managementButtons = (
     <div className="flex items-center gap-1 shrink-0">
-      {onOpenHistory ? (
-        <Tooltip delayDuration={useTwoRowHeader ? 300 : 1000}>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 w-8 px-0"
-              onClick={onOpenHistory}
-            >
-              <RiHistoryLine className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent sideOffset={8}>{t('gitView.history.title')}</TooltipContent>
-        </Tooltip>
+      {onOpenHistory || onOpenStashes ? (
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 w-8 px-0"
+                  aria-label={t('gitView.history.title')}
+                >
+                  <Icon name="git-repository" className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={8}>{t('gitView.history.title')}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end">
+            {onOpenHistory ? (
+              <DropdownMenuItem onSelect={onOpenHistory}>
+                <Icon name="history" className="size-4" />
+                {t('gitView.history.title')}
+              </DropdownMenuItem>
+            ) : null}
+            {onOpenStashes ? (
+              <DropdownMenuItem onSelect={onOpenStashes}>
+                <Icon name="archive-stack" className="size-4" />
+                {t('gitView.stashes.title')}
+              </DropdownMenuItem>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
       ) : null}
     </div>
   );
@@ -246,15 +251,16 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
       syncAction={syncAction}
       remotes={remotes}
       onFetch={onFetch}
-      onPull={onPull}
-      onPush={onPush}
+      onSync={onSync}
       onRemoveRemote={onRemoveRemote}
       removingRemoteName={removingRemoteName}
       disabled={!status}
       iconOnly={true}
-      tooltipDelayMs={useTwoRowHeader ? 300 : 1000}
+
       aheadCount={status.ahead}
       behindCount={status.behind}
+      trackingRemoteName={status.tracking?.split('/')[0]}
+      hasUncommittedChanges={(status.files?.length ?? 0) > 0}
     />
   );
 
@@ -264,8 +270,8 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
       identities={availableIdentities}
       onSelect={onSelectIdentity}
       isApplying={isApplyingIdentity}
-      tooltipDelayMs={useTwoRowHeader ? 300 : 1000}
-      iconOnly={false}
+
+      iconOnly={true}
     />
   );
 
@@ -287,19 +293,33 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
               onCheckout={onCheckoutBranch}
               onCreate={onCreateBranch}
               remotes={remotes}
-              tooltipDelayMs={useTwoRowHeader ? 300 : 1000}
+
             />
           )}
         </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {managementButtons}
+          {identityControl}
+        </div>
       </div>
 
-      <div className="mt-1.5 flex items-center justify-between gap-2 min-w-0">
-        <div className="flex min-w-0 flex-wrap items-center gap-1">
-          {syncButtons}
-          {managementButtons}
+      {actionTabItems && activeActionTab && onSelectActionTab ? (
+        <div className="mt-3 flex h-8 min-w-0 items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <SortableTabsStrip
+              items={actionTabItems}
+              activeId={activeActionTab}
+              onSelect={onSelectActionTab}
+              layoutMode="fit"
+              variant="active-pill"
+              iconOnlyActiveTab={true}
+              activePillButtonClassName="h-7"
+              className="h-full"
+            />
+          </div>
+          <div className="shrink-0">{syncButtons}</div>
         </div>
-        <div className="min-w-0 max-w-[45%]">{identityControl}</div>
-      </div>
+      ) : null}
     </header>
   );
 };

@@ -1,5 +1,4 @@
 import React from 'react';
-import { RiArrowDownSLine, RiArrowUpLine, RiArrowUpSLine } from '@remixicon/react';
 import {
   Collapsible,
   CollapsibleContent,
@@ -13,6 +12,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
+import { Icon } from "@/components/icon/Icon";
 import { HistoryCommitRow } from './HistoryCommitRow';
 import type { GitLogEntry, CommitFileEntry } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
@@ -33,7 +33,9 @@ interface HistorySectionProps {
   commitFilesMap: Map<string, CommitFileEntry[]>;
   loadingCommitHashes: Set<string>;
   onCopyHash: (hash: string) => void;
+  directory: string | undefined;
   showHeader?: boolean;
+  contentMaxHeightClassName?: string;
   branchDivider?: {
     insertBeforeIndex: number;
     branchName: string;
@@ -51,7 +53,9 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
   commitFilesMap,
   loadingCommitHashes,
   onCopyHash,
+  directory,
   showHeader = true,
+  contentMaxHeightClassName = 'max-h-[50vh]',
   branchDivider = null,
 }) => {
   const { t } = useI18n();
@@ -76,8 +80,8 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
   const bottomEntries = hasDivider ? log.all.slice(branchDivider.insertBeforeIndex) : [];
 
   const dividerIcon = branchDivider?.direction === 'down'
-    ? <RiArrowDownSLine className="size-3.5" />
-    : <RiArrowUpLine className="size-3.5" />;
+    ? <Icon name="arrow-down-s" className="size-3.5" />
+    : <Icon name="arrow-up" className="size-3.5" />;
 
   const renderCommitList = (entries: GitLogEntry[]) => (
     <ul className="divide-y divide-border/60">
@@ -90,13 +94,14 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
           files={commitFilesMap.get(entry.hash) ?? []}
           isLoadingFiles={loadingCommitHashes.has(entry.hash)}
           onCopyHash={onCopyHash}
+          directory={directory}
         />
       ))}
     </ul>
   );
 
   const content = (
-    <ScrollableOverlay outerClassName="min-h-0 max-h-[50vh]" className="w-full">
+    <ScrollableOverlay outerClassName={`min-h-0 ${contentMaxHeightClassName}`} className="h-full w-full">
       {log.all.length === 0 ? (
         <div className="flex h-full items-center justify-center p-4">
           <p className="typography-ui-label text-muted-foreground">
@@ -134,10 +139,10 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
 
   if (!showHeader) {
     if (hasSplitHistory) {
-      return <section>{content}</section>;
+      return <section className="h-full min-h-0">{content}</section>;
     }
     return (
-      <section className="rounded-xl border border-border/60 bg-background/70 overflow-hidden">
+      <section className="h-full min-h-0 rounded-xl border border-border/60 bg-background/70 overflow-hidden">
         {content}
       </section>
     );
@@ -180,9 +185,9 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
             </div>
           )}
           {isOpen ? (
-            <RiArrowUpSLine className="size-4 text-muted-foreground" />
+            <Icon name="arrow-up-s" className="size-4 text-muted-foreground" />
           ) : (
-            <RiArrowDownSLine className="size-4 text-muted-foreground" />
+            <Icon name="arrow-down-s" className="size-4 text-muted-foreground" />
           )}
         </div>
       </CollapsibleTrigger>

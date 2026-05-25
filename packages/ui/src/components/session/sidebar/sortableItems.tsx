@@ -8,16 +8,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
-import {
-  RiAddLine,
-  RiArrowDownSLine,
-  RiArrowRightSLine,
-  RiCloseLine,
-  RiFolderLine,
-  RiMore2Line,
-  RiNodeTree,
-  RiPencilAiLine,
-} from '@remixicon/react';
+import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
 import { PROJECT_COLOR_MAP, PROJECT_ICON_MAP, getProjectIconImageUrl } from '@/lib/projectMeta';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
@@ -38,6 +29,7 @@ export interface SortableProjectItemProps {
   isStuck: boolean;
   hideDirectoryControls: boolean;
   mobileVariant: boolean;
+  alwaysShowActions: boolean;
   onToggle: () => void;
   onNewSession: () => void;
   onNewWorktreeSession?: () => void;
@@ -70,7 +62,7 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
   isDesktopShell,
   isStuck,
   hideDirectoryControls,
-  mobileVariant,
+  alwaysShowActions,
   onToggle,
   onNewSession,
   onNewWorktreeSession,
@@ -103,7 +95,7 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
     setImageFailed(false);
   }, [id, projectIconImage?.updatedAt]);
 
-  const ProjectIcon = projectIcon ? PROJECT_ICON_MAP[projectIcon] : null;
+  const projectIconName = projectIcon ? PROJECT_ICON_MAP[projectIcon] : null;
   const iconColor = projectColor ? (PROJECT_COLOR_MAP[projectColor] ?? null) : null;
   const imageUrl = !imageFailed
     ? getProjectIconImageUrl({ id, iconImage: projectIconImage }, {
@@ -166,7 +158,7 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
             style={{ backgroundColor: isDesktopShell && isStuck ? 'transparent' : undefined }}
           >
             <div className="relative flex items-center gap-1 px-0.5 py-0.5" {...attributes}>
-              <Tooltip delayDuration={1500}>
+              <Tooltip>
                 <TooltipTrigger asChild>
                     <button
                       type="button"
@@ -176,17 +168,23 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                       className={cn(
                         'flex-1 min-w-0 flex items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-md cursor-grab active:cursor-grabbing transition-[padding]',
                         isRepo && !hideDirectoryControls
-                          ? (mobileVariant ? 'pr-20' : 'pr-7 group-hover/project:pr-20 group-focus-within/project:pr-20')
-                          : (mobileVariant ? 'pr-14' : 'pr-7 group-hover/project:pr-14 group-focus-within/project:pr-14'),
+                          ? (alwaysShowActions ? 'pr-20' : 'pr-7 group-hover/project:pr-20 group-focus-within/project:pr-20')
+                          : (alwaysShowActions ? 'pr-14' : 'pr-7 group-hover/project:pr-14 group-focus-within/project:pr-14'),
                       )}
                     >
                     <span className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
-                      <span className="hidden h-3.5 w-3.5 items-center justify-center text-muted-foreground group-hover/project:inline-flex group-focus-within/project:inline-flex">
-                        {isCollapsed ? <RiArrowRightSLine className="h-3.5 w-3.5" /> : <RiArrowDownSLine className="h-3.5 w-3.5" />}
+                      <span className={cn(
+                        'h-3.5 w-3.5 items-center justify-center text-muted-foreground',
+                        alwaysShowActions ? 'inline-flex' : 'hidden group-hover/project:inline-flex group-focus-within/project:inline-flex',
+                      )}>
+                        {isCollapsed ? <Icon name="arrow-right-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-down-s" className="h-3.5 w-3.5" />}
                       </span>
                       {imageUrl ? (
                         <span
-                          className="inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[3px] group-hover/project:hidden group-focus-within/project:hidden"
+                          className={cn(
+                            'h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[3px]',
+                            alwaysShowActions ? 'hidden' : 'inline-flex group-hover/project:hidden group-focus-within/project:hidden',
+                          )}
                           style={projectIconBackground ? { backgroundColor: projectIconBackground } : undefined}
                         >
                           <img
@@ -197,10 +195,10 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                             onError={() => setImageFailed(true)}
                           />
                         </span>
-                      ) : ProjectIcon ? (
-                        <ProjectIcon className="h-3.5 w-3.5 group-hover/project:hidden group-focus-within/project:hidden" style={iconColor ? { color: iconColor } : undefined} />
+                      ) : projectIconName ? (
+                        <Icon name={projectIconName} className={cn('h-3.5 w-3.5', alwaysShowActions ? 'hidden' : 'group-hover/project:hidden group-focus-within/project:hidden')} style={iconColor ? { color: iconColor } : undefined} />
                       ) : (
-                        <RiFolderLine className="h-3.5 w-3.5 text-muted-foreground/80 group-hover/project:hidden group-focus-within/project:hidden" style={iconColor ? { color: iconColor } : undefined} />
+                        <Icon name="folder" className={cn('h-3.5 w-3.5 text-muted-foreground/80', alwaysShowActions ? 'hidden' : 'group-hover/project:hidden group-focus-within/project:hidden')} style={iconColor ? { color: iconColor } : undefined} />
                       )}
                     </span>
                     <span className={cn(
@@ -231,11 +229,11 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                         }}
                         className={cn(
                         'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground transition-opacity',
-                          mobileVariant ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
+                          alwaysShowActions ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
                         )}
                         aria-label={t('sessions.sidebar.project.actions.newWorktree')}
                       >
-                        <RiNodeTree className="h-4 w-4" />
+                        <Icon name="node-tree" className="h-4 w-4" />
                       </button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" sideOffset={4}>
@@ -255,7 +253,7 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                           'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground',
                           isMenuOpen
                             ? 'opacity-100 pointer-events-auto'
-                            : mobileVariant
+                            : alwaysShowActions
                               ? 'opacity-100'
                               : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
                         )}
@@ -264,25 +262,25 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                         onMouseDown={handleMenuTriggerMouseDown}
                         onClick={handleMenuTriggerClick}
                       >
-                        <RiMore2Line className="h-3.5 w-3.5" />
+                        <Icon name="more-2" className="h-3.5 w-3.5" />
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-[180px]">
                       {showCreateButtons && !isRepo && !hideDirectoryControls && onNewSession && (
                       <DropdownMenuItem onClick={onNewSession}>
-                        <RiAddLine className="mr-1.5 h-4 w-4" />
+                        <Icon name="add" className="mr-1.5 h-4 w-4" />
                         {t('sessions.sidebar.project.actions.newSession')}
                       </DropdownMenuItem>
                     )}
                     <DropdownMenuItem onClick={onRenameStart}>
-                      <RiPencilAiLine className="mr-1.5 h-4 w-4" />
+                      <Icon name="pencil-ai" className="mr-1.5 h-4 w-4" />
                       {t('sessions.sidebar.session.menu.rename')}
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       onClick={onClose}
                       className="text-destructive focus:text-destructive"
                     >
-                      <RiCloseLine className="mr-1.5 h-4 w-4" />
+                      <Icon name="close" className="mr-1.5 h-4 w-4" />
                       {t('sessions.sidebar.project.actions.closeProject')}
                     </DropdownMenuItem>
                     </DropdownMenuContent>
@@ -301,13 +299,13 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                         }}
                         className={cn(
                           'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 transition-opacity',
-                          mobileVariant ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
+                          alwaysShowActions ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
                         )}
                         aria-label={isRepo
                           ? t('sessions.sidebar.project.actions.newDraftSession')
                           : t('sessions.sidebar.project.actions.newSession')}
                       >
-                        <RiAddLine className="h-4 w-4" />
+                        <Icon name="add" className="h-4 w-4" />
                       </button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" sideOffset={4}>

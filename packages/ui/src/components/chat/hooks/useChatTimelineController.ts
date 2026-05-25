@@ -13,6 +13,8 @@ import {
 } from '../lib/turns/windowTurns';
 import type { TurnHistorySignals } from '../lib/turns/historySignals';
 import { getMemoryLimits, type SessionHistoryMeta } from '@/stores/types/sessionTypes';
+import { isVSCodeRuntime } from '@/lib/desktop';
+import { isMobileSurfaceRuntime } from '@/lib/runtimeSurface';
 
 type ViewportAnchor = { messageId: string; offsetTop: number };
 
@@ -32,10 +34,10 @@ interface UseChatTimelineControllerOptions {
     scrollRef: React.RefObject<HTMLDivElement | null>;
     messageListRef: React.RefObject<MessageListHandle | null>;
     loadMoreMessages: (sessionId: string, direction: 'up' | 'down') => Promise<void>;
-    prepareForBottomResume: (options?: { instant?: boolean; force?: boolean }) => void;
-    scrollToBottom: (options?: { instant?: boolean; force?: boolean; followBottom?: boolean }) => void;
+    goToBottom: (mode?: 'instant' | 'smooth') => void;
+    releaseAutoFollow: () => void;
     isPinned: boolean;
-    isOverflowing: boolean;
+    showScrollButton: boolean;
 }
 
 export interface UseChatTimelineControllerResult {
@@ -51,12 +53,44 @@ export interface UseChatTimelineControllerResult {
     loadEarlier: () => Promise<void>;
     revealBufferedTurns: () => Promise<boolean>;
     resumeToBottom: () => void;
-    resumeToBottomInstant: () => void;
+    resumeToBottomInstant: () => Promise<void>;
     scrollToTurn: (turnId: string, options?: { behavior?: ScrollBehavior }) => Promise<boolean>;
     scrollToMessage: (messageId: string, options?: { behavior?: ScrollBehavior }) => Promise<boolean>;
     captureViewportAnchor: () => ViewportAnchor | null;
     restoreViewportAnchor: (anchor: ViewportAnchor) => boolean;
     handleActiveTurnChange: (turnId: string | null) => void;
+}
+
+const TURN_MODEL_CACHE_MAX = 30
+const VSCODE_TURN_MODEL_CACHE_MAX = 4
+const VSCODE_TURN_MODEL_CACHE_MAX_MESSAGES = 30
+const MOBILE_TURN_MODEL_CACHE_MAX = 4
+const MOBILE_TURN_MODEL_CACHE_MAX_MESSAGES = 30
+const turnModelCache = new Map<string, { messages: ChatMessageEntry[]; model: TurnWindowModel }>()
+const getTurnModelCacheMax = () => {
+    if (isVSCodeRuntime()) return VSCODE_TURN_MODEL_CACHE_MAX
+    if (isMobileSurfaceRuntime()) return MOBILE_TURN_MODEL_CACHE_MAX
+    return TURN_MODEL_CACHE_MAX
+}
+
+const shouldCacheTurnModelMessages = (messages: ChatMessageEntry[]): boolean => {
+    if (isVSCodeRuntime()) return messages.length <= VSCODE_TURN_MODEL_CACHE_MAX_MESSAGES
+    if (isMobileSurfaceRuntime()) return messages.length <= MOBILE_TURN_MODEL_CACHE_MAX_MESSAGES
+    return true
+}
+
+const rememberTurnModel = (key: string, value: { messages: ChatMessageEntry[]; model: TurnWindowModel }) => {
+    turnModelCache.delete(key)
+    if (!shouldCacheTurnModelMessages(value.messages)) {
+        return
+    }
+    const max = getTurnModelCacheMax()
+    while (turnModelCache.size >= max) {
+        const oldest = turnModelCache.keys().next().value
+        if (typeof oldest !== 'string') break
+        turnModelCache.delete(oldest)
+    }
+    turnModelCache.set(key, value)
 }
 
 export const useChatTimelineController = ({
@@ -66,14 +100,23 @@ export const useChatTimelineController = ({
     scrollRef,
     messageListRef,
     loadMoreMessages,
-    prepareForBottomResume,
-    scrollToBottom,
+    goToBottom,
+    releaseAutoFollow,
     isPinned,
-    isOverflowing,
+    showScrollButton,
 }: UseChatTimelineControllerOptions): UseChatTimelineControllerResult => {
     const previousTurnWindowModelRef = React.useRef<TurnWindowModel | null>(null);
     const previousMessagesRef = React.useRef<ChatMessageEntry[] | null>(null);
     const turnWindowModel = React.useMemo(() => {
+        const key = sessionId ?? ""
+        const cached = key ? turnModelCache.get(key) : undefined
+        if (cached && cached.messages === messages) {
+            rememberTurnModel(key, cached)
+            previousTurnWindowModelRef.current = cached.model
+            previousMessagesRef.current = messages
+            return cached.model
+        }
+
         const incrementalModel = updateTurnWindowModelIncremental(
             previousTurnWindowModelRef.current,
             previousMessagesRef.current,
@@ -82,8 +125,13 @@ export const useChatTimelineController = ({
         const nextModel = incrementalModel ?? buildTurnWindowModel(messages);
         previousTurnWindowModelRef.current = nextModel;
         previousMessagesRef.current = messages;
+
+        if (key && messages.length > 0) {
+            rememberTurnModel(key, { messages, model: nextModel })
+        }
+
         return nextModel;
-    }, [messages]);
+    }, [messages, sessionId]);
 
     const [turnStart, setTurnStart] = React.useState(() => getInitialTurnStart(turnWindowModel.turnCount));
     const [isLoadingOlder, setIsLoadingOlder] = React.useState(false);
@@ -247,32 +295,6 @@ export const useChatTimelineController = ({
         anchor: ViewportAnchor | null;
     } | null>(null);
 
-    React.useLayoutEffect(() => {
-        const snap = prePrependScrollRef.current;
-        const container = scrollRef.current;
-        if (!snap || !container) return;
-        prePrependScrollRef.current = null;
-
-        // Try anchor-based restoration first (pixel-perfect)
-        if (snap.anchor) {
-            const anchorEl = container.querySelector<HTMLElement>(
-                `[data-message-id="${snap.anchor.messageId}"]`,
-            );
-            if (anchorEl) {
-                const containerRect = container.getBoundingClientRect();
-                const anchorTop = anchorEl.getBoundingClientRect().top - containerRect.top;
-                container.scrollTop += anchorTop - snap.anchor.offsetTop;
-                return;
-            }
-        }
-
-        // Fallback: height-delta compensation
-        const delta = container.scrollHeight - snap.height;
-        if (delta > 0) {
-            container.scrollTop = snap.top + delta;
-        }
-    }, [renderedMessages, scrollRef]);
-
     const captureViewportAnchor = React.useCallback((): ViewportAnchor | null => {
         return messageListRef.current?.captureViewportAnchor() ?? null;
     }, [messageListRef]);
@@ -280,6 +302,26 @@ export const useChatTimelineController = ({
     const restoreViewportAnchor = React.useCallback((anchor: ViewportAnchor): boolean => {
         return messageListRef.current?.restoreViewportAnchor(anchor) ?? false;
     }, [messageListRef]);
+
+    React.useLayoutEffect(() => {
+        const snap = prePrependScrollRef.current;
+        const container = scrollRef.current;
+        if (!snap || !container) return;
+        prePrependScrollRef.current = null;
+
+        // When a viewport anchor is available, delegate to MessageList
+        // restoreViewportAnchor which falls back to virtualizer-aware
+        // scrollHistoryIndexIntoView when the element is not in the DOM.
+        if (snap.anchor && restoreViewportAnchor(snap.anchor)) {
+            return;
+        }
+
+        // Fallback: height-delta compensation
+        const delta = container.scrollHeight - snap.height;
+        if (delta > 0) {
+            container.scrollTop = snap.top + delta;
+        }
+    }, [renderedMessages, scrollRef, restoreViewportAnchor]);
 
     const revealBufferedTurns = React.useCallback(async (): Promise<boolean> => {
         if (turnStartRef.current <= 0 || pendingRevealWorkRef.current) {
@@ -374,6 +416,7 @@ export const useChatTimelineController = ({
             return false;
         }
 
+        releaseAutoFollow();
         setPendingRevealWork(true);
 
         try {
@@ -410,7 +453,7 @@ export const useChatTimelineController = ({
         } finally {
             setPendingRevealWork(false);
         }
-    }, [attemptPendingScrollRequest, sessionId]);
+    }, [attemptPendingScrollRequest, releaseAutoFollow, sessionId]);
 
     const scrollToMessage = React.useCallback(async (
         messageId: string,
@@ -420,6 +463,7 @@ export const useChatTimelineController = ({
             return false;
         }
 
+        releaseAutoFollow();
         setPendingRevealWork(true);
 
         try {
@@ -458,13 +502,12 @@ export const useChatTimelineController = ({
         } finally {
             setPendingRevealWork(false);
         }
-    }, [attemptPendingScrollRequest, sessionId]);
+    }, [attemptPendingScrollRequest, releaseAutoFollow, sessionId]);
 
     const resumeToBottom = React.useCallback(async () => {
         const nextStart = getInitialTurnStart(turnModelRef.current.turnCount);
         setPendingRevealWork(false);
         setIsLoadingOlder(false);
-        prepareForBottomResume({ force: true });
 
         const shouldWaitForRender = nextStart !== turnStartRef.current;
         if (shouldWaitForRender) {
@@ -472,14 +515,13 @@ export const useChatTimelineController = ({
             await waitForNextRenderCommit();
         }
 
-        scrollToBottom({ force: true });
-    }, [prepareForBottomResume, scrollToBottom, waitForNextRenderCommit]);
+        goToBottom('smooth');
+    }, [goToBottom, waitForNextRenderCommit]);
 
     const resumeToBottomInstant = React.useCallback(async () => {
         const nextStart = getInitialTurnStart(turnModelRef.current.turnCount);
         setPendingRevealWork(false);
         setIsLoadingOlder(false);
-        prepareForBottomResume({ instant: true, force: true });
 
         const shouldWaitForRender = nextStart !== turnStartRef.current;
         if (shouldWaitForRender) {
@@ -487,8 +529,8 @@ export const useChatTimelineController = ({
             await waitForNextRenderCommit();
         }
 
-        scrollToBottom({ instant: true, force: true, followBottom: true });
-    }, [prepareForBottomResume, scrollToBottom, waitForNextRenderCommit]);
+        goToBottom('instant');
+    }, [goToBottom, waitForNextRenderCommit]);
 
     const handleActiveTurnChange = React.useCallback((turnId: string | null) => {
         setActiveTurnId(turnId);
@@ -502,7 +544,7 @@ export const useChatTimelineController = ({
         isLoadingOlder,
         pendingRevealWork,
         activeTurnId,
-        showScrollToBottom: isOverflowing && !isPinned && !pendingRevealWork,
+        showScrollToBottom: showScrollButton && !pendingRevealWork,
         turnWindowModel,
         loadEarlier,
         revealBufferedTurns,

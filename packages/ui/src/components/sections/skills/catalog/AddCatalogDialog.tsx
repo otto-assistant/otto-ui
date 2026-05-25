@@ -17,8 +17,7 @@ import {
   SelectItem,
   SelectTrigger,
 } from '@/components/ui/select';
-
-import { RiGitRepositoryLine } from '@remixicon/react';
+import { Icon } from "@/components/icon/Icon";
 
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { isVSCodeRuntime } from '@/lib/desktop';
@@ -32,13 +31,17 @@ const generateCatalogId = () => `custom:${Date.now()}-${Math.random().toString(1
 
 const guessLabelFromSource = (value: string) => {
   const trimmed = value.trim();
-  const ssh = trimmed.match(/^git@github\.com:([^/\s]+)\/([^\s#]+)$/i);
-  if (ssh) {
-    return `${ssh[1]}/${ssh[2].replace(/\.git$/i, '')}`;
+  const urlFormat = trimmed.startsWith("https://")
+    ? "https"
+    : trimmed.startsWith("git@")
+      ? "ssh"
+      : "shorthand";
+  
+  if (urlFormat === 'ssh') {
+    return `${trimmed.split(":")[1].replace(/\.git$/i, '')}`;
   }
-  const https = trimmed.match(/^https?:\/\/github\.com\/([^/\s]+)\/([^\s#]+)$/i);
-  if (https) {
-    return `${https[1]}/${https[2].replace(/\.git$/i, '')}`;
+  if (urlFormat === 'https') {
+    return trimmed.split('/').slice(3).filter(Boolean).join('/').replace(/\.git$/i, '');
   }
   const shorthand = trimmed.match(/^([^/\s]+)\/([^/\s]+)(?:\/.+)?$/);
   if (shorthand) {
@@ -96,10 +99,22 @@ export const AddCatalogDialog: React.FC<AddCatalogDialogProps> = ({ open, onOpen
 
   const [identityOptions, setIdentityOptions] = React.useState<IdentityOption[]>([]);
   const [gitIdentityId, setGitIdentityId] = React.useState<string | null>(null);
+  const scanRequestIdRef = React.useRef(0);
+
+  const invalidateScan = React.useCallback((options?: { clearIdentity?: boolean }) => {
+    scanRequestIdRef.current += 1;
+    setScanOk(false);
+    setScanCount(null);
+    if (options?.clearIdentity) {
+      setIdentityOptions([]);
+      setGitIdentityId(null);
+    }
+  }, []);
 
   React.useEffect(() => {
     if (!open) return;
 
+    scanRequestIdRef.current += 1;
     setLabel('');
     setSource('');
     setSubpath('');
@@ -140,12 +155,18 @@ export const AddCatalogDialog: React.FC<AddCatalogDialogProps> = ({ open, onOpen
 
     setScanOk(false);
     setScanCount(null);
+    const requestId = scanRequestIdRef.current + 1;
+    scanRequestIdRef.current = requestId;
 
     const result = await scanRepo({
       source: trimmedSource,
       subpath: subpath.trim() || undefined,
       gitIdentityId: gitIdentityId || undefined,
     });
+
+    if (scanRequestIdRef.current !== requestId) {
+      return;
+    }
 
     if (!result.ok) {
       if (result.error?.kind === 'authRequired') {
@@ -257,8 +278,7 @@ export const AddCatalogDialog: React.FC<AddCatalogDialogProps> = ({ open, onOpen
               value={source}
               onChange={(e) => {
                 setSource(e.target.value);
-                setScanOk(false);
-                setScanCount(null);
+                invalidateScan({ clearIdentity: true });
               }}
               placeholder={t('settings.skills.catalog.shared.field.repositoryPlaceholder')}
             />
@@ -273,8 +293,7 @@ export const AddCatalogDialog: React.FC<AddCatalogDialogProps> = ({ open, onOpen
               value={subpath}
               onChange={(e) => {
                 setSubpath(e.target.value);
-                setScanOk(false);
-                setScanCount(null);
+                invalidateScan({ clearIdentity: true });
               }}
               placeholder={t('settings.skills.catalog.shared.field.subpathPlaceholder')}
             />
@@ -286,7 +305,13 @@ export const AddCatalogDialog: React.FC<AddCatalogDialogProps> = ({ open, onOpen
                 <span className="typography-ui-label text-[var(--status-warning)]">{t('settings.skills.catalog.shared.auth.title')}</span>
                 <span className="typography-meta text-muted-foreground ml-2">{t('settings.skills.catalog.shared.auth.description')}</span>
               </div>
-              <Select value={gitIdentityId || ''} onValueChange={(v) => setGitIdentityId(v)}>
+              <Select
+                value={gitIdentityId || ''}
+                onValueChange={(v) => {
+                  setGitIdentityId(v);
+                  invalidateScan();
+                }}
+              >
                 <SelectTrigger className="w-fit">
                   <span>{identityOptions.find((i) => i.id === gitIdentityId)?.name || t('settings.skills.catalog.shared.auth.chooseIdentity')}</span>
                 </SelectTrigger>
@@ -328,7 +353,7 @@ export const AddCatalogDialog: React.FC<AddCatalogDialogProps> = ({ open, onOpen
             onClick={() => void handleScan()}
             disabled={isScanning || !source.trim()}
           >
-            <RiGitRepositoryLine className="h-4 w-4" />
+            <Icon name="git-repository" className="h-4 w-4" />
             {isScanning ? t('settings.skills.catalog.shared.actions.scanning') : t('settings.skills.catalog.shared.actions.scan')}
           </Button>
           <Button
