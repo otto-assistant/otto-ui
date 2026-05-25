@@ -5,6 +5,7 @@ import {
   RiChat3Line,
   RiDashboardLine,
   RiFolderLine,
+  RiPlugLine,
   RiSettings3Line,
   RiTaskLine,
   RiUserSettingsLine,
@@ -29,6 +30,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'tasks', label: 'Tasks', icon: RiTaskLine },
   { id: 'schedule', label: 'Schedule', icon: RiCalendarLine },
   { id: 'chat', label: 'Chat+Code', icon: RiChat3Line },
+  { id: 'integrations', label: 'Integrations', icon: RiPlugLine },
   { id: 'settings', label: 'Settings', icon: RiSettings3Line },
 ];
 

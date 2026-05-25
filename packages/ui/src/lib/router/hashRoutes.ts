@@ -31,6 +31,7 @@ const VIEW_TO_PATH: Record<AppActiveView, string> = {
   tasks: '/tasks',
   schedule: '/schedule',
   chat: '/chat',
+  integrations: '/integrations',
   settings: '/settings',
 };
 
@@ -43,6 +44,7 @@ const PATH_TO_VIEW: Record<string, AppActiveView> = {
   '/tasks': 'tasks',
   '/schedule': 'schedule',
   '/chat': 'chat',
+  '/integrations': 'integrations',
   '/settings': 'settings',
 };
 
