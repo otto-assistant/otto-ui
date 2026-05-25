@@ -1415,7 +1415,11 @@ export function SyncProvider(props: {
           const state = store.getState()
           const isActiveDirectory = directory === activeDirectoryRef.current
           if (state.session.length === 0 && attempt < 1 && isActiveDirectory) {
-            console.warn(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
+            // Downgraded from console.warn — this is the expected first
+            // attempt under a slow/cold OpenCode backend (or a brand new
+            // project with no sessions yet) and was alarming users into
+            // thinking the app was malfunctioning.
+            console.debug(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
             await new Promise((r) => setTimeout(r, 2000))
             store.setState({ status: "loading" as const })
             await runBootstrap(attempt + 1)
@@ -1478,6 +1482,7 @@ export function SyncProvider(props: {
         handleEvent(directory, payload, childStores, routingIndex)
       },
       onReconnect: () => {
+        const { hasEverConnected: wasEverConnected } = useConfigStore.getState()
         useConfigStore.setState({
           isConnected: true,
           hasEverConnected: true,
@@ -1485,6 +1490,19 @@ export function SyncProvider(props: {
         })
         for (const dir of childStores.children.keys()) {
           triggerRecoveryResync(dir)
+        }
+        // If we lost SSE and came back, the per-directory resync covers
+        // the active directory's state but the global session list
+        // (cross-project) can drift while disconnected. Re-pull it so
+        // sessions created in other projects show up after reconnect.
+        // Skipped on the initial connection — `ensureGlobalSessionsLoaded`
+        // already handled the cold load.
+        if (wasEverConnected) {
+          void import("@/stores/useGlobalSessionsStore").then((mod) => {
+            mod.refreshGlobalSessions().catch(() => {
+              // Transient — next SSE event or backstop will catch up.
+            })
+          })
         }
       },
       onDisconnect: (reason) => {

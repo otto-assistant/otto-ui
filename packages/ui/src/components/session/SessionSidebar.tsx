@@ -74,7 +74,8 @@ import {
   formatProjectLabel,
   normalizePath,
 } from './sidebar/utils';
-import { refreshGlobalSessions, resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { ensureGlobalSessionsLoaded, refreshGlobalSessions, resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { useConfigStore } from '@/stores/useConfigStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
@@ -443,7 +444,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       ? projectEntries.filter((project) => normalizePath(project.path) === normalizedCurrent)
       : [];
 
-    void refreshGlobalSessions(syncSessionsSnapshotRef.current);
+    // Use `ensure` rather than `refresh` so we don't force a full
+    // /api/experimental/session re-fetch when another mount path (e.g.
+    // useSessionAutoCleanup) already loaded the global list. With many
+    // sessions this response is multi-megabyte; doing it twice on every
+    // mount of the sidebar was a major contributor to "dev server loads
+    // crazy slow". Live updates still arrive via SSE; this is just the
+    // initial snapshot.
+    void ensureGlobalSessionsLoaded(syncSessionsSnapshotRef.current);
     void discoverWorktrees(activeOnly);
 
     return () => {
@@ -496,12 +504,29 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   // Backstop: periodically resync the global session list so sessions
   // created/archived in other projects eventually show up even if no
-  // SSE event for them reaches this client. Cheap because the request
-  // is debounced server-side and only one in-flight load runs at a time.
+  // SSE event for them reaches this client.
+  //
+  // The previous implementation fired this every 60s unconditionally,
+  // which on installations with many sessions meant downloading the
+  // full /api/experimental/session payload (often several MB) every
+  // minute for the lifetime of the tab — a major perceived slowdown
+  // when the user has hundreds/thousands of sessions. SSE already
+  // delivers per-session updates while connected, so the backstop is
+  // only meaningful when we have actually been disconnected or stayed
+  // open for a long time.
   React.useEffect(() => {
-    const PERIODIC_REFRESH_MS = 60_000;
+    // Long interval that doubles as a "user left this tab open for
+    // hours" safety net. Inside the interval we additionally check
+    // connection state so a healthy SSE link skips the fetch entirely.
+    const PERIODIC_REFRESH_MS = 5 * 60_000;
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') {
+        return;
+      }
+      // While SSE is connected, per-session events keep the global
+      // store correct; no need to re-download the entire session list.
+      // Reconnect path already triggers its own recovery resync.
+      if (useConfigStore.getState().isConnected) {
         return;
       }
       void refreshGlobalSessions(syncSessionsSnapshotRef.current);
