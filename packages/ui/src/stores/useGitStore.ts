@@ -209,6 +209,8 @@ const hasStatusChanged = (oldStatus: GitStatus | null, newStatus: GitStatus | nu
   if (oldStatus.current !== newStatus.current) return true;
   if (oldStatus.tracking !== newStatus.tracking) return true;
   if (oldStatus.isClean !== newStatus.isClean) return true;
+  if ((oldStatus.totalChangedFiles ?? oldFiles.length) !== (newStatus.totalChangedFiles ?? newFiles.length)) return true;
+  if (Boolean(oldStatus.truncated) !== Boolean(newStatus.truncated)) return true;
 
   const oldPaths = new Set(oldFiles.map(f => `${f.path}:${f.index}:${f.working_dir}`));
   for (const file of newFiles) {

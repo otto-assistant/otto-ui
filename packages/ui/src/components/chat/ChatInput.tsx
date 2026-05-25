@@ -70,7 +70,7 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { createWorktreeDraft } from '@/lib/worktreeSessionCreator';
 import { buildSessionTargetOptions } from '@/sync/session-worktree-contract';
 import { usePermissionStore } from '@/stores/permissionStore';
-import { extractGitChangedFiles } from './changedFiles';
+import { hasAnyGitChangedFiles } from './changedFiles';
 import { useI18n } from '@/lib/i18n';
 
 const MAX_VISIBLE_TEXTAREA_LINES = 8;
@@ -3079,8 +3079,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         if (isGitRepo !== true || !currentGitStatus || currentGitStatus.isClean) {
             return false;
         }
-        return extractGitChangedFiles(currentGitStatus.files, currentGitStatus.diffStats, currentDirectory).length > 0;
-    }, [currentDirectory, currentGitStatus, isGitRepo]);
+        // Use the boolean fast-path — extractGitChangedFiles allocates and
+        // iterates the full list, which becomes prohibitively expensive
+        // when a working tree reports many tens of thousands of changes.
+        return hasAnyGitChangedFiles(currentGitStatus.files);
+    }, [currentGitStatus, isGitRepo]);
 
     const selectedDraftBranchIsKnown = React.useMemo(() => {
         if (!selectedDraftDirectory) {
