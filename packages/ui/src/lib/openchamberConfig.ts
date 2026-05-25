@@ -169,8 +169,14 @@ const readTextFile = async (path: string): Promise<string | null> => {
   }
 
   try {
-    const response = await fetch(`${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}`);
-    if (!response.ok) {
+    // `optional=1` lets the server return 204 (instead of 404) when the file
+    // is absent — these probes for legacy/user config files are expected to
+    // miss on most installs and shouldn't pollute the browser console with
+    // "GET /api/fs/read ... 404 (Not Found)" errors.
+    const response = await fetch(
+      `${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}&optional=1`,
+    );
+    if (!response.ok || response.status === 204) {
       return null;
     }
     return await response.text();

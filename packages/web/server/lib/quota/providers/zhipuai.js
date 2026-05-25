@@ -12,7 +12,7 @@ import {
   normalizeTimestamp
 } from '../utils/index.js';
 
-export const providerId = 'zhipuai-coding-plan';
+export const providerId = 'zhipuai';
 export const providerName = 'ZhipuAI';
 export const aliases = ['zhipuai-coding-plan', 'zhipuai', 'zhipu'];
 

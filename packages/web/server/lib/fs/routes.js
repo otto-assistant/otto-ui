@@ -378,6 +378,11 @@ export const registerFsRoutes = (app, dependencies) => {
 
   app.get('/api/fs/read', async (req, res) => {
     const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+    // `optional=1` signals to the client that a missing file is an expected
+    // outcome (e.g. probing for an optional config file). When set we return
+    // 204 No Content instead of 404 so the browser doesn't log noisy network
+    // errors for benign misses.
+    const optional = req.query.optional === '1' || req.query.optional === 'true';
     if (!filePath) {
       return res.status(400).json({ error: 'Path is required' });
     }
@@ -409,6 +414,9 @@ export const registerFsRoutes = (app, dependencies) => {
     } catch (error) {
       const err = error;
       if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        if (optional) {
+          return res.status(204).end();
+        }
         return res.status(404).json({ error: 'File not found' });
       }
       if (err && typeof err === 'object' && err.code === 'EACCES') {

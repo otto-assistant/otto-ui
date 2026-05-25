@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { ottoFetch } from "../lib/api-base";
+import { safeRandomUUID } from "../lib/uuid";
 
 export type ScheduleEventType = "one-time" | "recurring";
 export type ScheduleEventStatus = "active" | "paused" | "completed" | "failed";
@@ -125,7 +126,7 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
     }
     const newEvent: ScheduleEvent = {
       ...event,
-      id: crypto.randomUUID(),
+      id: safeRandomUUID(),
       createdAt: new Date().toISOString(),
     };
     set({ events: [...get().events, newEvent] });
