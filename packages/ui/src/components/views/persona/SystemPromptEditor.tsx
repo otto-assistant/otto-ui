@@ -1,9 +1,8 @@
 import React from 'react';
 import { usePersonaStore } from '@/stores/usePersonaStore';
-import { RiSaveLine } from '@remixicon/react';
 
 export const SystemPromptEditor: React.FC = () => {
-  const { config, updateConfig, saveAgent, isSaving } = usePersonaStore();
+  const { config, updateConfig } = usePersonaStore();
 
   if (!config) return null;
 
@@ -21,14 +20,6 @@ export const SystemPromptEditor: React.FC = () => {
         className="min-h-[200px] w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
         placeholder="Enter system prompt..."
       />
-      <button
-        onClick={saveAgent}
-        disabled={isSaving}
-        className="flex w-fit items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-      >
-        <RiSaveLine className="size-4" />
-        {isSaving ? 'Saving...' : 'Save'}
-      </button>
     </div>
   );
 };
