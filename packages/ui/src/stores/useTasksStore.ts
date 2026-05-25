@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import { apiUrl } from '../lib/api-base';
+import { safeRandomUUID } from '../lib/uuid';
 import { useOttoEventsStore } from './useOttoEventsStore';
 
 export type TaskPriority = 'high' | 'medium' | 'low';
@@ -205,7 +206,7 @@ export const useTasksStore = create<TasksStore>()(
       createTask: async (task) => {
         const newTask: Task = {
           ...task,
-          id: crypto.randomUUID(),
+          id: safeRandomUUID(),
           status: 'pending',
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),

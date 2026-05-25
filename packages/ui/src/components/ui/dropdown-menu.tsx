@@ -3,6 +3,7 @@ import { Menu as BaseMenu } from "@base-ui/react/menu"
 import { RiArrowRightSLine, RiCheckLine } from '@remixicon/react';
 
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 
 type AsChildProps = { asChild?: boolean };
 type AsChildRenderProps = {
@@ -71,7 +72,7 @@ function DropdownMenuTrigger({
   }, [portalContext]);
 
   const r = renderFromAsChild(asChild, children);
-  const childIsNativeButton = !asChild || (React.isValidElement(children) && children.type === 'button');
+  const childIsNativeButton = !asChild || (React.isValidElement(children) && (children.type === 'button' || children.type === Button));
   return (
     <BaseMenu.Trigger
       data-slot="dropdown-menu-trigger"

@@ -101,7 +101,7 @@ const registry = {
     isConfigured: ollamaCloud.isConfigured,
     fetchQuota: ollamaCloud.fetchQuota
   },
-  'zhipuai-coding-plan': {
+  zhipuai: {
     providerId: zhipuai.providerId,
     providerName: zhipuai.providerName,
     isConfigured: zhipuai.isConfigured,
