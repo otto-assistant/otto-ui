@@ -328,9 +328,15 @@ const SessionFolderItemBase = <TSessionNode,>({
           {subFolderItems}
           {/* Then sessions */}
           {sessions.length > 0 ? (
-            sessions.map((node) =>
-              renderSessionNode(node, 0, groupDirectory ?? null, projectId ?? null, archivedBucket),
-            )
+            sessions.map((node, idx) => {
+              const session = (node as { session?: { id?: string | null } | null }).session ?? null;
+              const key = session?.id ?? `__node_${idx}`;
+              return (
+                <React.Fragment key={key}>
+                  {renderSessionNode(node, 0, groupDirectory ?? null, projectId ?? null, archivedBucket)}
+                </React.Fragment>
+              );
+            })
           ) : !subFolderItems ? (
             <div className="py-1 pl-1.5 text-left typography-micro text-muted-foreground/70">
               {t('sessions.sidebar.folderItem.emptyFolder')}

@@ -462,7 +462,11 @@ export function SessionGroupSection(props: Props): React.ReactNode {
       }}
     >
       {renderFolderItems()}
-      {visibleSessions.map((node) => renderSessionNode(node, 0, group.directory, projectId, group.isArchivedBucket === true))}
+      {visibleSessions.map((node) => (
+        <React.Fragment key={node.session.id}>
+          {renderSessionNode(node, 0, group.directory, projectId, group.isArchivedBucket === true)}
+        </React.Fragment>
+      ))}
       {totalSessions === 0 && allFoldersForGroup.length === 0 ? (
         <div className="py-1 text-left typography-micro text-muted-foreground">
           {group.isArchivedBucket
