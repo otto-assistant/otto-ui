@@ -1,17 +1,42 @@
 import React, { useState } from 'react';
-import { useTasksStore, type TaskPriority, type TaskOwnerType } from '@/stores/useTasksStore';
-import { useUIStore } from '@/stores/useUIStore';
-import { useSessionUIStore } from '@/sync/session-ui-store';
+import {
+  useTasksStore,
+  type TaskPriority,
+  type TaskOwnerType,
+  type TaskRecurrence,
+} from '@/stores/useTasksStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { usePersonaStore } from '@/stores/usePersonaStore';
+import { triggerTaskNow } from '@/hooks/useTaskScheduler';
+
+/** Convert a `datetime-local` input value (no tz) to an ISO string in the user's tz. */
+function localDatetimeToIso(value: string): string | null {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+/** Default the "Due" picker to the next round 5 minutes from now. */
+function defaultDueLocal(): string {
+  const d = new Date(Date.now() + 5 * 60 * 1000);
+  d.setSeconds(0, 0);
+  // Round up to next 5-minute boundary.
+  const minutes = d.getMinutes();
+  const remainder = minutes % 5;
+  if (remainder !== 0) {
+    d.setMinutes(minutes + (5 - remainder));
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 export const TaskCreateDialog: React.FC = () => {
   const open = useTasksStore((s) => s.createDialogOpen);
   const setOpen = useTasksStore((s) => s.setCreateDialogOpen);
   const createTask = useTasksStore((s) => s.createTask);
-  const setActiveView = useUIStore((s) => s.setActiveView);
-  const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
+  const markTaskTriggered = useTasksStore((s) => s.markTaskTriggered);
   const projects = useProjectsStore((s) => s.projects);
   const activeProjectId = useProjectsStore((s) => s.activeProjectId);
   const providers = useConfigStore((s) => s.providers);
@@ -24,12 +49,15 @@ export const TaskCreateDialog: React.FC = () => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('medium');
-  const [dueDate, setDueDate] = useState('');
+  const [dueAt, setDueAt] = useState<string>(defaultDueLocal());
+  const [hasDueAt, setHasDueAt] = useState<boolean>(true);
+  const [recurrence, setRecurrence] = useState<TaskRecurrence>('none');
   const [ownerType, setOwnerType] = useState<TaskOwnerType>('user');
   const [ownerName, setOwnerName] = useState('You');
   const [selectedProjectId, setSelectedProjectId] = useState<string>(activeProjectId ?? '');
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
+  const [startImmediately, setStartImmediately] = useState<boolean>(false);
 
   if (!open) return null;
 
@@ -40,18 +68,36 @@ export const TaskCreateDialog: React.FC = () => {
 
   const allModels = providers.flatMap(p => (p.models ?? []).map(m => ({ provider: p.id, model: m.id, label: `${m.name ?? m.id}` })));
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const resetForm = () => {
+    setTitle('');
+    setDescription('');
+    setPriority('medium');
+    setDueAt(defaultDueLocal());
+    setHasDueAt(true);
+    setRecurrence('none');
+    setOwnerType('user');
+    setOwnerName('You');
+    setSelectedAgent('');
+    setSelectedModel('');
+    setStartImmediately(false);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
     const taskTitle = title.trim();
     const taskDesc = description.trim();
-    createTask({
+    const dueIso = hasDueAt ? localDatetimeToIso(dueAt) : null;
+
+    const created = await createTask({
       title: taskTitle,
       description: taskDesc,
       priority,
       ownerType,
       ownerName,
-      dueDate: dueDate ? new Date(dueDate).toISOString() : null,
+      dueAt: dueIso,
+      dueDate: dueIso,
+      recurrence,
       projectId: selectedProjectId || null,
       projectPath: selectedProject?.path ?? null,
       agentName: effectiveAgent || null,
@@ -59,31 +105,32 @@ export const TaskCreateDialog: React.FC = () => {
       providerId: effectiveProvider || null,
     });
 
-    if (ownerType === 'agent') {
+    // For agent/cron tasks: start the session now if explicitly requested OR if no due time was set.
+    const shouldStartNow = (ownerType === 'agent' || ownerType === 'cron')
+      && (startImmediately || !dueIso);
+
+    if (shouldStartNow) {
       if (effectiveAgent) {
         useConfigStore.getState().setAgent(effectiveAgent);
       }
-      setActiveView('chat');
-      openNewSessionDraft({
-        title: `Task: ${taskTitle}`,
-        initialPrompt: `Work on task: ${taskTitle}`,
-        directoryOverride: selectedProject?.path ?? undefined,
-        syntheticParts: taskDesc ? [{ text: `Task details:\n${taskDesc}\n\nPriority: ${priority}`, synthetic: true }] : undefined,
-      });
+      // Reuse the unified trigger so behavior matches the scheduler.
+      triggerTaskNow(created);
+      markTaskTriggered(created.id);
+    } else if (ownerType === 'user' && !dueIso) {
+      // User task with no due time: nothing to schedule.
     }
 
-    setTitle('');
-    setDescription('');
-    setPriority('medium');
-    setDueDate('');
-    setOwnerType('user');
-    setOwnerName('You');
-    setSelectedAgent('');
-    setSelectedModel('');
+    resetForm();
   };
 
   const sectionLabel = "text-xs font-medium text-muted-foreground mb-1";
   const selectClass = "rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring w-full";
+
+  const submitLabel = (() => {
+    if (ownerType === 'user') return 'Create';
+    if (startImmediately || !hasDueAt) return 'Create & Start Now';
+    return 'Schedule';
+  })();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setOpen(false)}>
@@ -120,12 +167,47 @@ export const TaskCreateDialog: React.FC = () => {
               <option value="medium">Medium Priority</option>
               <option value="low">Low Priority</option>
             </select>
-            <input
-              type="date"
-              value={dueDate}
-              onChange={(e) => setDueDate(e.target.value)}
+            <select
+              value={recurrence}
+              onChange={(e) => setRecurrence(e.target.value as TaskRecurrence)}
               className={selectClass}
+              title="Repeat cadence"
+            >
+              <option value="none">Does not repeat</option>
+              <option value="daily">Repeats daily</option>
+              <option value="weekly">Repeats weekly</option>
+              <option value="monthly">Repeats monthly</option>
+            </select>
+          </div>
+
+          {/* Due date + time */}
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className={sectionLabel + ' mb-0'}>Due date & time</span>
+              <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={hasDueAt}
+                  onChange={(e) => setHasDueAt(e.target.checked)}
+                  className="h-3 w-3"
+                />
+                Scheduled
+              </label>
+            </div>
+            <input
+              type="datetime-local"
+              value={dueAt}
+              disabled={!hasDueAt}
+              onChange={(e) => setDueAt(e.target.value)}
+              className={selectClass + (hasDueAt ? '' : ' opacity-50')}
             />
+            {hasDueAt && (
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                {recurrence === 'none'
+                  ? 'Fires once at the time above.'
+                  : `Fires at the time above, then ${recurrence}.`}
+              </p>
+            )}
           </div>
 
           {/* Project selector */}
@@ -153,9 +235,9 @@ export const TaskCreateDialog: React.FC = () => {
             }}
             className={selectClass}
           >
-            <option value="user">Assign to: Me</option>
-            <option value="agent">Assign to: Agent</option>
-            <option value="cron">Assign to: Scheduled</option>
+            <option value="user">Assign to: Me (popup alert when due)</option>
+            <option value="agent">Assign to: Agent (starts chat when due)</option>
+            <option value="cron">Assign to: Scheduled job (starts chat when due)</option>
           </select>
 
           {/* Agent & Model selectors — shown for agent/cron tasks */}
@@ -183,16 +265,23 @@ export const TaskCreateDialog: React.FC = () => {
                 </select>
               </div>
 
+              {hasDueAt && (
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={startImmediately}
+                    onChange={(e) => setStartImmediately(e.target.checked)}
+                    className="h-3 w-3"
+                  />
+                  Start the chat session now (ignore the scheduled time)
+                </label>
+              )}
+
               <p className="text-[10px] text-muted-foreground">
                 Defaults come from Persona → project → global settings. Override here for this task only.
+                {selectedProject ? ` Session opens in: ${selectedProject.label || selectedProject.path.split('/').pop()}.` : ''}
               </p>
             </div>
-          )}
-
-          {ownerType === 'agent' && (
-            <p className="text-xs text-muted-foreground">
-              A chat session will open{selectedProject ? ` in ${selectedProject.label || selectedProject.path.split('/').pop()}` : ''} with the configured agent to work on this task.
-            </p>
           )}
         </div>
 
@@ -205,7 +294,7 @@ export const TaskCreateDialog: React.FC = () => {
             disabled={!title.trim()}
             className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
           >
-            {ownerType === 'agent' ? 'Create & Start Session' : 'Create'}
+            {submitLabel}
           </button>
         </div>
       </form>

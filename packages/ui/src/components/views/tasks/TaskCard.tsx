@@ -21,15 +21,26 @@ const STATUS_STYLES: Record<string, string> = {
   cancelled: 'bg-red-500/20 text-red-400',
 };
 
-function relativeDate(iso: string | null): string {
-  if (!iso) return '';
-  const diff = new Date(iso).getTime() - Date.now();
-  const days = Math.round(diff / 86400000);
-  if (days === 0) return 'Today';
-  if (days === 1) return 'Tomorrow';
-  if (days === -1) return 'Yesterday';
-  if (days > 0) return `In ${days}d`;
-  return `${Math.abs(days)}d ago`;
+function formatDueAt(iso: string | null | undefined): { text: string; isOverdue: boolean } | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const diffMs = d.getTime() - Date.now();
+  const isOverdue = diffMs < 0;
+  const absMs = Math.abs(diffMs);
+  const mins = Math.round(absMs / 60000);
+  const hours = Math.round(absMs / 3600000);
+  const days = Math.round(absMs / 86400000);
+  let rel: string;
+  if (mins < 1) rel = 'now';
+  else if (mins < 60) rel = `${mins}m`;
+  else if (hours < 24) rel = `${hours}h`;
+  else rel = `${days}d`;
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const date = d.toLocaleDateString();
+  const text = isOverdue
+    ? `Overdue ${rel} (${date} ${time})`
+    : `In ${rel} (${date} ${time})`;
+  return { text, isOverdue };
 }
 
 export const TaskCard: React.FC<{ task: Task }> = ({ task }) => {
@@ -40,6 +51,8 @@ export const TaskCard: React.FC<{ task: Task }> = ({ task }) => {
     setSelectedTaskId(task.id);
     setDetailDrawerOpen(true);
   };
+
+  const due = formatDueAt(task.dueAt ?? task.dueDate ?? null);
 
   return (
     <button
@@ -52,12 +65,17 @@ export const TaskCard: React.FC<{ task: Task }> = ({ task }) => {
       {/* Content */}
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground">{task.title}</p>
-        <div className="mt-1 flex items-center gap-2">
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${OWNER_COLORS[task.ownerType]}`}>
             {task.ownerName}
           </span>
-          {task.dueDate && (
-            <span className="text-[10px] text-muted-foreground">{relativeDate(task.dueDate)}</span>
+          {due && (
+            <span className={`text-[10px] ${due.isOverdue && task.status !== 'done' ? 'text-red-400' : 'text-muted-foreground'}`}>
+              {due.text}
+            </span>
+          )}
+          {task.recurrence && task.recurrence !== 'none' && (
+            <span className="text-[10px] text-muted-foreground">↻ {task.recurrence}</span>
           )}
           {task.agentName && (
             <span className="text-[10px] text-muted-foreground">🤖 {task.agentName}</span>
