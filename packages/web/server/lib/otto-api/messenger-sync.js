@@ -4,6 +4,18 @@ import express, { Router } from 'express';
  * Unified messenger sync routes for Discord and Telegram.
  * Handles project↔channel/topic mapping, message format adaptation, and onboarding.
  */
+/** Map a Discord HTTP failure into a short, human-friendly message. */
+function friendlyDiscordError(status, rawText) {
+  const trimmed = (rawText ?? '').slice(0, 300);
+  if (status === 401) return 'Invalid bot token.';
+  if (status === 403) {
+    return 'Bot has no access — invite it to the server and grant View Channel + Send Messages permission.';
+  }
+  if (status === 404) return 'Not found. Double-check the ID (right-click → Copy ID in Discord).';
+  if (status === 429) return 'Rate-limited by Discord. Wait a few seconds and retry.';
+  return trimmed || `HTTP ${status}`;
+}
+
 export function createMessengerSyncRouter({ broadcastEvent }) {
   const router = Router();
 
@@ -36,15 +48,39 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
 
     try {
       if (type === 'discord') {
-        const resp = await fetch('https://discord.com/api/v10/users/@me', {
-          headers: { Authorization: `Bot ${token}` },
-        });
+        const headers = { Authorization: `Bot ${token}` };
+        const resp = await fetch('https://discord.com/api/v10/users/@me', { headers });
         if (!resp.ok) {
           const text = await resp.text();
-          return res.json({ ok: false, error: `Discord: ${resp.status} ${text.slice(0, 200)}` });
+          return res.json({
+            ok: false,
+            error: `Discord: ${resp.status} — ${friendlyDiscordError(resp.status, text)}`,
+          });
         }
         const data = await resp.json();
-        return res.json({ ok: true, username: data.username, discriminator: data.discriminator });
+
+        // Fetch guilds the bot belongs to so the UI can show server context.
+        // Failure here should not break verify — keep the response best-effort.
+        let guilds = [];
+        try {
+          const gResp = await fetch('https://discord.com/api/v10/users/@me/guilds', { headers });
+          if (gResp.ok) {
+            const list = await gResp.json();
+            guilds = Array.isArray(list)
+              ? list.slice(0, 25).map((g) => ({ id: g.id, name: g.name }))
+              : [];
+          }
+        } catch {
+          // ignore — guilds is optional
+        }
+
+        return res.json({
+          ok: true,
+          id: data.id,
+          username: data.username,
+          discriminator: data.discriminator,
+          guilds,
+        });
       }
 
       if (type === 'telegram') {
@@ -107,7 +143,10 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
         });
         if (!resp.ok) {
           const errText = await resp.text();
-          return res.json({ ok: false, error: `Discord: ${resp.status} ${errText.slice(0, 300)}` });
+          return res.json({
+            ok: false,
+            error: `Discord: ${resp.status} — ${friendlyDiscordError(resp.status, errText)}`,
+          });
         }
         const data = await resp.json();
         broadcastEvent?.('messenger.discord.sent', { target, messageId: data.id });
@@ -118,6 +157,102 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
     } catch (err) {
       return res.json({ ok: false, error: err?.message ?? 'Send failed' });
     }
+  });
+
+  /**
+   * Resolve a Discord channel by id and (best-effort) its guild name.
+   * Body: { token, channelId }
+   * Returns: { ok, channelId, channelName, channelType, guildId, guildName, parentId, canSend }
+   *
+   * channelType numeric mapping (Discord): 0=text, 5=announcement, 11=public_thread,
+   * 12=private_thread, 15=forum, 16=media, 2=voice — we just expose the raw int + a label.
+   */
+  router.post('/discord/resolve-channel', async (req, res) => {
+    const { token, channelId } = req.body ?? {};
+    if (!token || !channelId) {
+      return res.status(400).json({ error: 'token and channelId required' });
+    }
+    const headers = { Authorization: `Bot ${token}` };
+    try {
+      const chResp = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+        { headers },
+      );
+      if (!chResp.ok) {
+        const text = await chResp.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${chResp.status} — ${friendlyDiscordError(chResp.status, text)}`,
+        });
+      }
+      const ch = await chResp.json();
+
+      // Best-effort fetch of guild name for nicer UX. The bot only sees guilds it joined.
+      let guildName = null;
+      if (ch.guild_id) {
+        try {
+          const gResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(ch.guild_id)}`,
+            { headers },
+          );
+          if (gResp.ok) {
+            const g = await gResp.json();
+            guildName = g?.name ?? null;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const typeLabels = {
+        0: 'text',
+        2: 'voice',
+        4: 'category',
+        5: 'announcement',
+        10: 'announcement-thread',
+        11: 'public-thread',
+        12: 'private-thread',
+        13: 'stage',
+        15: 'forum',
+        16: 'media',
+      };
+
+      return res.json({
+        ok: true,
+        channelId: ch.id,
+        channelName: ch.name ?? null,
+        channelType: ch.type,
+        channelTypeLabel: typeLabels[ch.type] ?? `type-${ch.type}`,
+        guildId: ch.guild_id ?? null,
+        guildName,
+        parentId: ch.parent_id ?? null,
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'resolve-channel failed' });
+    }
+  });
+
+  /**
+   * Build a Discord bot invite URL the user can click to add the bot to a server.
+   * Body: { clientId, permissions? }
+   *   - clientId: the bot/application id (returned by /test for discord)
+   *   - permissions: integer bitfield; defaults to a conservative "Send Messages, Embed Links,
+   *     Read Message History, View Channel" set so messenger sync can actually post.
+   */
+  router.post('/discord/invite-url', (req, res) => {
+    const { clientId, permissions } = req.body ?? {};
+    if (!clientId || typeof clientId !== 'string') {
+      return res.status(400).json({ error: 'clientId required' });
+    }
+    // Default perms: View Channel (1<<10) | Send Messages (1<<11) | Embed Links (1<<14)
+    //              | Read Message History (1<<16) = 117760
+    const perms = typeof permissions === 'string' || typeof permissions === 'number'
+      ? String(permissions)
+      : '117760';
+    const url =
+      `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}` +
+      `&permissions=${encodeURIComponent(perms)}&scope=bot%20applications.commands`;
+    return res.json({ ok: true, url });
   });
 
   /**

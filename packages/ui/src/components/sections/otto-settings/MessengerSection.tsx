@@ -54,16 +54,18 @@ const MESSENGER_META: Record<MessengerType, MessengerMeta> = {
         >
           discord.com/developers <RiExternalLinkLine className="size-3" />
         </a>{' '}
-        → New Application → Bot → Reset Token.
+        → New Application → Bot tab → Reset Token. Make sure the{' '}
+        <em>Message Content</em> intent is enabled if you want Otto to read replies.
       </>
     ),
     targetLabel: 'Channel ID',
     targetPlaceholder: 'e.g. 1234567890123456789',
     targetHelp: (
       <>
-        In Discord, enable Developer Mode (Settings → Advanced), then right-click any text channel →
-        "Copy Channel ID". Make sure your bot has been invited to the server and has permission to
-        post in that channel.
+        In Discord, open <em>Settings → Advanced → Developer Mode</em>, then right-click the target
+        text channel and choose <strong>"Copy Channel ID"</strong>. Your bot must already be a
+        member of that server and have <em>View Channel</em> + <em>Send Messages</em> permission —
+        if not, use the invite link above first.
       </>
     ),
   },
@@ -168,6 +170,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const testConnection = useMessengerStore((s) => s.testConnection);
   const removeConnection = useMessengerStore((s) => s.removeConnection);
   const resolveTelegramChat = useMessengerStore((s) => s.resolveTelegramChat);
+  const resolveDiscordChannel = useMessengerStore((s) => s.resolveDiscordChannel);
+  const fetchDiscordInviteUrl = useMessengerStore((s) => s.fetchDiscordInviteUrl);
   const sendTestMessage = useMessengerStore((s) => s.sendTestMessage);
   const sendSyncSummary = useMessengerStore((s) => s.sendSyncSummary);
   const projects = useProjectsStore((s) => s.projects);
@@ -208,9 +212,11 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
     if (!value) return;
     if (conn.type === 'discord') {
       updateConnection('discord', { defaultChannelId: value });
+      setTimeout(() => {
+        resolveDiscordChannel();
+      }, 0);
     } else {
       updateConnection('telegram', { telegramChatId: value });
-      // Try to resolve chat details immediately
       setTimeout(() => {
         resolveTelegramChat();
       }, 0);
@@ -260,8 +266,16 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           <Icon className={cn('size-5', meta.color)} />
           <span className="text-sm font-medium text-foreground">{meta.name}</span>
           <StatusBadge status={conn.status} />
-          {conn.telegramBotUsername && (
+          {conn.type === 'telegram' && conn.telegramBotUsername && (
             <span className="text-[10px] text-muted-foreground">@{conn.telegramBotUsername}</span>
+          )}
+          {conn.type === 'discord' && conn.discordBotUsername && (
+            <span className="text-[10px] text-muted-foreground">
+              {conn.discordBotUsername}
+              {conn.discordBotDiscriminator && conn.discordBotDiscriminator !== '0'
+                ? `#${conn.discordBotDiscriminator}`
+                : ''}
+            </span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -319,7 +333,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
               !hasToken
                 ? undefined
                 : isConnected
-                  ? `connected as ${conn.telegramBotUsername ? '@' + conn.telegramBotUsername : conn.guildName || 'bot'}`
+                  ? conn.type === 'telegram'
+                    ? `connected as ${conn.telegramBotUsername ? '@' + conn.telegramBotUsername : 'bot'}`
+                    : `connected as ${conn.discordBotUsername ?? 'bot'} — ${conn.discordGuilds?.length ?? 0} server${(conn.discordGuilds?.length ?? 0) === 1 ? '' : 's'}`
                   : 'click "Verify token" above'
             }
           />
@@ -328,7 +344,11 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
             label={`3. Add ${conn.type === 'telegram' ? 'chat ID' : 'channel ID'}`}
             hint={
               hasTarget
-                ? `${conn.type === 'telegram' ? (conn.telegramChatTitle ?? conn.telegramChatId) : conn.defaultChannelId}`
+                ? conn.type === 'telegram'
+                  ? (conn.telegramChatTitle ?? conn.telegramChatId)
+                  : conn.discordChannelName
+                    ? `#${conn.discordChannelName}${conn.guildName ? ` (${conn.guildName})` : ''}`
+                    : conn.defaultChannelId
                 : 'see the field below'
             }
           />
@@ -350,7 +370,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
               ? conn.telegramChatTitle
                 ? `"${conn.telegramChatTitle}"`
                 : 'your chat'
-              : 'your channel'}{' '}
+              : conn.discordChannelName
+                ? `#${conn.discordChannelName}${conn.guildName ? ` in ${conn.guildName}` : ''}`
+                : 'your channel'}{' '}
             based on the sync mode below.
           </div>
         )}
@@ -426,6 +448,63 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         </div>
       )}
 
+      {/* Discord-only: invite bot to server hint */}
+      {conn.type === 'discord' && token && isConnected && (
+        <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs space-y-1.5">
+          <div className="font-medium text-foreground flex items-center gap-1.5">
+            <RiInformationLine className="size-3.5 text-primary" />
+            Invite your bot to a server
+          </div>
+          {conn.discordGuilds && conn.discordGuilds.length > 0 ? (
+            <>
+              <div className="text-muted-foreground leading-snug">
+                Bot is already in {conn.discordGuilds.length} server
+                {conn.discordGuilds.length === 1 ? '' : 's'}:
+              </div>
+              <ul className="flex flex-wrap gap-1">
+                {conn.discordGuilds.slice(0, 8).map((g) => (
+                  <li
+                    key={g.id}
+                    className="rounded-full bg-background border border-border px-2 py-0.5 text-[10px] text-foreground"
+                    title={`Guild ID: ${g.id}`}
+                  >
+                    {g.name}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <div className="text-muted-foreground leading-snug">
+              Your bot isn't in any server yet. Add it to your server so it can see channels:
+            </div>
+          )}
+          {conn.discordInviteUrl ? (
+            <a
+              href={conn.discordInviteUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-primary text-[11px] hover:underline"
+            >
+              {conn.discordGuilds && conn.discordGuilds.length > 0
+                ? 'Add to another server'
+                : 'Open invite link'}{' '}
+              <RiExternalLinkLine className="size-3" />
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={() => fetchDiscordInviteUrl()}
+              className="text-primary text-[11px] hover:underline"
+            >
+              Generate invite link →
+            </button>
+          )}
+          <div className="text-[10px] text-muted-foreground leading-snug">
+            Required permissions: View Channel, Send Messages, Embed Links, Read Message History.
+          </div>
+        </div>
+      )}
+
       {/* Step 2: Chat / Channel ID */}
       {token && (
         <div className="space-y-2">
@@ -457,7 +536,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
               </div>
             </>
           ) : (
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-2 text-xs flex-wrap">
               <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground">
                 {target}
               </code>
@@ -467,11 +546,33 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                   {conn.telegramChatType ? ` (${conn.telegramChatType})` : ''}
                 </span>
               )}
+              {conn.type === 'discord' && conn.discordChannelName && (
+                <span className="text-muted-foreground">
+                  #{conn.discordChannelName}
+                  {conn.guildName ? ` · ${conn.guildName}` : ''}
+                  {conn.discordChannelTypeLabel ? ` · ${conn.discordChannelTypeLabel}` : ''}
+                </span>
+              )}
+              {conn.type === 'discord' && conn.botToken && conn.defaultChannelId && !conn.discordChannelName && (
+                <button
+                  type="button"
+                  onClick={() => resolveDiscordChannel()}
+                  className="text-primary text-[10px] hover:underline"
+                  title="Look up channel info via Discord API"
+                >
+                  Look up
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
                   if (conn.type === 'discord') {
-                    updateConnection('discord', { defaultChannelId: undefined });
+                    updateConnection('discord', {
+                      defaultChannelId: undefined,
+                      discordChannelName: undefined,
+                      discordChannelType: undefined,
+                      discordChannelTypeLabel: undefined,
+                    });
                   } else {
                     updateConnection('telegram', {
                       telegramChatId: undefined,

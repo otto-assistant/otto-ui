@@ -18,6 +18,15 @@ export interface MessengerConnection {
   guildName?: string;
   /** Default Discord channel id that summary / test messages are sent to. */
   defaultChannelId?: string;
+  discordBotId?: string;
+  discordBotUsername?: string;
+  discordBotDiscriminator?: string;
+  discordChannelName?: string;
+  discordChannelType?: number;
+  discordChannelTypeLabel?: string;
+  discordGuilds?: { id: string; name: string }[];
+  /** Cached invite URL built from discordBotId so the user can re-invite the bot. */
+  discordInviteUrl?: string;
   webhookSecret?: string;
 
   // Telegram-specific
@@ -60,6 +69,8 @@ interface MessengerState {
   removeConnection: (type: MessengerType) => void;
   testConnection: (type: MessengerType) => Promise<boolean>;
   resolveTelegramChat: () => Promise<boolean>;
+  resolveDiscordChannel: () => Promise<boolean>;
+  fetchDiscordInviteUrl: () => Promise<string | null>;
   sendTestMessage: (type: MessengerType) => Promise<boolean>;
   sendSyncSummary: (type: MessengerType, summary: string) => Promise<boolean>;
   setProjectMapping: (mapping: ProjectMessengerMapping) => void;
@@ -135,16 +146,29 @@ export const useMessengerStore = create<MessengerState>()(
 
         try {
           if (type === 'discord' && conn.botToken) {
-            const res = await fetch('https://discord.com/api/v10/users/@me', {
-              headers: { Authorization: `Bot ${conn.botToken}` },
-            });
-            if (!res.ok) throw new Error(`Discord API: ${res.status}`);
-            const data = await res.json();
+            // Route through backend so we also get guild list + bot id in one call.
+            const data = await postJson<{
+              ok: boolean;
+              error?: string;
+              id?: string;
+              username?: string;
+              discriminator?: string;
+              guilds?: { id: string; name: string }[];
+            }>('/api/otto/messenger/test', { type: 'discord', token: conn.botToken });
+            if (!data.ok) throw new Error(data.error ?? 'Discord API failed');
             get().updateConnection(type, {
               status: 'connected',
               lastConnectedAt: Date.now(),
-              guildName: data.username ?? 'Connected',
+              discordBotId: data.id,
+              discordBotUsername: data.username,
+              discordBotDiscriminator: data.discriminator,
+              discordGuilds: data.guilds ?? [],
+              guildName: data.guilds && data.guilds.length > 0 ? data.guilds[0].name : undefined,
             });
+            // Best-effort: pre-fetch the invite URL so the user can re-invite if needed.
+            if (data.id) {
+              get().fetchDiscordInviteUrl();
+            }
             return true;
           }
 
@@ -170,6 +194,59 @@ export const useMessengerStore = create<MessengerState>()(
             error: e instanceof Error ? e.message : 'Connection failed',
           });
           return false;
+        }
+      },
+
+      resolveDiscordChannel: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken || !conn.defaultChannelId) return false;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            error?: string;
+            channelName?: string | null;
+            channelType?: number;
+            channelTypeLabel?: string;
+            guildId?: string | null;
+            guildName?: string | null;
+          }>('/api/otto/messenger/discord/resolve-channel', {
+            token: conn.botToken,
+            channelId: conn.defaultChannelId,
+          });
+          if (!data.ok) {
+            get().updateConnection('discord', { error: data.error ?? 'Could not resolve channel' });
+            return false;
+          }
+          get().updateConnection('discord', {
+            discordChannelName: data.channelName ?? undefined,
+            discordChannelType: data.channelType,
+            discordChannelTypeLabel: data.channelTypeLabel,
+            guildId: data.guildId ?? undefined,
+            guildName: data.guildName ?? undefined,
+            error: null,
+          });
+          return true;
+        } catch (e) {
+          get().updateConnection('discord', {
+            error: e instanceof Error ? e.message : 'resolve-channel failed',
+          });
+          return false;
+        }
+      },
+
+      fetchDiscordInviteUrl: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.discordBotId) return null;
+        try {
+          const data = await postJson<{ ok: boolean; url?: string; error?: string }>(
+            '/api/otto/messenger/discord/invite-url',
+            { clientId: conn.discordBotId },
+          );
+          if (!data.ok || !data.url) return null;
+          get().updateConnection('discord', { discordInviteUrl: data.url });
+          return data.url;
+        } catch {
+          return null;
         }
       },
 
