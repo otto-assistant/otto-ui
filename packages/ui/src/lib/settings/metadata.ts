@@ -12,6 +12,7 @@ export type SettingsPageSlug =
   | 'skills.installed'
   | 'skills.catalog'
   | 'git'
+  | 'integrations'
   | 'appearance'
   | 'chat'
   | 'shortcuts'
@@ -138,6 +139,13 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     kind: 'single',
     keywords: ['git', 'github', 'identity', 'identities', 'ssh', 'profiles', 'credentials', 'keys', 'commit', 'gitmoji', 'oauth', 'prs', 'issues'],
     isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
+    slug: 'integrations',
+    title: 'Integrations',
+    group: 'general',
+    kind: 'single',
+    keywords: ['integrations', 'discord', 'telegram', 'messenger', 'sync', 'relay', 'connection'],
   },
   {
     slug: 'appearance',

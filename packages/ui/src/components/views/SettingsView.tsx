@@ -22,6 +22,7 @@ import {
   RiFoldersLine,
   RiGitBranchLine,
   RiGlobalLine,
+  RiLink,
   RiMicLine,
   RiListUnordered,
   RiNotification3Line,
@@ -52,6 +53,7 @@ import { UsagePage } from '@/components/sections/usage/UsagePage';
 import { MagicPromptsSidebar } from '@/components/sections/magic-prompts/MagicPromptsSidebar';
 import { MagicPromptsPage } from '@/components/sections/magic-prompts/MagicPromptsPage';
 import { GitPage } from '@/components/sections/git-identities/GitPage';
+import { IntegrationsPage } from '@/components/sections/integrations/IntegrationsPage';
 import type { OpenChamberSection } from '@/components/sections/openchamber/types';
 import { OpenChamberPage } from '@/components/sections/openchamber/OpenChamberPage';
 import { McpIcon } from '@/components/icons/McpIcon';
@@ -90,6 +92,7 @@ const pageOrder: SettingsPageSlug[] = [
   'sessions',
   'shortcuts',
   'git',
+  'integrations',
   'magic-prompts',
   'projects',
   'remote-instances',
@@ -153,6 +156,9 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): React.ComponentType<
 
     case 'git':
       return RiGitBranchLine;
+
+    case 'integrations':
+      return RiLink;
 
     case 'usage':
       return RiBarChart2Line;
@@ -407,6 +413,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return t('settings.page.skillsCatalog.title');
       case 'git':
         return t('settings.page.git.title');
+      case 'integrations':
+        return 'Integrations';
       case 'appearance':
         return t('settings.page.appearance.title');
       case 'chat':
@@ -496,6 +504,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <MagicPromptsPage />;
       case 'git':
         return <GitPage />;
+      case 'integrations':
+        return <IntegrationsPage />;
       case 'appearance':
       case 'chat':
       case 'shortcuts':

@@ -1,11 +1,9 @@
 import React from 'react';
 import {
   OttoStatusSection,
-  ConnectionsSection,
   UpgradeSection,
   SecuritySection,
 } from '@/components/sections/otto-settings';
-import { MessengerSection } from '@/components/sections/otto-settings/MessengerSection';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { usePersonaStore } from '@/stores/usePersonaStore';
 import { openAgentsSettings } from '@/lib/navigation/openAgentsSettings';
@@ -55,18 +53,15 @@ export const SettingsLandingView: React.FC = () => (
       <h1 className="text-lg font-semibold text-foreground">Settings</h1>
       <p className="mt-1 text-sm text-muted-foreground">
         Global configuration for Otto. Per-project overrides are set in project settings.
+        Discord, Telegram, and Otto backend connections are now under{' '}
+        <span className="font-medium text-foreground">Integrations</span> in the settings menu.
       </p>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         <GlobalDefaultsSection />
         <OttoStatusSection />
-        <ConnectionsSection />
         <UpgradeSection />
         <SecuritySection />
-      </div>
-
-      <div className="mt-6">
-        <MessengerSection />
       </div>
     </div>
   </div>

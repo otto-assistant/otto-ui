@@ -3,6 +3,7 @@ import { RiDashboardLine, RiAddLine } from "@remixicon/react";
 
 import { ActivityTimeline } from "./ActivityTimeline";
 import { AgentStatusCard } from "./AgentStatusCard";
+import { DashboardProjectsSection } from "./DashboardProjectsSection";
 import { QuickStatsGrid } from "./QuickStatsGrid";
 import { RecentSessions } from "./RecentSessions";
 import { RunningTasks } from "./RunningTasks";
@@ -125,6 +126,8 @@ export const DashboardView: React.FC = () => {
 
         <div className="mt-6 space-y-6">
           <QuickStatsGrid stats={liveStats} />
+
+          <DashboardProjectsSection />
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <section className="space-y-3">
