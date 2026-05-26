@@ -1,13 +1,11 @@
 import React from 'react';
 import {
   RiBrainLine,
-  RiCalendarLine,
   RiChat3Line,
   RiDashboardLine,
   RiFolderLine,
   RiSettings3Line,
   RiTaskLine,
-  RiUserSettingsLine,
   type RemixiconComponentType,
 } from '@remixicon/react';
 import { cn } from '@/lib/utils';
@@ -33,9 +31,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: 'Tools',
     items: [
       { id: 'projects', label: 'Projects', icon: RiFolderLine },
-      { id: 'persona', label: 'Persona', icon: RiUserSettingsLine },
       { id: 'memory', label: 'Memory', icon: RiBrainLine },
-      { id: 'schedule', label: 'Schedule', icon: RiCalendarLine },
     ],
   },
   {

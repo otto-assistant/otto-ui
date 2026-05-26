@@ -1,7 +1,7 @@
 import React from "react";
 import { cn } from "@/lib/utils";
 import type { AgentRunStatus, DashboardAgentCard } from "@/stores/useDashboardStore";
-import { useUIStore } from "@/stores/useUIStore";
+import { openAgentsSettings } from "@/lib/navigation/openAgentsSettings";
 
 const statusPresentation: Record<
   AgentRunStatus,
@@ -44,12 +44,11 @@ export interface AgentStatusCardProps {
 
 export const AgentStatusCard: React.FC<AgentStatusCardProps> = ({ agent }) => {
   const preset = statusPresentation[agent.status];
-  const setActiveView = useUIStore((s) => s.setActiveView);
 
   return (
     <button
       type="button"
-      onClick={() => setActiveView('persona')}
+      onClick={openAgentsSettings}
       className={cn("w-full rounded-lg border border-border bg-[var(--surface-elevated)] p-4 text-left transition-colors hover:border-primary/30")}
     >
       <div className="flex items-start justify-between gap-3">
