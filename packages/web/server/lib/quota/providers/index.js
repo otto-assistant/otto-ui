@@ -21,6 +21,7 @@ import * as minimaxCodingPlan from './minimax-coding-plan.js';
 import * as minimaxCnCodingPlan from './minimax-cn-coding-plan.js';
 import * as ollamaCloud from './ollama-cloud.js';
 import * as wafer from './wafer.js';
+import * as zhipuai from './zhipuai.js';
 
 const registry = {
   claude: {
@@ -106,6 +107,12 @@ const registry = {
     providerName: wafer.providerName,
     isConfigured: wafer.isConfigured,
     fetchQuota: wafer.fetchQuota
+  },
+  zhipuai: {
+    providerId: zhipuai.providerId,
+    providerName: zhipuai.providerName,
+    isConfigured: zhipuai.isConfigured,
+    fetchQuota: zhipuai.fetchQuota
   }
 };
 
