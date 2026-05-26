@@ -258,7 +258,7 @@ export const useTasksStore = create<TasksStore>()(
 
         createTask: async (task) => {
           const now = new Date().toISOString();
-          const newTask: Task = normalizeTask({
+          const optimistic: Task = normalizeTask({
             ...task,
             id: safeRandomUUID(),
             status: 'pending',
@@ -269,7 +269,8 @@ export const useTasksStore = create<TasksStore>()(
             history: [{ timestamp: now, action: 'Created' }],
           });
           // Optimistic: show immediately
-          set((state) => ({ tasks: [newTask, ...state.tasks], createDialogOpen: false }));
+          set((state) => ({ tasks: [optimistic, ...state.tasks], createDialogOpen: false }));
+          let confirmed: Task = optimistic;
           try {
             const res = await fetch(API_BASE(), {
               method: 'POST',
@@ -277,27 +278,28 @@ export const useTasksStore = create<TasksStore>()(
               body: JSON.stringify({
                 ...task,
                 source: 'web',
-                dueAt: newTask.dueAt,
-                dueDate: newTask.dueAt,
+                dueAt: optimistic.dueAt,
+                dueDate: optimistic.dueAt,
               }),
             });
             if (res.ok) {
               const json = await res.json();
               if (json.task?.id) {
-                // Replace optimistic with server-confirmed (preserve fields the server may not echo back)
+                // Adopt the server-assigned id so PUT/DELETE round-trip correctly.
+                confirmed = normalizeTask({
+                  ...optimistic,
+                  ...json.task,
+                  history: optimistic.history,
+                });
                 set((state) => ({
-                  tasks: state.tasks.map((t) =>
-                    t.id === newTask.id
-                      ? normalizeTask({ ...t, ...json.task, id: t.id })
-                      : t,
-                  ),
+                  tasks: state.tasks.map((t) => (t.id === optimistic.id ? confirmed : t)),
                 }));
               }
             }
           } catch {
             // offline — keep optimistic
           }
-          return newTask;
+          return confirmed;
         },
 
         updateTask: async (id, updates) => {
