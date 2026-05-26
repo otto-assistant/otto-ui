@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -6,6 +6,8 @@ import { Router } from 'express';
  */
 export function createMessengerSyncRouter({ broadcastEvent }) {
   const router = Router();
+
+  router.use(express.json({ limit: '256kb' }));
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
@@ -57,6 +59,96 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
       return res.status(400).json({ error: `Unknown messenger type: ${type}` });
     } catch (err) {
       return res.json({ ok: false, error: err.message ?? 'Connection failed' });
+    }
+  });
+
+  /**
+   * Send a real message to a Telegram chat or Discord channel.
+   * Body: { type: 'telegram' | 'discord', token, target, text, parseMode? }
+   *   - target: chat_id for Telegram, channel_id for Discord
+   *   - parseMode: Telegram only (e.g. 'Markdown', 'MarkdownV2', 'HTML')
+   */
+  router.post('/send', async (req, res) => {
+    const { type, token, target, text, parseMode } = req.body ?? {};
+
+    if (!type || !token || !target || !text) {
+      return res.status(400).json({ error: 'type, token, target and text are required' });
+    }
+
+    try {
+      if (type === 'telegram') {
+        const body = {
+          chat_id: target,
+          text: String(text).slice(0, 4096),
+        };
+        if (parseMode) body.parse_mode = parseMode;
+
+        const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+          return res.json({ ok: false, error: data.description ?? `Telegram error ${resp.status}` });
+        }
+        broadcastEvent?.('messenger.telegram.sent', { target, messageId: data.result?.message_id });
+        return res.json({ ok: true, messageId: data.result?.message_id, sentAt: new Date().toISOString() });
+      }
+
+      if (type === 'discord') {
+        const resp = await fetch(`https://discord.com/api/v10/channels/${encodeURIComponent(target)}/messages`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bot ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ content: String(text).slice(0, 2000) }),
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return res.json({ ok: false, error: `Discord: ${resp.status} ${errText.slice(0, 300)}` });
+        }
+        const data = await resp.json();
+        broadcastEvent?.('messenger.discord.sent', { target, messageId: data.id });
+        return res.json({ ok: true, messageId: data.id, sentAt: new Date().toISOString() });
+      }
+
+      return res.status(400).json({ error: `Unknown messenger type: ${type}` });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'Send failed' });
+    }
+  });
+
+  /**
+   * Resolve a Telegram chat by id (helpful confirmation after the user pastes a chat id).
+   * Body: { token, chatId }
+   */
+  router.post('/telegram/resolve-chat', async (req, res) => {
+    const { token, chatId } = req.body ?? {};
+    if (!token || !chatId) {
+      return res.status(400).json({ error: 'token and chatId required' });
+    }
+    try {
+      const resp = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId }),
+      });
+      const data = await resp.json();
+      if (!data.ok) {
+        return res.json({ ok: false, error: data.description ?? 'getChat failed' });
+      }
+      const c = data.result || {};
+      return res.json({
+        ok: true,
+        chatId: c.id,
+        title: c.title ?? c.username ?? c.first_name ?? null,
+        type: c.type ?? null,
+        isForum: Boolean(c.is_forum),
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'resolve-chat failed' });
     }
   });
 
