@@ -27,6 +27,7 @@ import { cn } from '@/lib/utils';
 import { isDesktopShell } from '@/lib/desktop';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { useRoute } from '@/hooks/useHashRoute';
+import { useTaskScheduler } from '@/hooks/useTaskScheduler';
 
 import { ChatView } from '@/components/views/ChatView';
 
@@ -124,6 +125,9 @@ export const MainLayout: React.FC = () => {
 
     // Initialize hash-based routing (syncs URL ↔ activeView)
     useRoute();
+
+    // Fires due tasks (user popups / agent session starts) on a poll.
+    useTaskScheduler();
 
     // Preload all view chunks after first render for instant view switching
     React.useEffect(() => { preloadAllViewChunks(); }, []);

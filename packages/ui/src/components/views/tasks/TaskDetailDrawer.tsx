@@ -1,11 +1,24 @@
 import React from 'react';
-import { useTasksStore, type TaskStatus } from '@/stores/useTasksStore';
-import { useUIStore } from '@/stores/useUIStore';
-import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useTasksStore, type TaskStatus, type TaskRecurrence } from '@/stores/useTasksStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
-import { useConfigStore } from '@/stores/useConfigStore';
+import { triggerTaskNow } from '@/hooks/useTaskScheduler';
 
 const STATUS_OPTIONS: TaskStatus[] = ['pending', 'in_progress', 'done', 'cancelled'];
+const RECURRENCE_OPTIONS: { value: TaskRecurrence; label: string }[] = [
+  { value: 'none', label: 'Does not repeat' },
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'monthly', label: 'Monthly' },
+];
+
+/** Convert ISO -> `YYYY-MM-DDTHH:mm` (local) for a datetime-local input. */
+function isoToLocalDatetime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 export const TaskDetailDrawer: React.FC = () => {
   const open = useTasksStore((s) => s.detailDrawerOpen);
@@ -14,8 +27,7 @@ export const TaskDetailDrawer: React.FC = () => {
   const tasks = useTasksStore((s) => s.tasks);
   const updateTask = useTasksStore((s) => s.updateTask);
   const deleteTask = useTasksStore((s) => s.deleteTask);
-  const setActiveView = useUIStore((s) => s.setActiveView);
-  const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
+  const markTaskTriggered = useTasksStore((s) => s.markTaskTriggered);
   const projects = useProjectsStore((s) => s.projects);
 
   const task = tasks.find((t) => t.id === selectedId);
@@ -23,24 +35,21 @@ export const TaskDetailDrawer: React.FC = () => {
   if (!open || !task) return null;
 
   const taskProject = task.projectId ? projects.find(p => p.id === task.projectId) : null;
+  const dueLocal = isoToLocalDatetime(task.dueAt ?? task.dueDate ?? null);
 
-  const handleStartSession = () => {
+  const handleTriggerNow = () => {
     setOpen(false);
-    updateTask(task.id, { status: 'in_progress' });
+    triggerTaskNow(task);
+    markTaskTriggered(task.id);
+  };
 
-    if (task.agentName) {
-      useConfigStore.getState().setAgent(task.agentName);
+  const handleDueChange = (value: string) => {
+    if (!value) {
+      updateTask(task.id, { dueAt: null, dueDate: null });
+      return;
     }
-
-    setActiveView('chat');
-    openNewSessionDraft({
-      title: `Task: ${task.title}`,
-      initialPrompt: `Work on task: ${task.title}`,
-      directoryOverride: task.projectPath ?? taskProject?.path ?? undefined,
-      syntheticParts: task.description
-        ? [{ text: `Task details:\n${task.description}\n\nPriority: ${task.priority}\nOwner: ${task.ownerName}${task.agentName ? `\nAgent: ${task.agentName}` : ''}${task.modelId ? `\nModel: ${task.modelId}` : ''}`, synthetic: true }]
-        : undefined,
-    });
+    const iso = new Date(value).toISOString();
+    updateTask(task.id, { dueAt: iso, dueDate: iso });
   };
 
   return (
@@ -56,10 +65,10 @@ export const TaskDetailDrawer: React.FC = () => {
           </button>
         </div>
 
-        <p className="mb-4 text-sm text-muted-foreground">{task.description || 'No description'}</p>
+        <p className="mb-4 text-sm text-muted-foreground whitespace-pre-wrap">{task.description || 'No description'}</p>
 
         <div className="mb-4 flex flex-col gap-2 text-sm">
-          <div className="flex justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-muted-foreground">Status</span>
             <select
               value={task.status}
@@ -71,36 +80,57 @@ export const TaskDetailDrawer: React.FC = () => {
               ))}
             </select>
           </div>
-          <div className="flex justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-muted-foreground">Priority</span>
             <span className="text-foreground">{task.priority}</span>
           </div>
-          <div className="flex justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-muted-foreground">Owner</span>
             <span className="text-foreground">{task.ownerName}</span>
           </div>
           {(taskProject || task.projectPath) && (
-            <div className="flex justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Project</span>
               <span className="text-foreground">{taskProject?.label || task.projectPath?.split('/').pop()}</span>
             </div>
           )}
           {task.agentName && (
-            <div className="flex justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Agent</span>
               <span className="text-foreground">{task.agentName}</span>
             </div>
           )}
           {task.modelId && (
-            <div className="flex justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Model</span>
               <span className="text-foreground">{task.modelId}</span>
             </div>
           )}
-          {task.dueDate && (
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Due</span>
-              <span className="text-foreground">{new Date(task.dueDate).toLocaleDateString()}</span>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-muted-foreground">Due</span>
+            <input
+              type="datetime-local"
+              value={dueLocal}
+              onChange={(e) => handleDueChange(e.target.value)}
+              className="rounded border border-border bg-background px-2 py-0.5 text-xs text-foreground"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-muted-foreground">Recurrence</span>
+            <select
+              value={task.recurrence ?? 'none'}
+              onChange={(e) => updateTask(task.id, { recurrence: e.target.value as TaskRecurrence })}
+              className="rounded border border-border bg-background px-2 py-0.5 text-xs text-foreground"
+            >
+              {RECURRENCE_OPTIONS.map((r) => (
+                <option key={r.value} value={r.value}>{r.label}</option>
+              ))}
+            </select>
+          </div>
+          {task.lastTriggeredAt && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Last triggered</span>
+              <span className="text-foreground">{new Date(task.lastTriggeredAt).toLocaleString()}</span>
             </div>
           )}
         </div>
@@ -117,13 +147,14 @@ export const TaskDetailDrawer: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {task.status !== 'done' && task.status !== 'cancelled' && (
             <button
-              onClick={handleStartSession}
+              onClick={handleTriggerNow}
               className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+              title={task.ownerType === 'user' ? 'Show the alert immediately (for testing)' : 'Start the agent session immediately'}
             >
-              Start Agent Session
+              {task.ownerType === 'user' ? 'Trigger alert now' : 'Start session now'}
             </button>
           )}
           <button
