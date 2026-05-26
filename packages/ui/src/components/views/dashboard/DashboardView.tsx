@@ -15,6 +15,7 @@ import { useSessionUIStore } from "@/sync/session-ui-store";
 import { useAllLiveSessions } from "@/sync/sync-context";
 import { useUIStore } from "@/stores/useUIStore";
 import { useConfigStore } from "@/stores/useConfigStore";
+import { openAgentsSettings } from "@/lib/navigation/openAgentsSettings";
 import { cn } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { ErrorState } from "@/components/ui/ErrorState";
@@ -130,7 +131,7 @@ export const DashboardView: React.FC = () => {
                 <div className="typography-ui font-semibold text-foreground">Agents</div>
                 <button
                   type="button"
-                  onClick={() => setActiveView('persona')}
+                  onClick={openAgentsSettings}
                   className="text-xs text-primary hover:text-primary/80"
                 >
                   Configure →
@@ -139,10 +140,10 @@ export const DashboardView: React.FC = () => {
               {agents.length === 0 ? (
                 <button
                   type="button"
-                  onClick={() => setActiveView('persona')}
+                  onClick={openAgentsSettings}
                   className="w-full rounded-lg border border-dashed border-border bg-[var(--surface-elevated)] p-6 text-center typography-ui text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors"
                 >
-                  No agents connected — click to configure persona
+                  No agents connected — click to configure an agent
                 </button>
               ) : (
                 <div className="grid grid-cols-1 gap-3">
@@ -213,7 +214,7 @@ export const DashboardView: React.FC = () => {
                     <div className="font-medium text-foreground">Memory</div>
                     <div className="text-xs text-muted-foreground mt-0.5">{memoryCount} facts</div>
                   </button>
-                  <button type="button" onClick={() => setActiveView('persona')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                  <button type="button" onClick={openAgentsSettings} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
                     <div className="font-medium text-foreground">Persona</div>
                     <div className="text-xs text-muted-foreground mt-0.5">{personaAgent ?? 'Not set'}</div>
                   </button>

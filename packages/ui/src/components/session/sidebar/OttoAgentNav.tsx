@@ -7,7 +7,6 @@ import {
   RiFolderLine,
   RiSettings3Line,
   RiTaskLine,
-  RiUserSettingsLine,
   type RemixiconComponentType,
 } from '@remixicon/react';
 import { cn } from '@/lib/utils';
@@ -24,7 +23,6 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: RiDashboardLine },
   { id: 'projects', label: 'Projects', icon: RiFolderLine },
-  { id: 'persona', label: 'Persona', icon: RiUserSettingsLine },
   { id: 'memory', label: 'Memory', icon: RiBrainLine },
   { id: 'tasks', label: 'Tasks', icon: RiTaskLine },
   { id: 'schedule', label: 'Schedule', icon: RiCalendarLine },
@@ -35,7 +33,6 @@ const NAV_ITEMS: NavItem[] = [
 const PREFETCH_MAP: Partial<Record<AppActiveView, () => void>> = {
   dashboard: () => { import('@/stores/useDashboardStore').then(m => m.useDashboardStore.getState().fetchDashboard()); },
   tasks: () => { import('@/stores/useTasksStore').then(m => m.useTasksStore.getState().fetchTasks()); },
-  persona: () => { import('@/stores/usePersonaStore').then(m => m.usePersonaStore.getState().fetchAgents()); },
   schedule: () => { import('@/stores/useScheduleStore').then(m => m.useScheduleStore.getState().fetchSchedule()); },
   memory: () => { import('@/stores/useMemoryStore').then(m => m.useMemoryStore.getState().fetchGraph()); },
   settings: () => { import('@/stores/useOttoSettingsStore').then(m => m.useOttoSettingsStore.getState().fetchStatus()); },

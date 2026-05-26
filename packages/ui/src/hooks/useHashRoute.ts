@@ -4,7 +4,7 @@ import type { AppActiveView } from '@/constants/agentNav';
 import { useUIStore } from '@/stores/useUIStore';
 
 export interface RouteInfo {
-  /** Current view path segment (e.g. 'tasks', 'persona') */
+  /** Current view path segment (e.g. 'tasks', 'settings') */
   path: string;
   /** Deep link parameters (e.g. { id: 'task-123' }) */
   params: Record<string, string>;

@@ -43,7 +43,6 @@ const DashboardView = lazyWithChunkRecovery(() =>
   import('@/components/views/dashboard/DashboardView').then((m) => ({ default: m.DashboardView })),
 );
 const ProjectsView = lazyWithChunkRecovery(() => import('@/components/views/ProjectsView').then(m => ({ default: m.ProjectsView })));
-const PersonaView = lazyWithChunkRecovery(() => import('@/components/views/PersonaView').then(m => ({ default: m.PersonaView })));
 const MemoryView = lazyWithChunkRecovery(() => import('@/components/views/MemoryView').then(m => ({ default: m.MemoryView })));
 const TasksView = lazyWithChunkRecovery(() => import('@/components/views/TasksView').then(m => ({ default: m.TasksView })));
 const ScheduleView = lazyWithChunkRecovery(() => import('@/components/views/ScheduleView').then(m => ({ default: m.ScheduleView })));
@@ -53,7 +52,6 @@ const SettingsLandingView = lazyWithChunkRecovery(() => import('@/components/vie
 const VIEW_CHUNK_PRELOADERS = [
     () => import('@/components/views/dashboard/DashboardView'),
     () => import('@/components/views/ProjectsView'),
-    () => import('@/components/views/PersonaView'),
     () => import('@/components/views/MemoryView'),
     () => import('@/components/views/TasksView'),
     () => import('@/components/views/ScheduleView'),
@@ -425,8 +423,6 @@ export const MainLayout: React.FC = () => {
                 return <React.Suspense fallback={null}><DashboardView /></React.Suspense>;
             case 'projects':
                 return <React.Suspense fallback={null}><ProjectsView /></React.Suspense>;
-            case 'persona':
-                return <React.Suspense fallback={null}><PersonaView /></React.Suspense>;
             case 'memory':
                 return <React.Suspense fallback={null}><MemoryView /></React.Suspense>;
             case 'tasks':

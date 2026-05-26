@@ -5,7 +5,6 @@ import type { AppActiveView } from '@/constants/agentNav';
  *
  * Maps:
  *   #/           → dashboard
- *   #/persona    → persona
  *   #/memory     → memory
  *   #/tasks      → tasks
  *   #/schedule   → schedule
@@ -15,7 +14,10 @@ import type { AppActiveView } from '@/constants/agentNav';
  *
  * Deep links:
  *   #/tasks/:id        → tasks view with task detail
- *   #/persona/:agent   → persona view for specific agent
+ *
+ * Legacy:
+ *   #/persona  → redirects to #/settings (persona config now lives under
+ *                Settings → Agents).
  */
 
 export interface HashRouteState {
@@ -26,7 +28,6 @@ export interface HashRouteState {
 const VIEW_TO_PATH: Record<AppActiveView, string> = {
   dashboard: '/',
   projects: '/projects',
-  persona: '/persona',
   memory: '/memory',
   tasks: '/tasks',
   schedule: '/schedule',
@@ -38,7 +39,7 @@ const PATH_TO_VIEW: Record<string, AppActiveView> = {
   '/': 'dashboard',
   '/dashboard': 'dashboard',
   '/projects': 'projects',
-  '/persona': 'persona',
+  '/persona': 'settings',
   '/memory': 'memory',
   '/tasks': 'tasks',
   '/schedule': 'schedule',

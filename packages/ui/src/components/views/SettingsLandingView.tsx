@@ -8,14 +8,13 @@ import {
 import { MessengerSection } from '@/components/sections/otto-settings/MessengerSection';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { usePersonaStore } from '@/stores/usePersonaStore';
-import { useUIStore } from '@/stores/useUIStore';
+import { openAgentsSettings } from '@/lib/navigation/openAgentsSettings';
 
 function GlobalDefaultsSection() {
   const currentAgent = useConfigStore((s) => s.currentAgentName);
   const currentModel = useConfigStore((s) => s.currentModelId);
   const currentProvider = useConfigStore((s) => s.currentProviderId);
   const personaAgent = usePersonaStore((s) => s.selectedAgent);
-  const setActiveView = useUIStore((s) => s.setActiveView);
 
   const row = "flex items-center justify-between py-2 border-b border-border/30 last:border-0";
   const label = "text-xs text-muted-foreground";
@@ -25,8 +24,8 @@ function GlobalDefaultsSection() {
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium text-foreground">Global Defaults</h3>
-        <button type="button" onClick={() => setActiveView('persona')} className="text-[10px] text-primary hover:text-primary/80">
-          Edit in Persona →
+        <button type="button" onClick={openAgentsSettings} className="text-[10px] text-primary hover:text-primary/80">
+          Edit in Agents →
         </button>
       </div>
       <div className="space-y-0">
