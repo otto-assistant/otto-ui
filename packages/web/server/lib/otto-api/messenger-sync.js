@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -6,6 +6,8 @@ import { Router } from 'express';
  */
 export function createMessengerSyncRouter({ broadcastEvent }) {
   const router = Router();
+
+  router.use(express.json({ limit: '256kb' }));
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
