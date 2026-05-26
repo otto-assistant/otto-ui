@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   useTasksStore,
   type TaskPriority,
@@ -58,6 +58,26 @@ export const TaskCreateDialog: React.FC = () => {
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [startImmediately, setStartImmediately] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Reset all form state whenever the dialog is freshly opened.
+  useEffect(() => {
+    if (open) {
+      setTitle('');
+      setDescription('');
+      setPriority('medium');
+      setDueAt(defaultDueLocal());
+      setHasDueAt(true);
+      setRecurrence('none');
+      setOwnerType('user');
+      setOwnerName('You');
+      setSelectedProjectId(activeProjectId ?? '');
+      setSelectedAgent('');
+      setSelectedModel('');
+      setStartImmediately(false);
+      setIsSubmitting(false);
+    }
+  }, [open, activeProjectId]);
 
   if (!open) return null;
 
@@ -68,59 +88,71 @@ export const TaskCreateDialog: React.FC = () => {
 
   const allModels = providers.flatMap(p => (p.models ?? []).map(m => ({ provider: p.id, model: m.id, label: `${m.name ?? m.id}` })));
 
-  const resetForm = () => {
-    setTitle('');
-    setDescription('');
-    setPriority('medium');
-    setDueAt(defaultDueLocal());
-    setHasDueAt(true);
-    setRecurrence('none');
-    setOwnerType('user');
-    setOwnerName('You');
-    setSelectedAgent('');
-    setSelectedModel('');
-    setStartImmediately(false);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    e.stopPropagation();
+    if (!title.trim() || isSubmitting) return;
+    setIsSubmitting(true);
     const taskTitle = title.trim();
     const taskDesc = description.trim();
     const dueIso = hasDueAt ? localDatetimeToIso(dueAt) : null;
 
-    const created = await createTask({
-      title: taskTitle,
-      description: taskDesc,
-      priority,
-      ownerType,
-      ownerName,
-      dueAt: dueIso,
-      dueDate: dueIso,
-      recurrence,
-      projectId: selectedProjectId || null,
-      projectPath: selectedProject?.path ?? null,
-      agentName: effectiveAgent || null,
-      modelId: effectiveModel || null,
-      providerId: effectiveProvider || null,
-    });
+    try {
+      const created = await createTask({
+        title: taskTitle,
+        description: taskDesc,
+        priority,
+        ownerType,
+        ownerName,
+        dueAt: dueIso,
+        dueDate: dueIso,
+        recurrence,
+        projectId: selectedProjectId || null,
+        projectPath: selectedProject?.path ?? null,
+        agentName: effectiveAgent || null,
+        modelId: effectiveModel || null,
+        providerId: effectiveProvider || null,
+      });
 
-    // For agent/cron tasks: start the session now if explicitly requested OR if no due time was set.
-    const shouldStartNow = (ownerType === 'agent' || ownerType === 'cron')
-      && (startImmediately || !dueIso);
+      // For agent/cron tasks: start the session now if explicitly requested OR if no due time was set.
+      const shouldStartNow = (ownerType === 'agent' || ownerType === 'cron')
+        && (startImmediately || !dueIso);
 
-    if (shouldStartNow) {
-      if (effectiveAgent) {
-        useConfigStore.getState().setAgent(effectiveAgent);
+      if (shouldStartNow) {
+        if (effectiveAgent) {
+          useConfigStore.getState().setAgent(effectiveAgent);
+        }
+        // Reuse the unified trigger so behavior matches the scheduler.
+        triggerTaskNow(created);
+        markTaskTriggered(created.id);
       }
-      // Reuse the unified trigger so behavior matches the scheduler.
-      triggerTaskNow(created);
-      markTaskTriggered(created.id);
-    } else if (ownerType === 'user' && !dueIso) {
-      // User task with no due time: nothing to schedule.
+    } finally {
+      // useEffect on `open` will reset the form when the dialog next opens.
+      setIsSubmitting(false);
     }
+  };
 
-    resetForm();
+  const handleCancel = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setOpen(false);
+  };
+
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      setOpen(false);
+    }
+  };
+
+  // Prevent Enter in single-line inputs from accidentally submitting twice.
+  const handleFormKeyDown = (e: React.KeyboardEvent<HTMLFormElement>) => {
+    if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'TEXTAREA') {
+      e.preventDefault();
+      // Submit explicitly if the title is filled and we're not already submitting.
+      if (title.trim() && !isSubmitting) {
+        void handleSubmit(e as unknown as React.FormEvent);
+      }
+    }
   };
 
   const sectionLabel = "text-xs font-medium text-muted-foreground mb-1";
@@ -133,10 +165,11 @@ export const TaskCreateDialog: React.FC = () => {
   })();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setOpen(false)}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={handleBackdropClick}>
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={handleSubmit}
+        onKeyDown={handleFormKeyDown}
         className="w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-xl max-h-[90vh] overflow-y-auto"
       >
         <h2 className="mb-4 text-base font-semibold text-foreground">Create Task</h2>
@@ -286,15 +319,15 @@ export const TaskCreateDialog: React.FC = () => {
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={() => setOpen(false)} className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground">
+          <button type="button" onClick={handleCancel} className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground">
             Cancel
           </button>
           <button
             type="submit"
-            disabled={!title.trim()}
+            disabled={!title.trim() || isSubmitting}
             className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
           >
-            {submitLabel}
+            {isSubmitting ? 'Creating…' : submitLabel}
           </button>
         </div>
       </form>

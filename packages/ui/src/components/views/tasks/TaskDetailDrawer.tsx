@@ -37,10 +37,24 @@ export const TaskDetailDrawer: React.FC = () => {
   const taskProject = task.projectId ? projects.find(p => p.id === task.projectId) : null;
   const dueLocal = isoToLocalDatetime(task.dueAt ?? task.dueDate ?? null);
 
-  const handleTriggerNow = () => {
+  const handleTriggerNow = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
     setOpen(false);
     triggerTaskNow(task);
     markTaskTriggered(task.id);
+  };
+
+  const handleDelete = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    deleteTask(task.id);
+  };
+
+  const handleClose = (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
+    setOpen(false);
   };
 
   const handleDueChange = (value: string) => {
@@ -53,14 +67,14 @@ export const TaskDetailDrawer: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setOpen(false)}>
+    <div className="fixed inset-0 z-50 flex justify-end" onClick={handleClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         className="h-full w-full max-w-md overflow-y-auto border-l border-border bg-card p-6 shadow-xl"
       >
         <div className="mb-4 flex items-start justify-between">
           <h2 className="text-base font-semibold text-foreground">{task.title}</h2>
-          <button onClick={() => setOpen(false)} className="text-muted-foreground hover:text-foreground">
+          <button type="button" onClick={handleClose} className="text-muted-foreground hover:text-foreground">
             ✕
           </button>
         </div>
@@ -150,6 +164,7 @@ export const TaskDetailDrawer: React.FC = () => {
         <div className="flex flex-wrap gap-2">
           {task.status !== 'done' && task.status !== 'cancelled' && (
             <button
+              type="button"
               onClick={handleTriggerNow}
               className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
               title={task.ownerType === 'user' ? 'Show the alert immediately (for testing)' : 'Start the agent session immediately'}
@@ -158,7 +173,8 @@ export const TaskDetailDrawer: React.FC = () => {
             </button>
           )}
           <button
-            onClick={() => deleteTask(task.id)}
+            type="button"
+            onClick={handleDelete}
             className="rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10"
           >
             Delete
