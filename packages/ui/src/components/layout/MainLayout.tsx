@@ -45,7 +45,6 @@ const DashboardView = lazyWithChunkRecovery(() =>
 const ProjectsView = lazyWithChunkRecovery(() => import('@/components/views/ProjectsView').then(m => ({ default: m.ProjectsView })));
 const MemoryView = lazyWithChunkRecovery(() => import('@/components/views/MemoryView').then(m => ({ default: m.MemoryView })));
 const TasksView = lazyWithChunkRecovery(() => import('@/components/views/TasksView').then(m => ({ default: m.TasksView })));
-const ScheduleView = lazyWithChunkRecovery(() => import('@/components/views/ScheduleView').then(m => ({ default: m.ScheduleView })));
 const SettingsLandingView = lazyWithChunkRecovery(() => import('@/components/views/SettingsLandingView').then(m => ({ default: m.SettingsLandingView })));
 
 // Preload all view chunks on idle so navigation is instant
@@ -54,7 +53,6 @@ const VIEW_CHUNK_PRELOADERS = [
     () => import('@/components/views/ProjectsView'),
     () => import('@/components/views/MemoryView'),
     () => import('@/components/views/TasksView'),
-    () => import('@/components/views/ScheduleView'),
     () => import('@/components/views/SettingsLandingView'),
 ];
 
@@ -427,8 +425,6 @@ export const MainLayout: React.FC = () => {
                 return <React.Suspense fallback={null}><MemoryView /></React.Suspense>;
             case 'tasks':
                 return <React.Suspense fallback={null}><TasksView /></React.Suspense>;
-            case 'schedule':
-                return <React.Suspense fallback={null}><ScheduleView /></React.Suspense>;
             case 'settings':
                 return <React.Suspense fallback={null}><SettingsLandingView /></React.Suspense>;
             case 'chat':

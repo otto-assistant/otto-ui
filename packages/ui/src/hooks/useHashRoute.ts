@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { parseHashRoute, navigateHash, type HashRouteState } from '@/lib/router/hashRoutes';
+import {
+  parseHashRoute,
+  navigateHash,
+  isScheduleHashPath,
+  type HashRouteState,
+} from '@/lib/router/hashRoutes';
 import type { AppActiveView } from '@/constants/agentNav';
 import { useUIStore } from '@/stores/useUIStore';
 
@@ -30,6 +35,11 @@ export function useRoute(): RouteInfo {
       const parsed = parseHashRoute();
       setRouteState(parsed);
 
+      // Legacy #/schedule auto-selects the Schedule tab inside the Tasks hub.
+      if (isScheduleHashPath()) {
+        useUIStore.getState().setTasksHubTab('schedule');
+      }
+
       // Sync to store
       const currentView = useUIStore.getState().activeView;
       if (currentView !== parsed.view) {
@@ -53,6 +63,9 @@ export function useRoute(): RouteInfo {
       const currentView = useUIStore.getState().activeView;
       if (currentView !== initial.view) {
         useUIStore.getState().setActiveView(initial.view);
+      }
+      if (isScheduleHashPath()) {
+        useUIStore.getState().setTasksHubTab('schedule');
       }
     }
   }, []);

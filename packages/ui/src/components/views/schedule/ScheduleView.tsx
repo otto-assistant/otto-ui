@@ -28,12 +28,10 @@ export const ScheduleView: React.FC = () => {
   };
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-auto bg-background p-4 md:p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-foreground">Schedule</h1>
+    <div className="flex h-full flex-col gap-4 overflow-auto">
+      {/* Toolbar — heading is provided by the parent Tasks hub */}
+      <div className="flex items-center justify-end">
         <div className="flex items-center gap-2">
-          {/* View toggle */}
           <div className="flex rounded-md border border-border overflow-hidden">
             <button
               onClick={() => setViewMode("month")}

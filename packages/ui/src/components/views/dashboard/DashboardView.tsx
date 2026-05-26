@@ -34,6 +34,7 @@ export const DashboardView: React.FC = () => {
   const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
   const setActiveView = useUIStore((s) => s.setActiveView);
   const setActiveMainTab = useUIStore((s) => s.setActiveMainTab);
+  const setTasksHubTab = useUIStore((s) => s.setTasksHubTab);
   const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
   const currentAgent = useConfigStore((s) => s.currentAgentName);
 
@@ -202,11 +203,11 @@ export const DashboardView: React.FC = () => {
               <div className="space-y-2">
                 <div className="typography-ui font-semibold text-foreground">Quick actions</div>
                 <div className="grid grid-cols-2 gap-2">
-                  <button type="button" onClick={() => setActiveView('tasks')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                  <button type="button" onClick={() => { setTasksHubTab('list'); setActiveView('tasks'); }} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
                     <div className="font-medium text-foreground">Create Task</div>
                     <div className="text-xs text-muted-foreground mt-0.5">{taskCount} active</div>
                   </button>
-                  <button type="button" onClick={() => setActiveView('schedule')} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
+                  <button type="button" onClick={() => { setTasksHubTab('schedule'); setActiveView('tasks'); }} className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left text-sm hover:border-primary/30 transition-colors">
                     <div className="font-medium text-foreground">Schedule</div>
                     <div className="text-xs text-muted-foreground mt-0.5">{scheduleCount} events</div>
                   </button>

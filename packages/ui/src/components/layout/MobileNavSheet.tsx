@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   RiBrainLine,
-  RiCalendarLine,
   RiChat3Line,
   RiDashboardLine,
   RiFolderLine,
@@ -33,7 +32,6 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'projects', label: 'Projects', icon: RiFolderLine },
       { id: 'memory', label: 'Memory', icon: RiBrainLine },
-      { id: 'schedule', label: 'Schedule', icon: RiCalendarLine },
     ],
   },
   {

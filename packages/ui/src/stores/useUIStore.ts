@@ -499,6 +499,9 @@ interface UIStore {
   sidebarSection: SidebarSection;
   activeView: AppActiveView;
 
+  /** Active tab in the merged Tasks + Schedule hub view */
+  tasksHubTab: 'list' | 'schedule';
+
   // Settings IA (new shell)
   settingsPage: string;
   settingsHasOpenedOnce: boolean;
@@ -627,6 +630,7 @@ interface UIStore {
   applyTheme: () => void;
   setSidebarSection: (section: SidebarSection) => void;
   setActiveView: (view: AppActiveView) => void;
+  setTasksHubTab: (tab: 'list' | 'schedule') => void;
   setSettingsPage: (slug: string) => void;
   setSettingsProjectsSelectedId: (projectId: string | null) => void;
   setSettingsRemoteInstancesSelectedId: (instanceId: string | null) => void;
@@ -753,6 +757,7 @@ export const useUIStore = create<UIStore>()(
         isModelSelectorOpen: false,
         sidebarSection: 'sessions',
         activeView: 'dashboard',
+        tasksHubTab: 'list',
         settingsPage: 'home',
         settingsHasOpenedOnce: false,
         settingsProjectsSelectedId: null,
@@ -1343,6 +1348,10 @@ export const useUIStore = create<UIStore>()(
               }
             });
           }
+        },
+
+        setTasksHubTab: (tab) => {
+          set({ tasksHubTab: tab });
         },
 
         setSettingsPage: (slug) => {
@@ -1984,6 +1993,7 @@ export const useUIStore = create<UIStore>()(
           isSessionSwitcherOpen: state.isSessionSwitcherOpen,
           activeMainTab: state.activeMainTab,
           activeView: state.activeView,
+          tasksHubTab: state.tasksHubTab,
           sidebarSection: state.sidebarSection,
           settingsPage: state.settingsPage,
           settingsHasOpenedOnce: state.settingsHasOpenedOnce,

@@ -6,8 +6,7 @@ import type { AppActiveView } from '@/constants/agentNav';
  * Maps:
  *   #/           → dashboard
  *   #/memory     → memory
- *   #/tasks      → tasks
- *   #/schedule   → schedule
+ *   #/tasks      → tasks (Tasks hub; List tab by default)
  *   #/chat       → chat
  *   #/settings   → settings
  *   #/projects   → projects
@@ -18,6 +17,9 @@ import type { AppActiveView } from '@/constants/agentNav';
  * Legacy:
  *   #/persona  → redirects to #/settings (persona config now lives under
  *                Settings → Agents).
+ *   #/schedule → redirects to #/tasks (schedule is now a tab inside the
+ *                Tasks hub). The hash watcher in `useHashRoute` switches
+ *                the hub tab to "schedule" when this redirect fires.
  */
 
 export interface HashRouteState {
@@ -30,7 +32,6 @@ const VIEW_TO_PATH: Record<AppActiveView, string> = {
   projects: '/projects',
   memory: '/memory',
   tasks: '/tasks',
-  schedule: '/schedule',
   chat: '/chat',
   settings: '/settings',
 };
@@ -42,10 +43,24 @@ const PATH_TO_VIEW: Record<string, AppActiveView> = {
   '/persona': 'settings',
   '/memory': 'memory',
   '/tasks': 'tasks',
-  '/schedule': 'schedule',
+  '/schedule': 'tasks',
   '/chat': 'chat',
   '/settings': 'settings',
 };
+
+/**
+ * Returns true when the raw hash path should auto-select the Schedule tab
+ * inside the Tasks hub view. The mapping is kept here so we don't need a
+ * separate "legacy path" registry.
+ */
+export function isScheduleHashPath(hash?: string): boolean {
+  const raw = hash ?? (typeof window !== 'undefined' ? window.location.hash : '');
+  const path = raw.startsWith('#') ? raw.slice(1) : raw;
+  if (!path) return false;
+  const segments = path.split('/');
+  const basePath = `/${segments[1] || ''}`;
+  return basePath === '/schedule';
+}
 
 /**
  * Parse the current window.location.hash into a route state.

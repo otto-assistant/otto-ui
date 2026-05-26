@@ -3,7 +3,6 @@ export type AppActiveView =
   | 'projects'
   | 'memory'
   | 'tasks'
-  | 'schedule'
   | 'chat'
   | 'settings';
 
@@ -12,7 +11,6 @@ const APP_ACTIVE_VIEW_SET = new Set<AppActiveView>([
   'projects',
   'memory',
   'tasks',
-  'schedule',
   'chat',
   'settings',
 ]);
