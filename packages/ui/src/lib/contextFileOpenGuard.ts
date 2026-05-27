@@ -27,6 +27,12 @@ const classifyReadError = (error: unknown): ContextFileOpenFailureReason => {
 const readFileContent = async (files: FilesAPI, path: string): Promise<string> => {
   if (files.readFile) {
     const result = await files.readFile(path);
+    if (!result) {
+      // readFile returns null only for optional probes that miss; treat the
+      // file as missing so the caller surfaces a "missing" reason rather than
+      // dereferencing undefined.
+      throw new Error('File not found');
+    }
     return result.content ?? '';
   }
 

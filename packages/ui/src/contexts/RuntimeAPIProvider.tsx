@@ -47,12 +47,19 @@ function withContentCache(files: FilesAPI): FilesAPI {
     return result;
   };
 
-  const readFreshFile = async (path: string): Promise<{ content: string; path: string }> => {
+  const readFreshFile = async (
+    path: string,
+    options?: { optional?: boolean },
+  ): Promise<{ content: string; path: string } | null> => {
     // stat → read → stat to avoid TOCTOU:
     // if the file changes between read and either stat, metadata won't match and we retry.
     const statBefore = await files.statFile?.(path).catch(() => null);
 
-    const result = await files.readFile!(path);
+    const result = await files.readFile!(path, options);
+    if (!result) {
+      // Optional probe missed — don't cache and don't pretend the file exists.
+      return null;
+    }
 
     const statAfter = await files.statFile?.(path).catch(() => null);
 
@@ -63,7 +70,10 @@ function withContentCache(files: FilesAPI): FilesAPI {
       }
       // File changed during read — discard and re-read once.
       const retryStatBefore = await files.statFile?.(path).catch(() => null);
-      const retry = await files.readFile!(path);
+      const retry = await files.readFile!(path, options);
+      if (!retry) {
+        return null;
+      }
       const retryStat = await files.statFile?.(path).catch(() => null);
       // Accept retry only if file was stable across the read.
       if (retryStatBefore && retryStat && retryStatBefore.isFile && retryStat.isFile
@@ -78,7 +88,7 @@ function withContentCache(files: FilesAPI): FilesAPI {
   };
 
   const cachedReadFile: FilesAPI['readFile'] = files.readFile
-    ? async (path: string) => {
+    ? async (path: string, options?: { optional?: boolean }) => {
         const hit = cache.get(path);
         if (hit) {
           // Validate cached entry is still fresh
@@ -87,14 +97,14 @@ function withContentCache(files: FilesAPI): FilesAPI {
             if (latest && !statMatches(hit, latest)) {
               cache.delete(path);
               removeContentBytes(path);
-              return readFreshFile(path);
+              return readFreshFile(path, options);
             }
           }
           touchContentLru(path);
           return { content: hit.content, path: hit.path };
         }
 
-        return readFreshFile(path);
+        return readFreshFile(path, options);
       }
     : undefined;
 
