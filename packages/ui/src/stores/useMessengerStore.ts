@@ -37,11 +37,30 @@ export interface MessengerConnection {
   telegramChatType?: string;
   telegramIsForum?: boolean;
   telegramBotUsername?: string;
+  telegramBotId?: number;
+  /**
+   * Bot privacy capability from getMe. When false (default for new bots), the
+   * bot cannot see plain group messages — only commands, mentions and replies.
+   * This is the #1 reason "I message the bot and get no reply".
+   */
+  telegramBotCanReadAllGroupMessages?: boolean;
+  telegramBotCanJoinGroups?: boolean;
 
   // Last activity (test message / sync now)
   lastSyncAt: number | null;
   lastSyncStatus: 'idle' | 'sending' | 'ok' | 'error';
   lastSyncMessage: string | null;
+  /** Per-project results from the most recent telegram sync (forum mode). */
+  lastSyncTopics?: {
+    projectId: string;
+    projectLabel: string;
+    topicId: string | null;
+    topicName: string;
+    messageId: number | null;
+    created: boolean;
+    error: string | null;
+  }[];
+  lastSyncPostedTo?: 'forum' | 'chat';
 
   // Telegram long-poll listener state (set after start/status calls)
   telegramListenerRunning?: boolean;
@@ -65,6 +84,15 @@ export interface ProjectMessengerMapping {
   projectLabel: string;
   discord?: { channelId: string; channelName: string };
   telegram?: { topicId: string; topicName: string };
+}
+
+export interface TelegramDiagnosisCheck {
+  id: string;
+  ok: boolean;
+  severity: 'ok' | 'warn' | 'error' | 'info';
+  title: string;
+  detail: string;
+  fix?: string;
 }
 
 export interface TelegramInboundMessage {
@@ -94,6 +122,14 @@ interface MessengerState {
   /** In-memory ring buffer of recent inbound Telegram messages (newest first). */
   telegramInbound: TelegramInboundMessage[];
 
+  /** Latest diagnose-run output. Cleared when token/chat id changes. */
+  telegramDiagnosis: {
+    runAt: number;
+    ok: boolean;
+    checks: TelegramDiagnosisCheck[];
+  } | null;
+  telegramDiagnosisRunning: boolean;
+
   addConnection: (type: MessengerType) => void;
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
   removeConnection: (type: MessengerType) => void;
@@ -107,6 +143,7 @@ interface MessengerState {
     projects: { id: string; label: string; body: string }[],
     summary: string,
   ) => Promise<boolean>;
+  diagnoseTelegram: () => Promise<boolean>;
   startTelegramListener: () => Promise<boolean>;
   stopTelegramListener: () => Promise<boolean>;
   refreshTelegramListenerStatus: () => Promise<void>;
@@ -151,6 +188,8 @@ export const useMessengerStore = create<MessengerState>()(
       onboardingStep: null,
       onboardingType: null,
       telegramInbound: [],
+      telegramDiagnosis: null,
+      telegramDiagnosisRunning: false,
 
       addConnection: (type) => {
         const existing = get().connections.find((c) => c.type === type);
@@ -213,16 +252,29 @@ export const useMessengerStore = create<MessengerState>()(
           }
 
           if (type === 'telegram' && conn.telegramBotToken) {
-            const res = await fetch(
-              `https://api.telegram.org/bot${conn.telegramBotToken}/getMe`,
-            );
-            if (!res.ok) throw new Error(`Telegram API: ${res.status}`);
-            const data = await res.json();
-            if (!data.ok) throw new Error(data.description ?? 'Invalid token');
+            // Route through backend so we also capture the bot's privacy /
+            // group capability flags (used to warn the user about
+            // `can_read_all_group_messages: false`).
+            const data = await postJson<{
+              ok: boolean;
+              error?: string;
+              id?: number;
+              username?: string;
+              firstName?: string;
+              canJoinGroups?: boolean;
+              canReadAllGroupMessages?: boolean;
+            }>('/api/otto/messenger/test', {
+              type: 'telegram',
+              token: conn.telegramBotToken,
+            });
+            if (!data.ok) throw new Error(data.error ?? 'Invalid token');
             get().updateConnection(type, {
               status: 'connected',
               lastConnectedAt: Date.now(),
-              telegramBotUsername: data.result?.username,
+              telegramBotId: data.id,
+              telegramBotUsername: data.username,
+              telegramBotCanJoinGroups: data.canJoinGroups,
+              telegramBotCanReadAllGroupMessages: data.canReadAllGroupMessages,
             });
             return true;
           }
@@ -510,6 +562,8 @@ export const useMessengerStore = create<MessengerState>()(
               errored.length > 0
                 ? `${summaryMsg} — first error: ${errored[0].error}`
                 : summaryMsg,
+            lastSyncTopics: data.topics ?? [],
+            lastSyncPostedTo: data.postedTo,
           });
           return errored.length === 0;
         } catch (e) {
@@ -625,6 +679,49 @@ export const useMessengerStore = create<MessengerState>()(
           }
         } catch {
           // ignore
+        }
+      },
+
+      diagnoseTelegram: async () => {
+        const conn = get().connections.find((c) => c.type === 'telegram');
+        if (!conn?.telegramBotToken) return false;
+        set({ telegramDiagnosisRunning: true });
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            error?: string;
+            checks?: TelegramDiagnosisCheck[];
+          }>('/api/otto/messenger/telegram/diagnose', {
+            token: conn.telegramBotToken,
+            chatId: conn.telegramChatId,
+          });
+          set({
+            telegramDiagnosis: {
+              runAt: Date.now(),
+              ok: Boolean(data.ok),
+              checks: data.checks ?? [],
+            },
+            telegramDiagnosisRunning: false,
+          });
+          return Boolean(data.ok);
+        } catch (e) {
+          set({
+            telegramDiagnosis: {
+              runAt: Date.now(),
+              ok: false,
+              checks: [
+                {
+                  id: 'network',
+                  ok: false,
+                  severity: 'error',
+                  title: 'Diagnose failed',
+                  detail: e instanceof Error ? e.message : 'Unknown error',
+                },
+              ],
+            },
+            telegramDiagnosisRunning: false,
+          });
+          return false;
         }
       },
 

@@ -92,7 +92,20 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
         if (!data.ok) {
           return res.json({ ok: false, error: data.description ?? 'Invalid token' });
         }
-        return res.json({ ok: true, username: data.result?.username, firstName: data.result?.first_name });
+        const r = data.result ?? {};
+        return res.json({
+          ok: true,
+          id: r.id,
+          username: r.username,
+          firstName: r.first_name,
+          // Bot privacy / group capability flags. `can_read_all_group_messages: false`
+          // means Privacy Mode is enabled, so the bot only sees commands, mentions,
+          // and replies in groups — the #1 cause of "I message the bot and get no
+          // reply".
+          canJoinGroups: Boolean(r.can_join_groups),
+          canReadAllGroupMessages: Boolean(r.can_read_all_group_messages),
+          supportsInlineQueries: Boolean(r.supports_inline_queries),
+        });
       }
 
       return res.status(400).json({ error: `Unknown messenger type: ${type}` });
@@ -288,6 +301,268 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
     } catch (err) {
       return res.json({ ok: false, error: err?.message ?? 'resolve-chat failed' });
     }
+  });
+
+  /**
+   * Run a full setup diagnosis for a Telegram bot + chat.
+   * Body: { token, chatId }
+   * Returns: { ok, checks: [{ id, ok, severity, title, detail, fix? }] }
+   *
+   * Each check is a structured row the UI renders as a green/yellow/red bullet.
+   * Diagnosed problems include: invalid token, Privacy Mode enabled, chat not
+   * found, chat not a forum (so no per-project topics), bot not in chat, bot
+   * not admin, bot admin but missing manage_topics permission, etc.
+   */
+  router.post('/telegram/diagnose', async (req, res) => {
+    const { token, chatId } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    const tgGet = async (method, body) => {
+      const init = body
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        : undefined;
+      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, init);
+      return r.json();
+    };
+
+    const checks = [];
+    const push = (c) => checks.push(c);
+
+    // 1) Token / bot identity
+    let bot = null;
+    try {
+      const me = await tgGet('getMe');
+      if (!me.ok) {
+        push({
+          id: 'token',
+          ok: false,
+          severity: 'error',
+          title: 'Invalid bot token',
+          detail: me.description ?? 'getMe failed',
+          fix: 'Re-paste the token from @BotFather (/mybots → your bot → API Token).',
+        });
+        return res.json({ ok: false, checks });
+      }
+      bot = me.result;
+      push({
+        id: 'token',
+        ok: true,
+        severity: 'ok',
+        title: `Bot is reachable as @${bot.username}`,
+        detail: `Bot id ${bot.id}.`,
+      });
+
+      // 2) Privacy mode — by far the most common reason a bot 'doesn't reply' in groups.
+      if (bot.can_read_all_group_messages) {
+        push({
+          id: 'privacy',
+          ok: true,
+          severity: 'ok',
+          title: 'Privacy mode is OFF',
+          detail: 'Bot can read every message in groups it joins.',
+        });
+      } else {
+        push({
+          id: 'privacy',
+          ok: false,
+          severity: 'warn',
+          title: 'Privacy mode is ON — bot only sees /commands, @mentions and replies in groups',
+          detail:
+            'This is the #1 reason a Telegram bot looks unresponsive: plain group messages never reach getUpdates.',
+          fix: 'Open @BotFather → /setprivacy → choose your bot → Disable. Then remove and re-add the bot to the group so the new privacy setting takes effect.',
+        });
+      }
+    } catch (err) {
+      push({
+        id: 'token',
+        ok: false,
+        severity: 'error',
+        title: 'Could not reach Telegram',
+        detail: err?.message ?? 'network error',
+      });
+      return res.json({ ok: false, checks });
+    }
+
+    if (!chatId) {
+      push({
+        id: 'chat',
+        ok: false,
+        severity: 'warn',
+        title: 'No chat ID configured yet',
+        detail: 'Save a chat ID first to run the chat / membership / topic checks.',
+      });
+      return res.json({ ok: checks.every((c) => c.ok), checks });
+    }
+
+    // 3) Chat exists / type / forum
+    let chat = null;
+    try {
+      const gc = await tgGet('getChat', { chat_id: chatId });
+      if (!gc.ok) {
+        push({
+          id: 'chat',
+          ok: false,
+          severity: 'error',
+          title: 'Chat not found / bot has no access',
+          detail: gc.description ?? 'getChat failed',
+          fix: 'Make sure the bot has been added to the target chat and that the chat ID is correct (groups start with -100…).',
+        });
+        return res.json({ ok: false, checks });
+      }
+      chat = gc.result;
+      push({
+        id: 'chat',
+        ok: true,
+        severity: 'ok',
+        title: `Chat "${chat.title ?? chat.username ?? chat.id}" reachable`,
+        detail: `Type: ${chat.type}${chat.is_forum ? ' · forum (topics enabled)' : ''}.`,
+      });
+
+      // 4) Forum capability for per-project topics
+      if (chat.type === 'private') {
+        push({
+          id: 'forum',
+          ok: false,
+          severity: 'info',
+          title: 'Chat is a private DM',
+          detail: 'Otto will post one summary message; per-project topics only work in supergroups with topics enabled.',
+        });
+      } else if (chat.is_forum) {
+        push({
+          id: 'forum',
+          ok: true,
+          severity: 'ok',
+          title: 'Topics are enabled in this chat',
+          detail: 'Sync now will create / re-use one forum topic per project.',
+        });
+      } else {
+        push({
+          id: 'forum',
+          ok: false,
+          severity: 'warn',
+          title: 'Topics are NOT enabled in this chat',
+          detail: 'Sync now will fall back to a single summary message in the main chat.',
+          fix:
+            chat.type === 'supergroup' || chat.type === 'group'
+              ? 'In Telegram open the group → Manage Group → Topics → enable. (Requires the supergroup to have ≥ 200 members on some clients, or convert via Manage Group → Group Type → Public/Private supergroup.)'
+              : 'Per-project topics are only supported in supergroups with topics enabled.',
+        });
+      }
+    } catch (err) {
+      push({
+        id: 'chat',
+        ok: false,
+        severity: 'error',
+        title: 'getChat failed',
+        detail: err?.message ?? 'network error',
+      });
+      return res.json({ ok: false, checks });
+    }
+
+    // 5) Membership / admin / manage_topics permission
+    if (chat.type === 'group' || chat.type === 'supergroup' || chat.type === 'channel') {
+      try {
+        const cm = await tgGet('getChatMember', { chat_id: chatId, user_id: bot.id });
+        if (!cm.ok) {
+          push({
+            id: 'membership',
+            ok: false,
+            severity: 'error',
+            title: 'Could not check bot membership',
+            detail: cm.description ?? 'getChatMember failed',
+            fix: 'Add the bot to the chat (Group settings → Add Member → search by username).',
+          });
+        } else {
+          const m = cm.result;
+          const status = m.status; // 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked'
+          if (status === 'left' || status === 'kicked') {
+            push({
+              id: 'membership',
+              ok: false,
+              severity: 'error',
+              title: 'Bot is not in the chat',
+              detail: `getChatMember returned status="${status}".`,
+              fix: 'Open the chat → Members → Add → search for your bot by username and add it.',
+            });
+          } else if (status === 'restricted') {
+            push({
+              id: 'membership',
+              ok: false,
+              severity: 'warn',
+              title: 'Bot is restricted in this chat',
+              detail: 'Restricted bots cannot post messages.',
+              fix: 'Promote the bot or remove the restriction in Group → Manage → Permissions.',
+            });
+          } else if (status === 'administrator' || status === 'creator') {
+            const canManageTopics = m.can_manage_topics ?? false;
+            if (chat.is_forum && !canManageTopics) {
+              push({
+                id: 'membership',
+                ok: false,
+                severity: 'warn',
+                title: 'Bot is admin but cannot manage topics',
+                detail:
+                  'createForumTopic will fail with "not enough rights to manage topics".',
+                fix: 'Group → Manage → Administrators → your bot → enable "Manage topics", then save.',
+              });
+            } else {
+              push({
+                id: 'membership',
+                ok: true,
+                severity: 'ok',
+                title: `Bot is ${status === 'creator' ? 'the creator' : 'an administrator'}`,
+                detail: chat.is_forum
+                  ? `Manage topics: ${canManageTopics ? 'yes' : 'no'}.`
+                  : 'Admin permissions confirmed.',
+              });
+            }
+          } else {
+            // status === 'member'
+            if (chat.is_forum) {
+              push({
+                id: 'membership',
+                ok: false,
+                severity: 'warn',
+                title: 'Bot is a regular member, not admin',
+                detail:
+                  'createForumTopic requires the bot to be admin with the "Manage topics" right.',
+                fix: 'Group → Manage → Administrators → Add → pick your bot → enable "Manage topics".',
+              });
+            } else {
+              push({
+                id: 'membership',
+                ok: true,
+                severity: 'ok',
+                title: 'Bot is a member',
+                detail: 'Plain sendMessage will work; admin rights only required for managing topics.',
+              });
+            }
+          }
+        }
+      } catch (err) {
+        push({
+          id: 'membership',
+          ok: false,
+          severity: 'error',
+          title: 'Could not check bot membership',
+          detail: err?.message ?? 'network error',
+        });
+      }
+    } else {
+      push({
+        id: 'membership',
+        ok: true,
+        severity: 'ok',
+        title: 'Private chat — no membership/admin check needed',
+        detail: 'Direct messages always reach the bot.',
+      });
+    }
+
+    return res.json({ ok: checks.every((c) => c.ok), checks });
   });
 
   /**

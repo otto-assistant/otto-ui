@@ -18,6 +18,8 @@ import {
   RiPlayCircleLine,
   RiStopCircleLine,
   RiChatSmile3Line,
+  RiStethoscopeLine,
+  RiErrorWarningLine,
 } from '@remixicon/react';
 import {
   useMessengerStore,
@@ -25,6 +27,7 @@ import {
   type MessengerConnection,
   type SyncMode,
   type TelegramInboundMessage,
+  type TelegramDiagnosisCheck,
 } from '@/stores/useMessengerStore';
 import { useOttoEventsStore, type OttoUiRealtimeEvent } from '@/stores/useOttoEventsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -351,6 +354,210 @@ function TelegramListenerPanel({
   );
 }
 
+function TelegramWarnings({ conn }: { conn: MessengerConnection }) {
+  const warnings: { id: string; severity: 'warn' | 'info'; title: string; detail: string }[] = [];
+
+  if (conn.telegramBotCanReadAllGroupMessages === false) {
+    warnings.push({
+      id: 'privacy',
+      severity: 'warn',
+      title: 'Privacy mode is ON — bot will not see plain group messages',
+      detail:
+        'By default Telegram filters out every message that is not a /command, @mention or reply. Open @BotFather → /setprivacy → choose your bot → Disable, then remove and re-add the bot to the group.',
+    });
+  }
+  if (conn.telegramChatId && conn.telegramIsForum === false) {
+    const isPrivate = conn.telegramChatType === 'private';
+    warnings.push({
+      id: 'forum',
+      severity: isPrivate ? 'info' : 'warn',
+      title: isPrivate
+        ? 'This is a private DM — per-project topics are not supported'
+        : 'This chat does not have Topics enabled — sync will post a single summary message',
+      detail: isPrivate
+        ? 'Otto will post one summary message here. Use a supergroup with Topics to get one topic per project.'
+        : 'Per-project topics require a supergroup with Topics enabled. In the group → Manage Group → Topics → enable.',
+    });
+  }
+
+  if (warnings.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      {warnings.map((w) => (
+        <div
+          key={w.id}
+          className={cn(
+            'rounded-md border px-3 py-2 text-[11px] flex items-start gap-2',
+            w.severity === 'warn'
+              ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-800 dark:text-yellow-300'
+              : 'border-border bg-muted/40 text-muted-foreground',
+          )}
+        >
+          <RiErrorWarningLine className="size-3.5 shrink-0 mt-0.5" />
+          <div>
+            <div className="font-medium">{w.title}</div>
+            <div className="leading-snug mt-0.5">{w.detail}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function severityClass(s: TelegramDiagnosisCheck['severity']) {
+  if (s === 'ok') return 'text-green-600 dark:text-green-400';
+  if (s === 'warn') return 'text-yellow-600 dark:text-yellow-400';
+  if (s === 'error') return 'text-destructive';
+  return 'text-muted-foreground';
+}
+
+function TelegramDiagnosePanel({
+  conn,
+  diagnosis,
+  running,
+  runDiagnose,
+}: {
+  conn: MessengerConnection;
+  diagnosis: ReturnType<typeof useMessengerStore.getState>['telegramDiagnosis'];
+  running: boolean;
+  runDiagnose: () => Promise<boolean>;
+}) {
+  const hasIssue = diagnosis?.checks?.some((c) => !c.ok) ?? false;
+
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+          <RiStethoscopeLine className="size-4 text-primary" />
+          Diagnose
+          {diagnosis && (
+            <span
+              className={cn(
+                'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
+                hasIssue
+                  ? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-300'
+                  : 'bg-green-500/20 text-green-700 dark:text-green-400',
+              )}
+            >
+              {hasIssue ? 'issues' : 'all clear'}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => runDiagnose()}
+          disabled={running}
+          className="inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {running ? (
+            <RiLoader4Line className="size-3.5 animate-spin" />
+          ) : (
+            <RiStethoscopeLine className="size-3.5" />
+          )}
+          {running ? 'Running…' : diagnosis ? 'Re-run diagnose' : 'Run diagnose'}
+        </button>
+      </div>
+      {!diagnosis && (
+        <div className="text-[11px] text-muted-foreground leading-snug">
+          Diagnose calls Telegram's API on your behalf to verify the token, privacy mode, chat
+          access, forum status and the bot's admin rights. Use it whenever sync or auto-reply
+          doesn't work as expected.
+        </div>
+      )}
+      {diagnosis && diagnosis.checks.length > 0 && (
+        <ul className="space-y-1.5">
+          {diagnosis.checks.map((c) => (
+            <li key={c.id} className="rounded bg-background border border-border px-2 py-1.5">
+              <div className="flex items-start gap-1.5">
+                <span className={cn('text-xs leading-none mt-0.5', severityClass(c.severity))}>
+                  {c.severity === 'ok' ? '✓' : c.severity === 'warn' ? '⚠' : c.severity === 'error' ? '✗' : 'ⓘ'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className={cn('text-[11px] font-medium', severityClass(c.severity))}>
+                    {c.title}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground leading-snug mt-0.5 break-words">
+                    {c.detail}
+                  </div>
+                  {c.fix && (
+                    <div className="text-[10px] text-foreground leading-snug mt-1">
+                      <span className="font-medium">Fix: </span>
+                      {c.fix}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {diagnosis && (
+        <div className="text-[10px] text-muted-foreground">
+          Last run {formatRelative(diagnosis.runAt)} for token of @{conn.telegramBotUsername ?? 'bot'}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TelegramSyncResults({
+  topics,
+  postedTo,
+}: {
+  topics: NonNullable<MessengerConnection['lastSyncTopics']>;
+  postedTo: 'forum' | 'chat';
+}) {
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
+      <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
+        <RiCheckLine className="size-3.5 text-primary" />
+        Last sync result{' '}
+        <span className="text-[10px] font-normal text-muted-foreground">
+          ({postedTo === 'forum' ? 'forum topics' : 'main chat'})
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {topics.map((t) => (
+          <li
+            key={t.projectId}
+            className="rounded bg-background border border-border px-2 py-1.5 text-[11px] flex items-start gap-2"
+          >
+            <span
+              className={cn(
+                'mt-0.5',
+                t.error
+                  ? 'text-destructive'
+                  : t.created
+                    ? 'text-green-600 dark:text-green-400'
+                    : 'text-muted-foreground',
+              )}
+            >
+              {t.error ? '✗' : t.created ? '✓ new' : '·'}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="font-medium text-foreground truncate">
+                {t.projectLabel}{' '}
+                <span className="text-muted-foreground font-normal">
+                  → {t.topicName}
+                  {t.topicId ? ` (topic ${t.topicId})` : ''}
+                </span>
+              </div>
+              {t.error && (
+                <div className="text-destructive leading-snug">{t.error}</div>
+              )}
+              {!t.error && t.messageId && (
+                <div className="text-[10px] text-muted-foreground">
+                  message {t.messageId} sent
+                </div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const updateConnection = useMessengerStore((s) => s.updateConnection);
   const testConnection = useMessengerStore((s) => s.testConnection);
@@ -366,6 +573,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const refreshTelegramListenerStatus = useMessengerStore((s) => s.refreshTelegramListenerStatus);
   const loadRecentTelegramMessages = useMessengerStore((s) => s.loadRecentTelegramMessages);
   const telegramInbound = useMessengerStore((s) => s.telegramInbound);
+  const diagnoseTelegram = useMessengerStore((s) => s.diagnoseTelegram);
+  const telegramDiagnosis = useMessengerStore((s) => s.telegramDiagnosis);
+  const telegramDiagnosisRunning = useMessengerStore((s) => s.telegramDiagnosisRunning);
   const projects = useProjectsStore((s) => s.projects);
   const tasks = useTasksStore((s) => s.tasks);
   const projectMappings = useMessengerStore((s) => s.projectMappings);
@@ -872,6 +1082,11 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         </div>
       )}
 
+      {/* Telegram inline warnings — explain real Telegram pitfalls before the user clicks Sync now */}
+      {conn.type === 'telegram' && hasToken && isConnected && (
+        <TelegramWarnings conn={conn} />
+      )}
+
       {/* Telegram inbound listener */}
       {conn.type === 'telegram' && hasToken && hasTarget && (
         <TelegramListenerPanel
@@ -884,6 +1099,23 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           onToggleAutoReply={(v) =>
             updateConnection('telegram', { telegramListenerAutoReply: v })
           }
+        />
+      )}
+
+      {/* Telegram diagnose + per-topic sync results */}
+      {conn.type === 'telegram' && hasToken && (
+        <TelegramDiagnosePanel
+          conn={conn}
+          diagnosis={telegramDiagnosis}
+          running={telegramDiagnosisRunning}
+          runDiagnose={diagnoseTelegram}
+        />
+      )}
+
+      {conn.type === 'telegram' && conn.lastSyncTopics && conn.lastSyncTopics.length > 0 && (
+        <TelegramSyncResults
+          topics={conn.lastSyncTopics}
+          postedTo={conn.lastSyncPostedTo ?? 'forum'}
         />
       )}
 
