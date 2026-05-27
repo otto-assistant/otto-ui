@@ -6,6 +6,7 @@ const TABS: { key: TaskFilter; label: string }[] = [
   { key: 'my_tasks', label: 'My Tasks' },
   { key: 'agent', label: 'Agent' },
   { key: 'scheduled', label: 'Scheduled' },
+  { key: 'hidden', label: 'Hidden' },
   { key: 'done', label: 'Done' },
 ];
 
@@ -20,6 +21,7 @@ export const TaskFilterTabs: React.FC = () => {
       case 'my_tasks': return tasks.filter((t) => t.ownerType === 'user').length;
       case 'agent': return tasks.filter((t) => t.ownerType === 'agent').length;
       case 'scheduled': return tasks.filter((t) => t.ownerType === 'cron').length;
+      case 'hidden': return tasks.filter((t) => t.hidden).length;
       case 'done': return tasks.filter((t) => t.status === 'done').length;
     }
   };

@@ -30,7 +30,6 @@ const PREFETCH_MAP: Partial<Record<AppActiveView, () => void>> = {
   dashboard: () => { import('@/stores/useDashboardStore').then(m => m.useDashboardStore.getState().fetchDashboard()); },
   tasks: () => {
     import('@/stores/useTasksStore').then(m => m.useTasksStore.getState().fetchTasks());
-    import('@/stores/useScheduleStore').then(m => m.useScheduleStore.getState().fetchSchedule());
   },
   memory: () => { import('@/stores/useMemoryStore').then(m => m.useMemoryStore.getState().fetchGraph()); },
   settings: () => { import('@/stores/useOttoSettingsStore').then(m => m.useOttoSettingsStore.getState().fetchStatus()); },

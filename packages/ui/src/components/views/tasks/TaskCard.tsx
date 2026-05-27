@@ -83,6 +83,14 @@ export const TaskCard: React.FC<{ task: Task }> = ({ task }) => {
           {task.projectPath && (
             <span className="text-[10px] text-muted-foreground">📁 {task.projectPath.split('/').pop()}</span>
           )}
+          {task.hidden && (
+            <span
+              className="rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] font-medium text-purple-400"
+              title="Conversation is hidden until the agent surfaces it with REPORT:"
+            >
+              🔒 Hidden
+            </span>
+          )}
         </div>
       </div>
 

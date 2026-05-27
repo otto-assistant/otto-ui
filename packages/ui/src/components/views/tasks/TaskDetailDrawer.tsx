@@ -1,6 +1,9 @@
 import React from 'react';
 import { useTasksStore, type TaskStatus, type TaskRecurrence } from '@/stores/useTasksStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useHiddenSessionsStore } from '@/stores/useHiddenSessionsStore';
+import { useUIStore } from '@/stores/useUIStore';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 import { triggerTaskNow } from '@/hooks/useTaskScheduler';
 
 const STATUS_OPTIONS: TaskStatus[] = ['pending', 'in_progress', 'done', 'cancelled'];
@@ -29,6 +32,10 @@ export const TaskDetailDrawer: React.FC = () => {
   const deleteTask = useTasksStore((s) => s.deleteTask);
   const markTaskTriggered = useTasksStore((s) => s.markTaskTriggered);
   const projects = useProjectsStore((s) => s.projects);
+  const hiddenSessions = useHiddenSessionsStore((s) => s.hiddenSessions);
+  const surfaceSession = useHiddenSessionsStore((s) => s.surfaceSession);
+  const setActiveView = useUIStore((s) => s.setActiveView);
+  const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
 
   const task = tasks.find((t) => t.id === selectedId);
 
@@ -50,6 +57,18 @@ export const TaskDetailDrawer: React.FC = () => {
     e.stopPropagation();
     deleteTask(task.id);
   };
+
+  const handleSurface = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!task.lastSessionId) return;
+    surfaceSession(task.lastSessionId);
+    setOpen(false);
+    setActiveView('chat');
+    setCurrentSession(task.lastSessionId);
+  };
+
+  const isSessionHidden = !!task.lastSessionId && hiddenSessions.includes(task.lastSessionId);
 
   const handleClose = (e?: React.MouseEvent) => {
     e?.preventDefault();
@@ -147,6 +166,12 @@ export const TaskDetailDrawer: React.FC = () => {
               <span className="text-foreground">{new Date(task.lastTriggeredAt).toLocaleString()}</span>
             </div>
           )}
+          {task.hidden && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Mode</span>
+              <span className="text-foreground">🔒 Hidden conversation</span>
+            </div>
+          )}
         </div>
 
         <div className="mb-6">
@@ -169,7 +194,17 @@ export const TaskDetailDrawer: React.FC = () => {
               className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
               title={task.ownerType === 'user' ? 'Show the alert immediately (for testing)' : 'Start the agent session immediately'}
             >
-              {task.ownerType === 'user' ? 'Trigger alert now' : 'Start session now'}
+              {task.ownerType === 'user' ? 'Trigger alert now' : task.hidden ? 'Start hidden run now' : 'Start session now'}
+            </button>
+          )}
+          {isSessionHidden && (
+            <button
+              type="button"
+              onClick={handleSurface}
+              className="rounded-md border border-purple-500/40 bg-purple-500/10 px-3 py-1.5 text-xs font-medium text-purple-300 hover:bg-purple-500/20"
+              title="Reveal the hidden conversation and open it in chat"
+            >
+              Surface conversation
             </button>
           )}
           <button

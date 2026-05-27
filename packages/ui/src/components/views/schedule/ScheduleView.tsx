@@ -1,19 +1,37 @@
-import React, { useState, useEffect } from "react";
-import { useScheduleStore } from "@/stores/useScheduleStore";
+import React, { useEffect, useMemo } from "react";
+import { useTasksStore, type Task } from "@/stores/useTasksStore";
 import { CalendarMonth } from "./CalendarMonth";
 import { CalendarWeek } from "./CalendarWeek";
-import { ScheduleEventCard } from "./ScheduleEventCard";
-import { CreateScheduleDialog } from "./CreateScheduleDialog";
+import { ScheduleTaskCard } from "./ScheduleEventCard";
+
+type ViewMode = "month" | "week";
+
+const VIEW_KEY = "otto.scheduleView.mode";
 
 export const ScheduleView: React.FC = () => {
-  const store = useScheduleStore();
-  const { viewMode, currentDate, setViewMode, setCurrentDate, createEvent, deleteEvent, fetchSchedule } = store;
-  const events = Array.isArray(store.events) ? store.events : [];
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const tasks = useTasksStore((s) => s.tasks);
+  const fetchTasks = useTasksStore((s) => s.fetchTasks);
+  const setCreateDialogOpen = useTasksStore((s) => s.setCreateDialogOpen);
+
+  const [viewMode, setViewMode] = React.useState<ViewMode>(() => {
+    if (typeof window === "undefined") return "month";
+    const stored = window.localStorage.getItem(VIEW_KEY);
+    return stored === "week" ? "week" : "month";
+  });
+  const [currentDate, setCurrentDate] = React.useState<Date>(new Date());
 
   useEffect(() => {
-    fetchSchedule();
-  }, [fetchSchedule]);
+    fetchTasks();
+  }, [fetchTasks]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(VIEW_KEY, viewMode);
+  }, [viewMode]);
+
+  // Only show tasks that have a due date — these are the entities that
+  // appear on the calendar. Tasks without dueAt remain in the list view.
+  const scheduledTasks = useMemo(() => tasks.filter((t) => !!t.dueAt), [tasks]);
 
   const navigateMonth = (delta: number) => {
     const d = new Date(currentDate);
@@ -47,7 +65,7 @@ export const ScheduleView: React.FC = () => {
             </button>
           </div>
           <button
-            onClick={() => setDialogOpen(true)}
+            onClick={() => setCreateDialogOpen(true)}
             className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:bg-primary/90"
           >
             + Create
@@ -58,32 +76,33 @@ export const ScheduleView: React.FC = () => {
       {/* Calendar - hidden on mobile, show list instead */}
       <div className="hidden md:block">
         {viewMode === "month" ? (
-          <CalendarMonth currentDate={currentDate} events={events} onNavigate={navigateMonth} />
+          <CalendarMonth currentDate={currentDate} tasks={scheduledTasks} onNavigate={navigateMonth} />
         ) : (
-          <CalendarWeek currentDate={currentDate} events={events} onNavigate={navigateWeek} onDelete={deleteEvent} />
+          <CalendarWeek currentDate={currentDate} tasks={scheduledTasks} onNavigate={navigateWeek} />
         )}
       </div>
 
       {/* Mobile: list view */}
       <div className="md:hidden flex flex-col gap-2">
-        <p className="text-xs text-muted-foreground">All scheduled events</p>
-        {events.map((e) => (
-          <ScheduleEventCard key={e.id} event={e} onDelete={deleteEvent} />
+        <p className="text-xs text-muted-foreground">All scheduled tasks</p>
+        {scheduledTasks.map((t: Task) => (
+          <ScheduleTaskCard key={t.id} task={t} />
         ))}
-        {events.length === 0 && (
-          <p className="text-sm text-muted-foreground">No scheduled events yet.</p>
+        {scheduledTasks.length === 0 && (
+          <p className="text-sm text-muted-foreground">No scheduled tasks yet.</p>
         )}
       </div>
 
-      {/* Upcoming list (desktop sidebar) */}
+      {/* Upcoming list (desktop) */}
       <div className="hidden md:flex flex-col gap-2 mt-4">
-        <h2 className="text-sm font-medium text-foreground">All Events</h2>
-        {events.map((e) => (
-          <ScheduleEventCard key={e.id} event={e} onDelete={deleteEvent} />
+        <h2 className="text-sm font-medium text-foreground">All Scheduled Tasks</h2>
+        {scheduledTasks.map((t: Task) => (
+          <ScheduleTaskCard key={t.id} task={t} />
         ))}
+        {scheduledTasks.length === 0 && (
+          <p className="text-sm text-muted-foreground">No scheduled tasks yet.</p>
+        )}
       </div>
-
-      <CreateScheduleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onCreate={createEvent} />
     </div>
   );
 };
