@@ -79,7 +79,63 @@ function buildAutoReply(update) {
   return `📥 Otto received: "${preview}"`;
 }
 
+async function processCallbackQuery(state, cb, broadcastEvent) {
+  const data = typeof cb.data === 'string' ? cb.data : '';
+  const decision =
+    data.startsWith('otto-approve:') ? 'approve' :
+    data.startsWith('otto-deny:') ? 'deny' :
+    null;
+  if (!decision) {
+    // ack so the spinner stops, then ignore
+    try {
+      await tg(state.token, 'answerCallbackQuery', { callback_query_id: cb.id });
+    } catch {}
+    return;
+  }
+  const approvalId = data.split(':')[1];
+  const userName =
+    cb.from?.first_name || cb.from?.username || `user ${cb.from?.id ?? ''}`.trim();
+  const ackText = decision === 'approve' ? `Approved by ${userName}` : `Denied by ${userName}`;
+  try {
+    await tg(state.token, 'answerCallbackQuery', {
+      callback_query_id: cb.id,
+      text: ackText,
+      show_alert: false,
+    });
+  } catch {}
+  // Edit the original message so the buttons disappear and the outcome is permanent in chat.
+  if (cb.message?.chat?.id && cb.message?.message_id) {
+    const original = cb.message.text ?? '';
+    const decoration = decision === 'approve' ? '\n\n✅ ' + ackText : '\n\n❌ ' + ackText;
+    try {
+      await tg(state.token, 'editMessageText', {
+        chat_id: cb.message.chat.id,
+        message_id: cb.message.message_id,
+        text: (original + decoration).slice(0, 4096),
+      });
+    } catch {}
+  }
+  try {
+    broadcastEvent?.('messenger.telegram.approval', {
+      approvalId,
+      decision,
+      by: {
+        id: cb.from?.id,
+        username: cb.from?.username ?? null,
+        firstName: cb.from?.first_name ?? null,
+      },
+      chatId: cb.message?.chat?.id ?? null,
+      messageId: cb.message?.message_id ?? null,
+      decidedAt: new Date().toISOString(),
+    });
+  } catch {}
+}
+
 async function processUpdate(state, update, broadcastEvent) {
+  if (update.callback_query) {
+    await processCallbackQuery(state, update.callback_query, broadcastEvent);
+    return;
+  }
   const msg = update.message ?? update.edited_message ?? update.channel_post;
   if (!msg) return;
 
@@ -159,7 +215,7 @@ async function pollLoop(state, broadcastEvent) {
       const data = await tg(state.token, 'getUpdates', {
         offset: state.offset,
         timeout: LONG_POLL_TIMEOUT,
-        allowed_updates: ['message', 'edited_message', 'channel_post'],
+        allowed_updates: ['message', 'edited_message', 'channel_post', 'callback_query'],
       });
       if (!data.ok) {
         state.lastError = data.description ?? 'getUpdates failed';

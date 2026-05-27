@@ -102,6 +102,16 @@ export interface MessengerConnection {
   telegramListenerError?: string | null;
   telegramListenerAutoReply?: boolean;
 
+  // Discord Gateway listener state (parity with the Telegram listener block).
+  discordListenerRunning?: boolean;
+  discordListenerConnected?: boolean;
+  discordListenerStartedAt?: number | null;
+  discordListenerLastUpdateAt?: number | null;
+  discordListenerTotalReceived?: number;
+  discordListenerTotalReplied?: number;
+  discordListenerError?: string | null;
+  discordListenerAutoReply?: boolean;
+
   // Sync config
   syncMode: SyncMode;
   syncProjects: boolean;
@@ -132,6 +142,62 @@ export interface TelegramDiagnosisCheck {
   fix?: string;
 }
 
+export interface MessengerInboundMessage {
+  /** Either Telegram update_id (number) or Discord message id (string). */
+  updateId: number | string;
+  chatId: number | string | null;
+  chatTitle: string | null;
+  chatType: string | null;
+  threadId: number | string | null;
+  from:
+    | {
+        id: number | string | null;
+        username: string | null;
+        firstName: string | null;
+        isBot: boolean;
+      }
+    | null;
+  text: string | null;
+  receivedAt: string;
+  /** Discord-only extras (guildId, messageId etc.) when present. */
+  discord?: {
+    guildId: string | null;
+    messageId: string;
+    authorId: string | null;
+  };
+}
+
+export interface DiscordHistoryMessage {
+  id: string;
+  channelId: string;
+  content: string;
+  timestamp: string;
+  author: {
+    id: string;
+    username: string | null;
+    globalName: string | null;
+    isBot: boolean;
+  };
+  attachmentCount: number;
+}
+
+export type MessengerApprovalDecision = 'approve' | 'deny';
+
+export interface MessengerApproval {
+  id: string;
+  type: MessengerType;
+  prompt: string;
+  /** chat_id for Telegram, channel_id for Discord. */
+  target: string;
+  /** Telegram message_id or Discord message id. */
+  messageId: string | number | null;
+  sentAt: number;
+  decision: MessengerApprovalDecision | null;
+  decidedAt: number | null;
+  decidedBy: string | null;
+  error: string | null;
+}
+
 export interface TelegramInboundMessage {
   updateId: number;
   chatId: number | string;
@@ -158,6 +224,10 @@ interface MessengerState {
 
   /** In-memory ring buffer of recent inbound Telegram messages (newest first). */
   telegramInbound: TelegramInboundMessage[];
+  /** Same shape for Discord — newest first, capped at 50. */
+  discordInbound: MessengerInboundMessage[];
+  /** Last-50-messages history fetched via /discord/history. */
+  discordHistory: DiscordHistoryMessage[];
 
   /** Latest diagnose-run output. Cleared when token/chat id changes. */
   telegramDiagnosis: {
@@ -166,6 +236,16 @@ interface MessengerState {
     checks: TelegramDiagnosisCheck[];
   } | null;
   telegramDiagnosisRunning: boolean;
+  /** Parallel diagnose for Discord. */
+  discordDiagnosis: {
+    runAt: number;
+    ok: boolean;
+    checks: TelegramDiagnosisCheck[];
+  } | null;
+  discordDiagnosisRunning: boolean;
+
+  /** Pending + answered approvals across both messengers, newest first. */
+  approvals: MessengerApproval[];
 
   addConnection: (type: MessengerType) => void;
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
@@ -186,6 +266,24 @@ interface MessengerState {
     summary: string,
   ) => Promise<boolean>;
   diagnoseTelegram: () => Promise<boolean>;
+  diagnoseDiscord: () => Promise<boolean>;
+  startDiscordListener: () => Promise<boolean>;
+  stopDiscordListener: () => Promise<boolean>;
+  refreshDiscordListenerStatus: () => Promise<void>;
+  loadRecentDiscordMessages: () => Promise<void>;
+  ingestDiscordInbound: (msg: MessengerInboundMessage) => void;
+  loadDiscordHistory: (channelId: string, limit?: number) => Promise<boolean>;
+  sendApprovalRequest: (
+    type: MessengerType,
+    prompt: string,
+    opts?: { target?: string; threadId?: string },
+  ) => Promise<MessengerApproval | null>;
+  ingestApprovalDecision: (
+    approvalId: string,
+    decision: MessengerApprovalDecision,
+    by: string | null,
+  ) => void;
+  clearApprovals: () => void;
   startTelegramListener: () => Promise<boolean>;
   stopTelegramListener: () => Promise<boolean>;
   refreshTelegramListenerStatus: () => Promise<void>;
@@ -230,8 +328,13 @@ export const useMessengerStore = create<MessengerState>()(
       onboardingStep: null,
       onboardingType: null,
       telegramInbound: [],
+      discordInbound: [],
+      discordHistory: [],
       telegramDiagnosis: null,
       telegramDiagnosisRunning: false,
+      discordDiagnosis: null,
+      discordDiagnosisRunning: false,
+      approvals: [],
 
       addConnection: (type) => {
         const existing = get().connections.find((c) => c.type === type);
@@ -907,6 +1010,314 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
+      diagnoseDiscord: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return false;
+        set({ discordDiagnosisRunning: true });
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            checks?: TelegramDiagnosisCheck[];
+          }>('/api/otto/messenger/discord/diagnose', {
+            token: conn.botToken,
+            guildId: conn.discordGuildId,
+            channelId: conn.defaultChannelId,
+          });
+          set({
+            discordDiagnosis: {
+              runAt: Date.now(),
+              ok: Boolean(data.ok),
+              checks: data.checks ?? [],
+            },
+            discordDiagnosisRunning: false,
+          });
+          return Boolean(data.ok);
+        } catch (e) {
+          set({
+            discordDiagnosis: {
+              runAt: Date.now(),
+              ok: false,
+              checks: [
+                {
+                  id: 'network',
+                  ok: false,
+                  severity: 'error',
+                  title: 'Diagnose failed',
+                  detail: e instanceof Error ? e.message : 'Unknown error',
+                },
+              ],
+            },
+            discordDiagnosisRunning: false,
+          });
+          return false;
+        }
+      },
+
+      startDiscordListener: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return false;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            running?: boolean;
+            connected?: boolean;
+            startedAt?: number;
+            autoReply?: boolean;
+            lastUpdateAt?: number | null;
+            totalReceived?: number;
+            totalReplied?: number;
+            lastError?: string | null;
+            botUsername?: string;
+          }>('/api/otto/messenger/discord/listener/start', {
+            token: conn.botToken,
+            guildId: conn.discordGuildId,
+            autoReply: conn.discordListenerAutoReply !== false,
+          });
+          if (!data.ok) return false;
+          get().updateConnection('discord', {
+            discordListenerRunning: data.running ?? true,
+            discordListenerConnected: data.connected ?? false,
+            discordListenerStartedAt: data.startedAt ?? Date.now(),
+            discordListenerLastUpdateAt: data.lastUpdateAt ?? null,
+            discordListenerTotalReceived: data.totalReceived ?? 0,
+            discordListenerTotalReplied: data.totalReplied ?? 0,
+            discordListenerError: data.lastError ?? null,
+            discordListenerAutoReply: data.autoReply ?? true,
+          });
+          return true;
+        } catch (e) {
+          get().updateConnection('discord', {
+            discordListenerError: e instanceof Error ? e.message : 'start failed',
+            discordListenerRunning: false,
+          });
+          return false;
+        }
+      },
+
+      stopDiscordListener: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return false;
+        try {
+          await postJson('/api/otto/messenger/discord/listener/stop', {
+            token: conn.botToken,
+          });
+          get().updateConnection('discord', {
+            discordListenerRunning: false,
+            discordListenerConnected: false,
+          });
+          return true;
+        } catch (e) {
+          get().updateConnection('discord', {
+            discordListenerError: e instanceof Error ? e.message : 'stop failed',
+          });
+          return false;
+        }
+      },
+
+      refreshDiscordListenerStatus: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            running?: boolean;
+            connected?: boolean;
+            autoReply?: boolean;
+            startedAt?: number;
+            lastUpdateAt?: number | null;
+            totalReceived?: number;
+            totalReplied?: number;
+            lastError?: string | null;
+          }>('/api/otto/messenger/discord/listener/status', { token: conn.botToken });
+          if (!data.ok) return;
+          get().updateConnection('discord', {
+            discordListenerRunning: data.running ?? false,
+            discordListenerConnected: data.connected ?? false,
+            discordListenerStartedAt: data.startedAt ?? null,
+            discordListenerLastUpdateAt: data.lastUpdateAt ?? null,
+            discordListenerTotalReceived: data.totalReceived ?? 0,
+            discordListenerTotalReplied: data.totalReplied ?? 0,
+            discordListenerError: data.lastError ?? null,
+            discordListenerAutoReply: data.autoReply ?? true,
+          });
+        } catch {
+          // ignore
+        }
+      },
+
+      loadRecentDiscordMessages: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            messages?: MessengerInboundMessage[];
+          }>('/api/otto/messenger/discord/listener/recent', {
+            token: conn.botToken,
+            limit: 25,
+          });
+          if (data.ok && Array.isArray(data.messages)) {
+            set({ discordInbound: data.messages });
+          }
+        } catch {
+          // ignore
+        }
+      },
+
+      ingestDiscordInbound: (msg) => {
+        const cur = get().discordInbound;
+        const next = [msg, ...cur.filter((m) => m.updateId !== msg.updateId)].slice(0, 50);
+        set({ discordInbound: next });
+      },
+
+      loadDiscordHistory: async (channelId, limit = 50) => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return false;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            error?: string;
+            messages?: DiscordHistoryMessage[];
+          }>('/api/otto/messenger/discord/history', {
+            token: conn.botToken,
+            channelId,
+            limit,
+          });
+          if (!data.ok) {
+            get().updateConnection('discord', { error: data.error ?? 'history fetch failed' });
+            return false;
+          }
+          set({ discordHistory: data.messages ?? [] });
+          return true;
+        } catch (e) {
+          get().updateConnection('discord', {
+            error: e instanceof Error ? e.message : 'history fetch failed',
+          });
+          return false;
+        }
+      },
+
+      sendApprovalRequest: async (type, prompt, opts) => {
+        const conn = get().connections.find((c) => c.type === type);
+        if (!conn) return null;
+
+        // Resolve a target channel/chat. For Discord, fall back to the first
+        // text channel of the resolved server when defaultChannelId is unset.
+        let target =
+          opts?.target ??
+          (type === 'discord' ? conn.defaultChannelId : conn.telegramChatId);
+        if (!target && type === 'discord' && conn.discordGuildChannels && conn.discordGuildChannels.length > 0) {
+          target = conn.discordGuildChannels[0].id;
+        }
+        const token = type === 'discord' ? conn.botToken : conn.telegramBotToken;
+        if (!token || !target) {
+          const failed: MessengerApproval = {
+            id: `failed_${Date.now()}`,
+            type,
+            prompt,
+            target: String(target ?? ''),
+            messageId: null,
+            sentAt: Date.now(),
+            decision: null,
+            decidedAt: null,
+            decidedBy: null,
+            error: !token
+              ? 'Bot token is missing'
+              : type === 'discord'
+                ? 'No Discord channel configured — save a Channel ID or Server ID first'
+                : 'No Telegram chat ID configured',
+          };
+          set({ approvals: [failed, ...get().approvals].slice(0, 50) });
+          return null;
+        }
+
+        try {
+          const url =
+            type === 'discord'
+              ? '/api/otto/messenger/discord/send-approval'
+              : '/api/otto/messenger/telegram/send-approval';
+          const body: Record<string, unknown> =
+            type === 'discord'
+              ? { token, channelId: target, prompt }
+              : {
+                  token,
+                  chatId: target,
+                  prompt,
+                  ...(opts?.threadId ? { threadId: opts.threadId } : {}),
+                };
+          const data = await postJson<{
+            ok: boolean;
+            error?: string;
+            approvalId?: string;
+            messageId?: string | number;
+          }>(url, body);
+          if (!data.ok || !data.approvalId) {
+            // Record the failure so the UI can show it instead of swallowing
+            // the click silently.
+            const failed: MessengerApproval = {
+              id: `failed_${Date.now()}`,
+              type,
+              prompt,
+              target: String(target),
+              messageId: null,
+              sentAt: Date.now(),
+              decision: null,
+              decidedAt: null,
+              decidedBy: null,
+              error: data.error ?? 'send-approval failed',
+            };
+            set({ approvals: [failed, ...get().approvals].slice(0, 50) });
+            return null;
+          }
+          const approval: MessengerApproval = {
+            id: data.approvalId,
+            type,
+            prompt,
+            target: String(target),
+            messageId: data.messageId ?? null,
+            sentAt: Date.now(),
+            decision: null,
+            decidedAt: null,
+            decidedBy: null,
+            error: null,
+          };
+          set({ approvals: [approval, ...get().approvals].slice(0, 50) });
+          return approval;
+        } catch (e) {
+          // Record a failed approval so the UI can show what went wrong.
+          const approval: MessengerApproval = {
+            id: `failed_${Date.now()}`,
+            type,
+            prompt,
+            target: String(target),
+            messageId: null,
+            sentAt: Date.now(),
+            decision: null,
+            decidedAt: null,
+            decidedBy: null,
+            error: e instanceof Error ? e.message : 'send-approval failed',
+          };
+          set({ approvals: [approval, ...get().approvals].slice(0, 50) });
+          return null;
+        }
+      },
+
+      ingestApprovalDecision: (approvalId, decision, by) => {
+        const list = get().approvals;
+        const idx = list.findIndex((a) => a.id === approvalId);
+        if (idx === -1) return;
+        const next = list.slice();
+        next[idx] = {
+          ...next[idx],
+          decision,
+          decidedAt: Date.now(),
+          decidedBy: by,
+        };
+        set({ approvals: next });
+      },
+
+      clearApprovals: () => set({ approvals: [] }),
+
       ingestTelegramInbound: (msg) => {
         const cur = get().telegramInbound;
         // Dedupe by updateId; keep newest first; cap at 50.
@@ -958,6 +1369,11 @@ export const useMessengerStore = create<MessengerState>()(
           telegramListenerStartedAt: null,
           telegramListenerLastUpdateAt: null,
           telegramListenerError: null,
+          discordListenerRunning: false,
+          discordListenerConnected: false,
+          discordListenerStartedAt: null,
+          discordListenerLastUpdateAt: null,
+          discordListenerError: null,
         })),
         projectMappings: state.projectMappings,
       }),

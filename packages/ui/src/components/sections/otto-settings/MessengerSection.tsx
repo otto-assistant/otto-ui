@@ -28,6 +28,8 @@ import {
   type SyncMode,
   type TelegramInboundMessage,
   type TelegramDiagnosisCheck,
+  type MessengerInboundMessage,
+  type MessengerApproval,
 } from '@/stores/useMessengerStore';
 import { useOttoEventsStore, type OttoUiRealtimeEvent } from '@/stores/useOttoEventsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -558,6 +560,442 @@ function TelegramSyncResults({
   );
 }
 
+function DiscordListenerPanel({
+  conn,
+  inbound,
+  history,
+  startListener,
+  stopListener,
+  refreshStatus,
+  loadRecent,
+  loadHistory,
+  onToggleAutoReply,
+}: {
+  conn: MessengerConnection;
+  inbound: MessengerInboundMessage[];
+  history: ReturnType<typeof useMessengerStore.getState>['discordHistory'];
+  startListener: () => Promise<boolean>;
+  stopListener: () => Promise<boolean>;
+  refreshStatus: () => Promise<void>;
+  loadRecent: () => Promise<void>;
+  loadHistory: (channelId: string, limit?: number) => Promise<boolean>;
+  onToggleAutoReply: (v: boolean) => void;
+}) {
+  const running = Boolean(conn.discordListenerRunning);
+  const connected = Boolean(conn.discordListenerConnected);
+  const autoReply = conn.discordListenerAutoReply !== false;
+  const subscribeToEvents = useOttoEventsStore((s) => s.subscribeToEvents);
+  const ingestDiscordInbound = useMessengerStore((s) => s.ingestDiscordInbound);
+
+  useEffect(() => {
+    if (!running) return;
+    const handler = (event: OttoUiRealtimeEvent) => {
+      if (event.eventType !== 'messenger.discord.message_received') return;
+      const data = event.data as MessengerInboundMessage | undefined;
+      if (data && typeof data === 'object' && 'updateId' in data) {
+        ingestDiscordInbound(data);
+      }
+    };
+    return subscribeToEvents(handler);
+  }, [running, subscribeToEvents, ingestDiscordInbound]);
+
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      await Promise.all([refreshStatus(), loadRecent()]);
+    };
+    tick();
+    const id = setInterval(tick, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [running, refreshStatus, loadRecent]);
+
+  useEffect(() => {
+    refreshStatus();
+    loadRecent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const historyTarget = conn.defaultChannelId;
+
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+          <RiChatSmile3Line className="size-4 text-primary" />
+          Listen for incoming messages
+          <span
+            className={cn(
+              'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
+              connected
+                ? 'bg-green-500/20 text-green-600 dark:text-green-400'
+                : running
+                  ? 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400'
+                  : 'bg-muted text-muted-foreground',
+            )}
+          >
+            {connected ? 'live' : running ? 'connecting…' : 'off'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {!running ? (
+            <button
+              type="button"
+              onClick={() => startListener()}
+              className="inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <RiPlayCircleLine className="size-3.5" />
+              Start listening
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => stopListener()}
+              className="inline-flex items-center gap-1 rounded border border-destructive/40 px-2.5 py-1 text-[11px] font-medium text-destructive hover:bg-destructive/10"
+            >
+              <RiStopCircleLine className="size-3.5" />
+              Stop
+            </button>
+          )}
+          <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoReply}
+              onChange={(e) => onToggleAutoReply(e.target.checked)}
+              className="rounded border-border accent-primary"
+            />
+            Auto-reply
+          </label>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-[10px]">
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Received</div>
+          <div className="text-foreground font-medium">
+            {conn.discordListenerTotalReceived ?? 0}
+          </div>
+        </div>
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Replied</div>
+          <div className="text-foreground font-medium">
+            {conn.discordListenerTotalReplied ?? 0}
+          </div>
+        </div>
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Last update</div>
+          <div className="text-foreground font-medium">
+            {formatRelative(conn.discordListenerLastUpdateAt ?? null)}
+          </div>
+        </div>
+      </div>
+
+      {conn.discordListenerError && (
+        <div className="text-[11px] text-destructive flex items-start gap-1.5 leading-snug">
+          <RiAlertLine className="size-3.5 shrink-0 mt-0.5" />
+          {conn.discordListenerError}
+        </div>
+      )}
+
+      {!running ? (
+        <div className="text-[11px] text-muted-foreground leading-snug">
+          Start the listener so Otto can answer messages sent to the bot. Otto opens a
+          Discord Gateway WebSocket and listens to <code className="bg-muted px-1 rounded">MESSAGE_CREATE</code>{' '}
+          and <code className="bg-muted px-1 rounded">INTERACTION_CREATE</code> (button clicks). You'll need to{' '}
+          enable <em>Message Content Intent</em> in the Developer Portal for the bot to see the body of
+          non-mention messages.
+        </div>
+      ) : inbound.length === 0 ? (
+        <div className="text-[11px] text-muted-foreground italic">
+          Waiting for messages… Mention or DM the bot in your server.
+        </div>
+      ) : (
+        <ul className="space-y-1.5 max-h-48 overflow-y-auto">
+          {inbound.slice(0, 8).map((m) => (
+            <li
+              key={String(m.updateId)}
+              className="rounded bg-background border border-border px-2 py-1.5 text-[11px] space-y-0.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-foreground truncate">
+                  {m.from?.firstName ?? m.from?.username ?? 'Unknown'}
+                  {m.from?.username ? (
+                    <span className="text-muted-foreground"> @{m.from.username}</span>
+                  ) : null}
+                </span>
+                <span className="text-[9px] text-muted-foreground shrink-0">
+                  {new Date(m.receivedAt).toLocaleTimeString()}
+                </span>
+              </div>
+              <div className="text-muted-foreground break-words">
+                {m.text ?? <em>(non-text message)</em>}
+              </div>
+              <div className="text-[9px] text-muted-foreground">
+                channel {m.chatId}
+                {m.discord?.guildId ? ` · guild ${m.discord.guildId}` : ''}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* History fetch — only works on Discord; Telegram bots cannot fetch
+          pre-listener-start history due to a fundamental Bot API limitation. */}
+      <div className="border-t border-border/60 pt-2 space-y-1.5">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="text-[11px] font-medium text-foreground">Channel history</div>
+          <button
+            type="button"
+            onClick={() => historyTarget && loadHistory(historyTarget, 50)}
+            disabled={!historyTarget}
+            className="rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20 disabled:opacity-50"
+          >
+            Fetch last 50
+          </button>
+        </div>
+        {!historyTarget && (
+          <div className="text-[10px] text-muted-foreground">
+            Save a default Channel ID to enable history fetch.
+          </div>
+        )}
+        {historyTarget && history.length === 0 && (
+          <div className="text-[10px] text-muted-foreground italic">
+            No history loaded yet — click "Fetch last 50".
+          </div>
+        )}
+        {history.length > 0 && (
+          <ul className="space-y-1 max-h-40 overflow-y-auto">
+            {history.slice(0, 10).map((m) => (
+              <li
+                key={m.id}
+                className="rounded bg-background border border-border px-2 py-1 text-[10px]"
+              >
+                <span className="font-medium text-foreground">
+                  {m.author.globalName ?? m.author.username ?? m.author.id}
+                </span>{' '}
+                <span className="text-[9px] text-muted-foreground">
+                  {new Date(m.timestamp).toLocaleTimeString()}
+                </span>
+                <div className="text-muted-foreground break-words">
+                  {m.content || <em>(no text — {m.attachmentCount} attachment{m.attachmentCount === 1 ? '' : 's'})</em>}
+                </div>
+              </li>
+            ))}
+            {history.length > 10 && (
+              <li className="text-[10px] text-muted-foreground italic px-2">
+                + {history.length - 10} older message{history.length - 10 === 1 ? '' : 's'}
+              </li>
+            )}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DiscordDiagnosePanel({
+  conn,
+  diagnosis,
+  running,
+  runDiagnose,
+}: {
+  conn: MessengerConnection;
+  diagnosis: ReturnType<typeof useMessengerStore.getState>['discordDiagnosis'];
+  running: boolean;
+  runDiagnose: () => Promise<boolean>;
+}) {
+  const hasIssue = diagnosis?.checks?.some((c) => !c.ok && c.severity !== 'info') ?? false;
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+          <RiStethoscopeLine className="size-4 text-primary" />
+          Diagnose
+          {diagnosis && (
+            <span
+              className={cn(
+                'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
+                hasIssue
+                  ? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-300'
+                  : 'bg-green-500/20 text-green-700 dark:text-green-400',
+              )}
+            >
+              {hasIssue ? 'issues' : 'all clear'}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => runDiagnose()}
+          disabled={running}
+          className="inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {running ? (
+            <RiLoader4Line className="size-3.5 animate-spin" />
+          ) : (
+            <RiStethoscopeLine className="size-3.5" />
+          )}
+          {running ? 'Running…' : diagnosis ? 'Re-run diagnose' : 'Run diagnose'}
+        </button>
+      </div>
+      {!diagnosis && (
+        <div className="text-[11px] text-muted-foreground leading-snug">
+          Diagnose validates token, server access, default channel posting permissions, and
+          flags the Message Content intent requirement for the gateway listener.
+        </div>
+      )}
+      {diagnosis && diagnosis.checks.length > 0 && (
+        <ul className="space-y-1.5">
+          {diagnosis.checks.map((c) => (
+            <li key={c.id} className="rounded bg-background border border-border px-2 py-1.5">
+              <div className="flex items-start gap-1.5">
+                <span className={cn('text-xs leading-none mt-0.5', severityClass(c.severity))}>
+                  {c.severity === 'ok' ? '✓' : c.severity === 'warn' ? '⚠' : c.severity === 'error' ? '✗' : 'ⓘ'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className={cn('text-[11px] font-medium', severityClass(c.severity))}>
+                    {c.title}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground leading-snug mt-0.5 break-words">
+                    {c.detail}
+                  </div>
+                  {c.fix && (
+                    <div className="text-[10px] text-foreground leading-snug mt-1">
+                      <span className="font-medium">Fix: </span>
+                      {c.fix}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {diagnosis && (
+        <div className="text-[10px] text-muted-foreground">
+          Last run {formatRelative(diagnosis.runAt)} for {conn.discordBotUsername ? `bot ${conn.discordBotUsername}` : 'this bot'}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ApprovalsPanel({
+  type,
+  approvals,
+  onSendDemo,
+}: {
+  type: MessengerType;
+  approvals: MessengerApproval[];
+  onSendDemo: () => Promise<MessengerApproval | null>;
+}) {
+  const subscribeToEvents = useOttoEventsStore((s) => s.subscribeToEvents);
+  const ingestApprovalDecision = useMessengerStore((s) => s.ingestApprovalDecision);
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    const handler = (event: OttoUiRealtimeEvent) => {
+      const wanted =
+        type === 'telegram'
+          ? 'messenger.telegram.approval'
+          : 'messenger.discord.approval';
+      if (event.eventType !== wanted) return;
+      const d = event.data as
+        | {
+            approvalId: string;
+            decision: 'approve' | 'deny';
+            by?: { username?: string | null; firstName?: string | null; displayName?: string | null };
+          }
+        | undefined;
+      if (!d?.approvalId || !d.decision) return;
+      const byName =
+        d.by?.displayName || d.by?.firstName || d.by?.username || null;
+      ingestApprovalDecision(d.approvalId, d.decision, byName);
+    };
+    return subscribeToEvents(handler);
+  }, [type, subscribeToEvents, ingestApprovalDecision]);
+
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
+          <RiCheckLine className="size-3.5 text-primary" />
+          Approve actions
+          <span className="text-[10px] font-normal text-muted-foreground">
+            ({approvals.filter((a) => !a.decision && !a.error).length} pending)
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={async () => {
+            setSending(true);
+            try {
+              await onSendDemo();
+            } finally {
+              setSending(false);
+            }
+          }}
+          disabled={sending}
+          className="inline-flex items-center gap-1 rounded bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20 disabled:opacity-50"
+        >
+          {sending ? <RiLoader4Line className="size-3.5 animate-spin" /> : <RiSendPlaneLine className="size-3.5" />}
+          Send approval request
+        </button>
+      </div>
+      <div className="text-[11px] text-muted-foreground leading-snug">
+        Otto can post a message with Approve / Deny buttons. When you (or someone in the chat)
+        click a button, the listener pipes the decision back here in real time.
+      </div>
+      {approvals.length === 0 ? (
+        <div className="text-[11px] text-muted-foreground italic">
+          No approval requests sent yet. Click "Send approval request" to try it.
+        </div>
+      ) : (
+        <ul className="space-y-1">
+          {approvals.slice(0, 5).map((a) => (
+            <li
+              key={a.id}
+              className="rounded bg-background border border-border px-2 py-1.5 text-[11px] space-y-0.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={cn(
+                    'font-medium',
+                    a.decision === 'approve'
+                      ? 'text-green-600 dark:text-green-400'
+                      : a.decision === 'deny'
+                        ? 'text-destructive'
+                        : a.error
+                          ? 'text-destructive'
+                          : 'text-yellow-600 dark:text-yellow-400',
+                  )}
+                >
+                  {a.decision
+                    ? a.decision === 'approve'
+                      ? `✓ Approved by ${a.decidedBy ?? 'user'}`
+                      : `✗ Denied by ${a.decidedBy ?? 'user'}`
+                    : a.error
+                      ? '✗ Failed to send'
+                      : '⏳ Waiting for response'}
+                </span>
+                <span className="text-[9px] text-muted-foreground shrink-0">
+                  {formatRelative(a.decidedAt ?? a.sentAt)}
+                </span>
+              </div>
+              <div className="text-muted-foreground break-words">{a.prompt}</div>
+              {a.error && <div className="text-destructive">{a.error}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function DiscordSyncResults({
   channels,
   guildName,
@@ -636,6 +1074,18 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const diagnoseTelegram = useMessengerStore((s) => s.diagnoseTelegram);
   const telegramDiagnosis = useMessengerStore((s) => s.telegramDiagnosis);
   const telegramDiagnosisRunning = useMessengerStore((s) => s.telegramDiagnosisRunning);
+  const diagnoseDiscord = useMessengerStore((s) => s.diagnoseDiscord);
+  const discordDiagnosis = useMessengerStore((s) => s.discordDiagnosis);
+  const discordDiagnosisRunning = useMessengerStore((s) => s.discordDiagnosisRunning);
+  const startDiscordListener = useMessengerStore((s) => s.startDiscordListener);
+  const stopDiscordListener = useMessengerStore((s) => s.stopDiscordListener);
+  const refreshDiscordListenerStatus = useMessengerStore((s) => s.refreshDiscordListenerStatus);
+  const loadRecentDiscordMessages = useMessengerStore((s) => s.loadRecentDiscordMessages);
+  const discordInbound = useMessengerStore((s) => s.discordInbound);
+  const discordHistory = useMessengerStore((s) => s.discordHistory);
+  const loadDiscordHistory = useMessengerStore((s) => s.loadDiscordHistory);
+  const sendApprovalRequest = useMessengerStore((s) => s.sendApprovalRequest);
+  const approvals = useMessengerStore((s) => s.approvals);
   const projects = useProjectsStore((s) => s.projects);
   const tasks = useTasksStore((s) => s.tasks);
   const projectMappings = useMessengerStore((s) => s.projectMappings);
@@ -1348,8 +1798,50 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         />
       )}
 
+      {/* Discord Gateway listener + history (parity with Telegram listener) */}
+      {conn.type === 'discord' && hasToken && (conn.discordGuildId || conn.defaultChannelId) && (
+        <DiscordListenerPanel
+          conn={conn}
+          inbound={discordInbound}
+          history={discordHistory}
+          startListener={startDiscordListener}
+          stopListener={stopDiscordListener}
+          refreshStatus={refreshDiscordListenerStatus}
+          loadRecent={loadRecentDiscordMessages}
+          loadHistory={loadDiscordHistory}
+          onToggleAutoReply={(v) =>
+            updateConnection('discord', { discordListenerAutoReply: v })
+          }
+        />
+      )}
+
+      {/* Discord diagnose (parity with Telegram) */}
+      {conn.type === 'discord' && hasToken && (
+        <DiscordDiagnosePanel
+          conn={conn}
+          diagnosis={discordDiagnosis}
+          running={discordDiagnosisRunning}
+          runDiagnose={diagnoseDiscord}
+        />
+      )}
+
       {conn.type === 'discord' && conn.lastSyncChannels && conn.lastSyncChannels.length > 0 && (
         <DiscordSyncResults channels={conn.lastSyncChannels} guildName={conn.guildName} />
+      )}
+
+      {/* Approval requests panel — shared by both messengers, only rendered when
+          this card has a usable target. */}
+      {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (
+        <ApprovalsPanel
+          type={conn.type}
+          approvals={approvals.filter((a) => a.type === conn.type)}
+          onSendDemo={() =>
+            sendApprovalRequest(
+              conn.type,
+              'Approve project sync run? This is a demo request from the Otto settings page.',
+            )
+          }
+        />
       )}
 
       {/* Sync mode */}

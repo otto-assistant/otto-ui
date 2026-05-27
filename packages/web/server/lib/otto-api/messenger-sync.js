@@ -1,5 +1,9 @@
 import express, { Router } from 'express';
 import { createTelegramListenerRegistry } from './telegram-listener.js';
+import {
+  createDiscordListenerRegistry,
+  generateApprovalId,
+} from './discord-listener.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -23,6 +27,7 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
   router.use(express.json({ limit: '256kb' }));
 
   const telegramListener = createTelegramListenerRegistry({ broadcastEvent });
+  const discordListener = createDiscordListenerRegistry({ broadcastEvent });
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
@@ -587,6 +592,366 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
       summaryMessageId,
       channels: channelResults,
     });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Discord Gateway listener (parity with Telegram long-poll listener)
+  // ──────────────────────────────────────────────────────────────────────────
+  router.post('/discord/listener/start', (req, res) => {
+    const { token, guildId, autoReply } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.start(token, { guildId, autoReply: autoReply !== false }));
+  });
+
+  router.post('/discord/listener/stop', (req, res) => {
+    const { token } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.stop(token));
+  });
+
+  router.post('/discord/listener/status', (req, res) => {
+    const token = req.body?.token;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.status(token));
+  });
+
+  router.post('/discord/listener/recent', (req, res) => {
+    const token = req.body?.token;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.recent(token, req.body?.limit ?? 25));
+  });
+
+  /**
+   * Fetch the last N messages from a Discord channel or thread via REST.
+   * Body: { token, channelId, limit? } — limit clamped to 1..100.
+   * Returns: { ok, messages: [{ id, content, author, timestamp, threadId }] }
+   */
+  router.post('/discord/history', async (req, res) => {
+    const { token, channelId } = req.body ?? {};
+    const limit = Math.min(100, Math.max(1, Number(req.body?.limit ?? 50)));
+    if (!token || !channelId) {
+      return res.status(400).json({ error: 'token and channelId required' });
+    }
+    try {
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages?limit=${limit}`,
+        { headers: { Authorization: `Bot ${token}` } },
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+        });
+      }
+      const raw = await r.json();
+      const messages = (Array.isArray(raw) ? raw : []).map((m) => ({
+        id: m.id,
+        channelId: m.channel_id,
+        content: m.content ?? '',
+        timestamp: m.timestamp,
+        author: {
+          id: m.author?.id,
+          username: m.author?.username ?? null,
+          globalName: m.author?.global_name ?? null,
+          isBot: Boolean(m.author?.bot),
+        },
+        attachmentCount: Array.isArray(m.attachments) ? m.attachments.length : 0,
+        threadId: null,
+      }));
+      return res.json({ ok: true, messages });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'history fetch failed' });
+    }
+  });
+
+  /**
+   * Post an approval-request message with two buttons (Approve / Deny) in a
+   * Discord channel. The button custom_ids embed the approvalId so the
+   * gateway listener can route the click back as a structured event.
+   *
+   * Body: { token, channelId, prompt, approvalId? }
+   */
+  router.post('/discord/send-approval', async (req, res) => {
+    const { token, channelId, prompt, approvalId } = req.body ?? {};
+    if (!token || !channelId || !prompt) {
+      return res.status(400).json({ error: 'token, channelId and prompt required' });
+    }
+    const id = approvalId || generateApprovalId();
+    const body = {
+      content: `**Otto needs approval**\n${String(prompt).slice(0, 1600)}`,
+      components: [
+        {
+          type: 1, // ACTION_ROW
+          components: [
+            {
+              type: 2, // BUTTON
+              style: 3, // SUCCESS (green)
+              label: 'Approve',
+              custom_id: `otto-approve:${id}`,
+            },
+            {
+              type: 2,
+              style: 4, // DANGER (red)
+              label: 'Deny',
+              custom_id: `otto-deny:${id}`,
+            },
+          ],
+        },
+      ],
+    };
+    try {
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+        });
+      }
+      const data = await r.json();
+      return res.json({
+        ok: true,
+        approvalId: id,
+        messageId: data.id,
+        channelId: data.channel_id ?? channelId,
+        sentAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'send-approval failed' });
+    }
+  });
+
+  /**
+   * Post an approval-request message with an inline keyboard in Telegram.
+   * Body: { token, chatId, threadId?, prompt, approvalId? }
+   */
+  router.post('/telegram/send-approval', async (req, res) => {
+    const { token, chatId, threadId, prompt, approvalId } = req.body ?? {};
+    if (!token || !chatId || !prompt) {
+      return res.status(400).json({ error: 'token, chatId and prompt required' });
+    }
+    const id = approvalId || generateApprovalId();
+    const body = {
+      chat_id: chatId,
+      text: `🤖 Otto needs approval\n\n${String(prompt).slice(0, 3800)}`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ Approve', callback_data: `otto-approve:${id}` },
+            { text: '❌ Deny', callback_data: `otto-deny:${id}` },
+          ],
+        ],
+      },
+    };
+    if (threadId) body.message_thread_id = Number(threadId);
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!data.ok) {
+        return res.json({ ok: false, error: data.description ?? `Telegram error ${r.status}` });
+      }
+      return res.json({
+        ok: true,
+        approvalId: id,
+        messageId: data.result?.message_id,
+        chatId,
+        sentAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'send-approval failed' });
+    }
+  });
+
+  /**
+   * Discord setup diagnosis — parity with /telegram/diagnose.
+   * Verifies token, intents, guild access, default channel post + admin rights.
+   * Body: { token, guildId?, channelId? }
+   */
+  router.post('/discord/diagnose', async (req, res) => {
+    const { token, guildId, channelId } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+    const headers = { Authorization: `Bot ${token}` };
+    const checks = [];
+    const push = (c) => checks.push(c);
+
+    let bot = null;
+    try {
+      const r = await fetch('https://discord.com/api/v10/users/@me', { headers });
+      if (!r.ok) {
+        const text = await r.text();
+        push({
+          id: 'token',
+          ok: false,
+          severity: 'error',
+          title: 'Invalid bot token',
+          detail: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+          fix: 'Re-paste the token from Discord Developer Portal → your app → Bot → Reset Token.',
+        });
+        return res.json({ ok: false, checks });
+      }
+      bot = await r.json();
+      push({
+        id: 'token',
+        ok: true,
+        severity: 'ok',
+        title: `Bot is reachable as ${bot.username}${bot.discriminator && bot.discriminator !== '0' ? '#' + bot.discriminator : ''}`,
+        detail: `Bot id ${bot.id}.`,
+      });
+    } catch (err) {
+      push({
+        id: 'token',
+        ok: false,
+        severity: 'error',
+        title: 'Could not reach Discord',
+        detail: err?.message ?? 'network error',
+      });
+      return res.json({ ok: false, checks });
+    }
+
+    // Intents reminder — we can't read them from REST, but we can flag the
+    // requirement for the gateway listener to work.
+    push({
+      id: 'intents',
+      ok: true,
+      severity: 'info',
+      title: 'Message Content intent must be enabled in Developer Portal',
+      detail:
+        "Otherwise the gateway will close with code 4014 and the listener won't see any non-mention messages.",
+      fix: 'Developer Portal → your app → Bot → "Privileged Gateway Intents" → enable "MESSAGE CONTENT INTENT" → Save.',
+    });
+
+    // Guild access
+    if (guildId) {
+      try {
+        const r = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}`,
+          { headers },
+        );
+        if (!r.ok) {
+          const text = await r.text();
+          push({
+            id: 'guild',
+            ok: false,
+            severity: 'error',
+            title: 'Cannot access server',
+            detail: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+            fix: 'Invite the bot to the server via the invite URL above.',
+          });
+          return res.json({ ok: false, checks });
+        }
+        const guild = await r.json();
+        push({
+          id: 'guild',
+          ok: true,
+          severity: 'ok',
+          title: `Server "${guild.name}" reachable`,
+          detail: `Server id ${guild.id}.`,
+        });
+
+        // Bot member + permissions
+        try {
+          const mResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(bot.id)}`,
+            { headers },
+          );
+          if (mResp.ok) {
+            const member = await mResp.json();
+            const roleCount = Array.isArray(member.roles) ? member.roles.length : 0;
+            push({
+              id: 'membership',
+              ok: true,
+              severity: 'ok',
+              title: 'Bot is a member of the server',
+              detail: `Roles: ${roleCount}. (Channel-level rights are enforced per-channel; if posting fails, check the channel's Permissions.)`,
+            });
+          } else {
+            push({
+              id: 'membership',
+              ok: false,
+              severity: 'warn',
+              title: 'Could not fetch bot membership',
+              detail: `Discord: ${mResp.status} — ${friendlyDiscordError(mResp.status, await mResp.text())}`,
+              fix: 'Ensure the bot is invited to the server.',
+            });
+          }
+        } catch (err) {
+          push({
+            id: 'membership',
+            ok: false,
+            severity: 'warn',
+            title: 'Membership check failed',
+            detail: err?.message ?? 'network error',
+          });
+        }
+      } catch (err) {
+        push({
+          id: 'guild',
+          ok: false,
+          severity: 'error',
+          title: 'getGuild failed',
+          detail: err?.message ?? 'network error',
+        });
+      }
+    } else {
+      push({
+        id: 'guild',
+        ok: false,
+        severity: 'warn',
+        title: 'No Server ID configured',
+        detail: 'Add a Server ID to enable per-project channel + thread sync.',
+      });
+    }
+
+    // Default channel post check
+    if (channelId) {
+      try {
+        const r = await fetch(
+          `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+          { headers },
+        );
+        if (!r.ok) {
+          push({
+            id: 'channel',
+            ok: false,
+            severity: 'error',
+            title: 'Cannot access default channel',
+            detail: `Discord: ${r.status} — ${friendlyDiscordError(r.status, await r.text())}`,
+            fix: 'Right-click the channel → "Copy Channel ID" and re-save, or invite the bot to that channel.',
+          });
+        } else {
+          const ch = await r.json();
+          push({
+            id: 'channel',
+            ok: true,
+            severity: 'ok',
+            title: `Default channel #${ch.name} reachable`,
+            detail: `Channel id ${ch.id} · type ${ch.type}.`,
+          });
+        }
+      } catch (err) {
+        push({
+          id: 'channel',
+          ok: false,
+          severity: 'error',
+          title: 'getChannel failed',
+          detail: err?.message ?? 'network error',
+        });
+      }
+    }
+
+    return res.json({ ok: checks.every((c) => c.ok || c.severity === 'info'), checks });
   });
 
   /**
