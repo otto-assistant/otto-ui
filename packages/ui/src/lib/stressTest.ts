@@ -1,5 +1,4 @@
 import { useTasksStore } from '@/stores/useTasksStore';
-import { useScheduleStore } from '@/stores/useScheduleStore';
 import { useMemoryStore } from '@/stores/useMemoryStore';
 import { useDashboardStore } from '@/stores/useDashboardStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -41,19 +40,6 @@ function generateTasks(count: number) {
     updatedAt: new Date(Date.now() - Math.random() * 7 * 86400000).toISOString(),
     source: 'web' as const,
     history: [{ timestamp: new Date().toISOString(), action: 'Created' }],
-  }));
-}
-
-function generateScheduleEvents(count: number) {
-  return Array.from({ length: count }, (_, i) => ({
-    id: uid(),
-    title: `Scheduled job #${i + 1}`,
-    prompt: `Auto-generated schedule event ${i + 1}`,
-    type: (Math.random() > 0.5 ? 'recurring' : 'one-time') as 'recurring' | 'one-time',
-    cron: Math.random() > 0.5 ? '0 9 * * 1-5' : undefined,
-    datetime: Math.random() > 0.5 ? new Date(Date.now() + Math.random() * 30 * 86400000).toISOString() : undefined,
-    status: pick(['active', 'paused', 'completed'] as const),
-    createdAt: new Date(Date.now() - Math.random() * 60 * 86400000).toISOString(),
   }));
 }
 
@@ -129,7 +115,6 @@ export function runStressTest(config: {
 } = {}) {
   const {
     tasks = 2000,
-    events = 500,
     relations = 3000,
     projects: projectCount = 20,
     sessionsPerProject = 50,
@@ -138,10 +123,6 @@ export function runStressTest(config: {
   console.time('[stress] Tasks');
   useTasksStore.setState({ tasks: generateTasks(tasks), _lastFetchedAt: Date.now() });
   console.timeEnd('[stress] Tasks');
-
-  console.time('[stress] Schedule');
-  useScheduleStore.setState({ events: generateScheduleEvents(events), _lastFetchedAt: Date.now() });
-  console.timeEnd('[stress] Schedule');
 
   console.time('[stress] Memory');
   useMemoryStore.setState({ relations: generateMemoryRelations(relations), _lastGraphFetch: Date.now() });
@@ -175,7 +156,7 @@ export function runStressTest(config: {
   console.timeEnd('[stress] Dashboard');
 
   const totalSessions = sessionList.length;
-  console.log(`[stress] Injected: ${projectCount} projects, ${totalSessions} sessions, ${tasks} tasks, ${events} events, ${relations} relations`);
+  console.log(`[stress] Injected: ${projectCount} projects, ${totalSessions} sessions, ${tasks} tasks, ${relations} relations`);
 }
 
 if (typeof window !== 'undefined') {

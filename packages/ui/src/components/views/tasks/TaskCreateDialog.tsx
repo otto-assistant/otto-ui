@@ -58,6 +58,7 @@ export const TaskCreateDialog: React.FC = () => {
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [startImmediately, setStartImmediately] = useState<boolean>(false);
+  const [hidden, setHidden] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Reset all form state whenever the dialog is freshly opened.
@@ -75,6 +76,7 @@ export const TaskCreateDialog: React.FC = () => {
       setSelectedAgent('');
       setSelectedModel('');
       setStartImmediately(false);
+      setHidden(false);
       setIsSubmitting(false);
     }
   }, [open, activeProjectId]);
@@ -112,6 +114,7 @@ export const TaskCreateDialog: React.FC = () => {
         agentName: effectiveAgent || null,
         modelId: effectiveModel || null,
         providerId: effectiveProvider || null,
+        hidden: ownerType !== 'user' ? hidden : false,
       });
 
       // For agent/cron tasks: start the session now if explicitly requested OR if no due time was set.
@@ -309,6 +312,23 @@ export const TaskCreateDialog: React.FC = () => {
                   Start the chat session now (ignore the scheduled time)
                 </label>
               )}
+
+              <label className="flex items-start gap-2 text-xs text-foreground">
+                <input
+                  type="checkbox"
+                  checked={hidden}
+                  onChange={(e) => setHidden(e.target.checked)}
+                  className="mt-0.5 h-3 w-3"
+                />
+                <span>
+                  Run hidden
+                  <span className="block text-[10px] text-muted-foreground">
+                    The agent's conversation is not shown in the sidebar. The agent can
+                    start a reply with <code className="rounded bg-muted px-1">REPORT:</code> to
+                    surface the conversation when it wants to share results.
+                  </span>
+                </span>
+              </label>
 
               <p className="text-[10px] text-muted-foreground">
                 Defaults come from Persona → project → global settings. Override here for this task only.

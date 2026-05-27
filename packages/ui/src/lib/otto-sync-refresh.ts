@@ -4,7 +4,6 @@ import { useTasksStore } from '../stores/useTasksStore';
 import { useDashboardStore } from '../stores/useDashboardStore';
 import { useMemoryStore } from '../stores/useMemoryStore';
 import { usePersonaStore } from '../stores/usePersonaStore';
-import { useScheduleStore } from '../stores/useScheduleStore';
 
 const PERSONA_HINT_KEYS = ['agent', 'agentId', 'agentName', 'name', 'id'] as const;
 
@@ -175,7 +174,8 @@ export function createDefaultOttoSyncGateways(): OttoSyncRefreshGateways {
       selectAgent: (name) => usePersonaStore.getState().selectAgent(name),
     },
     schedule: {
-      fetchSchedule: () => useScheduleStore.getState().fetchSchedule(),
+      // Schedule is now the same data as Tasks — refresh both via fetchTasks.
+      fetchSchedule: () => useTasksStore.getState().fetchTasks(),
     },
   };
 }

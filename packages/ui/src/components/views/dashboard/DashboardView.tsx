@@ -8,7 +8,6 @@ import { RecentSessions } from "./RecentSessions";
 import { RunningTasks } from "./RunningTasks";
 import { useDashboardStore } from "@/stores/useDashboardStore";
 import { useTasksStore } from "@/stores/useTasksStore";
-import { useScheduleStore } from "@/stores/useScheduleStore";
 import { useMemoryStore } from "@/stores/useMemoryStore";
 import { usePersonaStore } from "@/stores/usePersonaStore";
 import { useSessionUIStore } from "@/sync/session-ui-store";
@@ -41,7 +40,8 @@ export const DashboardView: React.FC = () => {
   // Live data from actual stores for accurate stats
   const taskCount = useTasksStore((s) => s.tasks.length);
   const tasksDone = useTasksStore((s) => s.tasks.filter(t => t.status === 'done').length);
-  const scheduleCount = useScheduleStore((s) => s.events.length);
+  // Schedule = tasks with a due date. They share the same data model.
+  const scheduleCount = useTasksStore((s) => s.tasks.filter(t => !!t.dueAt).length);
   const memoryCount = useMemoryStore((s) => s.relations.length);
   const personaAgent = usePersonaStore((s) => s.selectedAgent);
   const liveSessions = useAllLiveSessions();

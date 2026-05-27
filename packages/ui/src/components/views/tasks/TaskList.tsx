@@ -21,6 +21,7 @@ export const TaskList: React.FC = () => {
       case 'my_tasks': return t.ownerType === 'user';
       case 'agent': return t.ownerType === 'agent';
       case 'scheduled': return t.ownerType === 'cron';
+      case 'hidden': return !!t.hidden;
       case 'done': return t.status === 'done';
     }
   }), [tasks, filter]);

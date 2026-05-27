@@ -52,6 +52,7 @@ import { useSelectionStore } from "./selection-store"
 import { useViewportStore } from "./viewport-store"
 import { useSessionWorktreeStore } from "./session-worktree-store"
 import { getAttachedSessionDirectory } from "./session-worktree-contract"
+import { useHiddenSessionsStore } from "@/stores/useHiddenSessionsStore"
 
 export type { AttachedFile }
 
@@ -717,8 +718,18 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         get().resolvePendingDraftWorktreeTarget(draft.pendingWorktreeRequestId, draftDirectoryOverride)
       }
 
+      const pendingHiddenTaskId = useHiddenSessionsStore.getState().consumePendingHiddenTask()
+
       const created = await get().createSession(draft.title, draftDirectoryOverride, draft.parentID ?? null)
       if (!created?.id) throw new Error("Failed to create session")
+
+      if (pendingHiddenTaskId) {
+        useHiddenSessionsStore.getState().hideSession(created.id, pendingHiddenTaskId)
+        // Record the session id back on the task so the user can surface it later.
+        void import("@/stores/useTasksStore").then(({ useTasksStore }) => {
+          useTasksStore.getState().updateTask(pendingHiddenTaskId, { lastSessionId: created.id })
+        }).catch(() => { /* ignored */ })
+      }
 
       persistDraftTarget({
         projectId: draftProjectId,
@@ -749,7 +760,9 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       const createdDirectory = normalizePath(draftDirectoryOverride ?? created.directory ?? null)
 
       get().closeNewSessionDraft()
-      get().setCurrentSession(created.id, createdDirectory)
+      if (!pendingHiddenTaskId) {
+        get().setCurrentSession(created.id, createdDirectory)
+      }
 
       if (draftTargetFolderId) {
         const scopeKey = draftDirectoryOverride || created.directory || null

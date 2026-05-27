@@ -17,6 +17,7 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { getSafeStorage } from '@/stores/utils/safeStorage';
 import { useGitStore, useGitAllBranches, useGitRepoStatusMap } from '@/stores/useGitStore';
+import { useHiddenSessionsStore } from '@/stores/useHiddenSessionsStore';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { NewWorktreeDialog } from './NewWorktreeDialog';
 import { ScheduledTasksDialog } from './ScheduledTasksDialog';
@@ -365,6 +366,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     [availableWorktreesByProject, projects],
   );
 
+  const hiddenSessionIds = useHiddenSessionsStore((s) => s.hiddenSessions);
+
   const sessions = React.useMemo(() => {
     const liveById = new Map(liveSessions.map((session) => [session.id, session]));
     const merged = globalActiveSessions.map((session) => liveById.get(session.id) ?? session);
@@ -377,8 +380,13 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       merged.push(session);
     });
 
-    return merged.filter((session) => isKnownActiveSessionDirectory(session, knownSessionDirectories));
-  }, [globalActiveSessions, knownSessionDirectories, liveSessions]);
+    const hiddenIdSet = new Set(hiddenSessionIds);
+
+    return merged.filter((session) => {
+      if (hiddenIdSet.has(session.id)) return false;
+      return isKnownActiveSessionDirectory(session, knownSessionDirectories);
+    });
+  }, [globalActiveSessions, knownSessionDirectories, liveSessions, hiddenSessionIds]);
 
   // Keep a ref of the latest live sessions so async helpers can read it
   // without re-running expensive effects on every session SSE event.

@@ -1,10 +1,13 @@
 import { useEffect } from 'react';
 import { toast } from '@/components/ui/toast';
+import type { Part, TextPart } from "@opencode-ai/sdk/v2/client"
 import { useTasksStore, type Task } from '@/stores/useTasksStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useHiddenSessionsStore } from '@/stores/useHiddenSessionsStore';
+import { getSyncMessages, getSyncParts } from '@/sync/sync-refs';
 
 const POLL_INTERVAL_MS = 15_000;
 const GRACE_PERIOD_MS = 60_000;
@@ -39,7 +42,12 @@ const buildAgentPrompt = (task: Task): string => {
     lines.push(`**Scheduled for:** ${new Date(task.dueAt).toLocaleString()}`);
   }
   lines.push('');
-  lines.push('Please work on this task now.');
+  if (task.hidden) {
+    lines.push('**Mode:** Hidden — this conversation is not visible to the user.');
+    lines.push('Work silently. When you want the user to see a result, start your reply with `REPORT:` and the conversation will be surfaced automatically.');
+  } else {
+    lines.push('Please work on this task now.');
+  }
   return lines.join('\n');
 };
 
@@ -103,6 +111,50 @@ export const triggerTaskNow = (task: Task): void => {
     } catch { /* config may not be ready */ }
   }
 
+  if (task.hidden) {
+    // Tag the next session-create event so we can hide the resulting session.
+    useHiddenSessionsStore.getState().setPendingHiddenTask(task.id);
+    // Stay on the current view; do not navigate to chat.
+    openNewSessionDraft({
+      title: `[Hidden] Task: ${task.title}`,
+      initialPrompt: buildAgentPrompt(task),
+      directoryOverride: directory,
+      syntheticParts: task.description
+        ? [{ text: `Task details:\n${task.description}\n\nPriority: ${task.priority}`, synthetic: true }]
+        : undefined,
+    });
+    // Auto-send the prompt so the agent runs in the background without UI.
+    const cfg = useConfigStore.getState();
+    const providerID = task.providerId ?? cfg.currentProviderId ?? '';
+    const modelID = task.modelId ?? cfg.currentModelId ?? '';
+    const agent = task.agentName ?? cfg.currentAgentName ?? undefined;
+    if (providerID && modelID) {
+      void useSessionUIStore
+        .getState()
+        .sendMessage(buildAgentPrompt(task), providerID, modelID, agent ?? undefined)
+        .catch((err) => {
+          console.error('[useTaskScheduler] Failed to start hidden task session:', err);
+          // If sending failed, clear the pending hidden tag so it doesn't apply later.
+          useHiddenSessionsStore.getState().setPendingHiddenTask(null);
+        });
+    } else {
+      // No provider/model configured — clear pending tag, show toast.
+      useHiddenSessionsStore.getState().setPendingHiddenTask(null);
+      toast.warning(`Cannot start hidden task: ${task.title}`, {
+        description: 'No provider/model configured. Open Settings → Providers to configure one.',
+        duration: 8000,
+      });
+      return;
+    }
+    toast.info(`Running hidden task: ${task.title}`, {
+      description: task.agentName
+        ? `Agent: ${task.agentName} · conversation is hidden until a REPORT is provided`
+        : 'Conversation is hidden until a REPORT is provided',
+      duration: 6000,
+    });
+    return;
+  }
+
   setActiveView('chat');
   openNewSessionDraft({
     title: `Task: ${task.title}`,
@@ -120,7 +172,56 @@ export const triggerTaskNow = (task: Task): void => {
 };
 
 /**
- * Polls the task list on a fixed interval and fires due tasks.
+ * Inspect text emitted in hidden sessions and surface them if the agent
+ * starts a reply with `REPORT:` (or `<report>` / `[REPORT]`). Surfacing
+ * removes the session from the hidden set so it reappears in the sidebar
+ * and notifies the user via a toast.
+ */
+const checkHiddenSessionsForReports = (): void => {
+  const hidden = useHiddenSessionsStore.getState();
+  if (hidden.hiddenSessions.length === 0) return;
+  const tasks = useTasksStore.getState().tasks;
+  const taskBySessionId = new Map<string, Task>();
+  for (const t of tasks) {
+    if (t.lastSessionId) taskBySessionId.set(t.lastSessionId, t);
+  }
+  for (const sessionId of [...hidden.hiddenSessions]) {
+    const messages = getSyncMessages(sessionId);
+    if (!messages || messages.length === 0) continue;
+    let surfaced = false;
+    for (const msg of messages) {
+      if (msg.role !== 'assistant') continue;
+      const parts = getSyncParts(msg.id);
+      for (const p of parts as Part[]) {
+        if (p.type !== 'text') continue;
+        const text = (p as TextPart).text ?? '';
+        if (hidden.maybeSurfaceOnReport(sessionId, text)) {
+          surfaced = true;
+          break;
+        }
+      }
+      if (surfaced) break;
+    }
+    if (surfaced) {
+      const task = taskBySessionId.get(sessionId);
+      toast.info(`Agent surfaced a report${task ? ` from task "${task.title}"` : ''}`, {
+        description: 'The previously-hidden conversation is now visible in the session sidebar.',
+        duration: 8000,
+        action: {
+          label: 'Open',
+          onClick: () => {
+            useUIStore.getState().setActiveView('chat');
+            useSessionUIStore.getState().setCurrentSession(sessionId);
+          },
+        },
+      });
+    }
+  }
+};
+
+/**
+ * Polls the task list on a fixed interval and fires due tasks. Also
+ * inspects hidden-task sessions for `REPORT:` to auto-surface them.
  * Mount this once at the app shell.
  */
 export const useTaskScheduler = (): void => {
@@ -138,6 +239,7 @@ export const useTaskScheduler = (): void => {
           markTaskTriggered(task.id);
         }
       }
+      checkHiddenSessionsForReports();
     };
 
     // Fire any tasks that became due while the user was away, then schedule polling.

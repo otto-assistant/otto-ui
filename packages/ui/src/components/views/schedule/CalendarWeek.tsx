@@ -1,12 +1,11 @@
 import React from "react";
-import type { ScheduleEvent } from "@/stores/useScheduleStore";
-import { ScheduleEventCard } from "./ScheduleEventCard";
+import type { Task } from "@/stores/useTasksStore";
+import { ScheduleTaskCard } from "./ScheduleEventCard";
 
 interface CalendarWeekProps {
   currentDate: Date;
-  events: ScheduleEvent[];
+  tasks: Task[];
   onNavigate: (delta: number) => void;
-  onDelete: (id: string) => void;
 }
 
 function getWeekDates(date: Date): Date[] {
@@ -19,21 +18,26 @@ function getWeekDates(date: Date): Date[] {
   });
 }
 
-export const CalendarWeek: React.FC<CalendarWeekProps> = ({ currentDate, events, onNavigate, onDelete }) => {
+function isOnDate(task: Task, date: Date): boolean {
+  if (!task.dueAt) return false;
+  const d = new Date(task.dueAt);
+  if (d.toDateString() === date.toDateString()) return true;
+  if (date.getTime() < d.getTime()) return false;
+  switch (task.recurrence) {
+    case "daily":
+      return true;
+    case "weekly":
+      return date.getDay() === d.getDay();
+    case "monthly":
+      return date.getDate() === d.getDate();
+    default:
+      return false;
+  }
+}
+
+export const CalendarWeek: React.FC<CalendarWeekProps> = ({ currentDate, tasks, onNavigate }) => {
   const weekDates = getWeekDates(currentDate);
   const today = new Date();
-
-  const getEventsForDate = (date: Date): ScheduleEvent[] => {
-    return events.filter((e) => {
-      if (e.datetime) {
-        const d = new Date(e.datetime);
-        return d.toDateString() === date.toDateString();
-      }
-      // Show recurring events on all days (simplified)
-      if (e.type === "recurring") return true;
-      return false;
-    });
-  };
 
   const weekLabel = `${weekDates[0].toLocaleDateString("default", { month: "short", day: "numeric" })} – ${weekDates[6].toLocaleDateString("default", { month: "short", day: "numeric", year: "numeric" })}`;
 
@@ -52,7 +56,7 @@ export const CalendarWeek: React.FC<CalendarWeekProps> = ({ currentDate, events,
       <div className="grid grid-cols-7 gap-2 max-md:grid-cols-1">
         {weekDates.map((date) => {
           const isToday = date.toDateString() === today.toDateString();
-          const dayEvents = getEventsForDate(date);
+          const dayTasks = tasks.filter((t) => isOnDate(t, date));
           return (
             <div
               key={date.toISOString()}
@@ -66,8 +70,8 @@ export const CalendarWeek: React.FC<CalendarWeekProps> = ({ currentDate, events,
                 </span>
               </div>
               <div className="flex flex-col gap-1">
-                {dayEvents.map((e) => (
-                  <ScheduleEventCard key={e.id} event={e} compact onDelete={onDelete} />
+                {dayTasks.map((t) => (
+                  <ScheduleTaskCard key={t.id} task={t} compact />
                 ))}
               </div>
             </div>

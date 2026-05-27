@@ -8,7 +8,7 @@ import { getSafeStorage } from './utils/safeStorage';
 export type TaskPriority = 'high' | 'medium' | 'low';
 export type TaskStatus = 'pending' | 'in_progress' | 'done' | 'cancelled';
 export type TaskOwnerType = 'user' | 'agent' | 'cron';
-export type TaskFilter = 'all' | 'my_tasks' | 'agent' | 'scheduled' | 'done';
+export type TaskFilter = 'all' | 'my_tasks' | 'agent' | 'scheduled' | 'hidden' | 'done';
 export type TaskSource = 'web' | 'discord' | 'cli';
 export type TaskRecurrence = 'none' | 'daily' | 'weekly' | 'monthly';
 
@@ -37,6 +37,15 @@ export interface Task {
   agentName?: string | null;
   modelId?: string | null;
   providerId?: string | null;
+  /**
+   * If true, the task runs as a *hidden* conversation with the agent — the
+   * generated session is not shown in the session sidebar. The agent can
+   * choose to surface the conversation by prefixing its reply with
+   * `REPORT:` (handled by `useHiddenSessionsStore.maybeSurfaceOnReport`).
+   */
+  hidden?: boolean;
+  /** Session ID created from this task's last trigger (used to surface hidden runs). */
+  lastSessionId?: string | null;
   history: { timestamp: string; action: string }[];
 }
 
@@ -166,6 +175,8 @@ function normalizeTask(input: Partial<Task> & { id?: string; title?: string }): 
     agentName: input.agentName ?? null,
     modelId: input.modelId ?? null,
     providerId: input.providerId ?? null,
+    hidden: input.hidden === true,
+    lastSessionId: typeof input.lastSessionId === 'string' && input.lastSessionId ? input.lastSessionId : null,
     history: Array.isArray(input.history) ? input.history : [
       { timestamp: new Date().toISOString(), action: 'Created' },
     ],
