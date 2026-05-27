@@ -1108,11 +1108,15 @@ function BridgePanel({
         </label>
       </div>
       <div className="text-[11px] text-muted-foreground leading-snug">
-        When on, every non-command message posted to a {type === 'telegram' ? 'chat / topic' : 'channel'} mapped
-        to a project is forwarded to an OpenCode session in that project's directory.
-        OpenCode's streaming response is edited back into the same{' '}
-        {type === 'telegram' ? 'chat' : 'channel'} so the conversation is shared with the
-        web UI. Restart the listener after toggling this for it to take effect.
+        When on, every non-command message posted to a{' '}
+        {type === 'telegram' ? 'chat / topic' : 'channel'} is forwarded to an OpenCode session
+        in the matching project's directory. The bridge{' '}
+        <strong>auto-resolves project ↔ {type === 'telegram' ? 'chat' : 'channel'}</strong> by
+        slug-matching the {type === 'telegram' ? 'chat title' : 'channel name'} against your
+        project labels — no manual mapping needed. OpenCode's streaming response is edited back
+        into the same {type === 'telegram' ? 'chat' : 'channel'}, so the conversation is shared
+        with the web UI. (Manual mapping is still available below if you want a specific
+        override; restart the listener after toggling.)
       </div>
       {!bridgeStatus.enabled && (
         <div className="text-[10px] text-yellow-700 dark:text-yellow-400">

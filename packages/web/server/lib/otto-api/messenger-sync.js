@@ -30,6 +30,10 @@ export function createMessengerSyncRouter({
   globalEventHub = null,
   buildOpenCodeUrl = null,
   getOpenCodeAuthHeaders = null,
+  // Async () => Project[] — used by the bridge for automatic channel/topic
+  // → project resolution by slug, so the user doesn't have to fill in a
+  // Channel/Topic Mapping by hand.
+  listProjects = null,
 }) {
   const router = Router();
 
@@ -42,6 +46,7 @@ export function createMessengerSyncRouter({
           buildOpenCodeUrl,
           getOpenCodeAuthHeaders,
           broadcastEvent,
+          listProjects,
         })
       : null;
   if (bridge) {

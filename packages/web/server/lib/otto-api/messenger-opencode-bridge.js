@@ -71,17 +71,57 @@ function renderPart(part) {
   return '';
 }
 
+function slugify(s) {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Best-effort channel→project resolution for cases where the listener
+ * didn't pre-resolve. We slug-match the messenger surface's name against
+ * each project's label and path-leaf.
+ */
+function pickProjectForName(projects, name) {
+  if (!name) return null;
+  const wanted = slugify(name);
+  if (!wanted) return null;
+  for (const p of projects) {
+    const candidates = [
+      slugify(p.label ?? ''),
+      slugify((p.path ?? '').split('/').pop() ?? ''),
+      slugify(p.id ?? ''),
+    ];
+    if (candidates.includes(wanted)) return p;
+  }
+  // Looser: prefix or substring match (handles "my-project-discord-channel").
+  for (const p of projects) {
+    const candidates = [
+      slugify(p.label ?? ''),
+      slugify((p.path ?? '').split('/').pop() ?? ''),
+    ].filter(Boolean);
+    if (candidates.some((c) => wanted.includes(c) || c.includes(wanted))) return p;
+  }
+  return null;
+}
+
 export function createMessengerOpencodeBridge({
   globalEventHub,
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
   broadcastEvent,
   store,
+  listProjects,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
   // sessionId → { type, token, channelId, threadId, messageId, content, lastFlushAt, scheduled, finalized }
   const inflight = new Map();
+  // Cache resolved names (channel/topic) → ttl so we don't hit the messenger
+  // API for every inbound message in a long conversation.
+  const nameCache = new Map(); // key: "discord:channelId" | "telegram:chatId" → { name, expiresAt }
+  const NAME_TTL_MS = 5 * 60_000;
 
   // sessionId → buffer of part renderings keyed by partId so a single tool's
   // status transitions update in place rather than appending duplicates.
@@ -198,6 +238,79 @@ export function createMessengerOpencodeBridge({
     return true;
   }
 
+  // Best-effort fetch of a channel/topic's human name, used for slug-matching
+  // against project labels when the listener didn't pre-resolve a project.
+  async function lookupTargetName({ type, token, channelId, threadId }) {
+    const key = `${type}:${channelId}${threadId ? `:${threadId}` : ''}`;
+    const cached = nameCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.name;
+    let name = null;
+    try {
+      if (type === 'discord') {
+        // Threads are channels in Discord, so getChannel works for both.
+        const lookupId = threadId ?? channelId;
+        const r = await fetch(
+          `https://discord.com/api/v10/channels/${encodeURIComponent(lookupId)}`,
+          { headers: { Authorization: `Bot ${token}` } },
+        );
+        if (r.ok) {
+          const data = await r.json();
+          name = data.name ?? null;
+        }
+      } else if (type === 'telegram') {
+        // No forum-topic name endpoint in Bot API. Best we get is the
+        // supergroup title via getChat. For non-forum chats that's the
+        // chat title; for forum chats the user's topic-channel mapping is
+        // what slug-matches anyway, so fall back to the chat title.
+        const r = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: channelId }),
+        });
+        const data = await r.json();
+        if (data.ok) {
+          name = data.result?.title ?? data.result?.username ?? null;
+        }
+      }
+    } catch {
+      // Network/REST failures here are not fatal — we'll just fall back to
+      // the first project.
+    }
+    nameCache.set(key, { name, expiresAt: Date.now() + NAME_TTL_MS });
+    return name;
+  }
+
+  /**
+   * Automatic project resolution — used when the listener didn't pre-resolve.
+   * Strategy:
+   *   1. Fetch the channel/topic name via the messenger REST API.
+   *   2. Slug-match against the user's project list.
+   *   3. If still no match, fall back to the first project (single-project
+   *      installs are the common case).
+   * Returns `{ projectPath, projectLabel }` or null.
+   */
+  async function autoResolveProject({ type, token, channelId, threadId }) {
+    if (!listProjects) return null;
+    let projects = [];
+    try {
+      projects = (await listProjects()) ?? [];
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(projects) || projects.length === 0) return null;
+
+    const name = await lookupTargetName({ type, token, channelId, threadId });
+    const matched = pickProjectForName(projects, name);
+    const project = matched ?? projects[0];
+    if (!project?.path) return null;
+    return {
+      projectPath: project.path,
+      projectLabel: project.label ?? project.path.split('/').pop() ?? project.path,
+      autoResolved: !matched ? 'fallback-first' : 'slug-match',
+      resolvedFromName: name,
+    };
+  }
+
   // Session resolution -----------------------------------------------------
   async function resolveOrCreateSession({ type, token, channelId, threadId, projectPath, projectLabel }) {
     const hash = tokenHash(token);
@@ -205,22 +318,48 @@ export function createMessengerOpencodeBridge({
     const existing = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: key });
     if (existing?.sessionId) {
       bridgeStore.touch({ type, botTokenHash: hash, targetKey: key });
-      return existing.sessionId;
+      return { sessionId: existing.sessionId, projectPath: existing.projectPath, autoResolved: 'cached' };
     }
-    const title =
-      projectLabel
-        ? `Otto · ${type} · ${projectLabel}`
-        : `Otto · ${type} · ${channelId}${threadId ? `:${threadId}` : ''}`;
-    const sessionId = await createOpencodeSession({ projectPath, title });
+
+    // Auto-resolve project from channel/topic name when the listener didn't
+    // supply one — the user shouldn't have to wire up channel mappings by hand.
+    let effectivePath = projectPath ?? null;
+    let effectiveLabel = projectLabel ?? null;
+    let autoResolved = null;
+    let resolvedFromName = null;
+    if (!effectivePath) {
+      const auto = await autoResolveProject({ type, token, channelId, threadId });
+      if (auto) {
+        effectivePath = auto.projectPath;
+        effectiveLabel = auto.projectLabel;
+        autoResolved = auto.autoResolved;
+        resolvedFromName = auto.resolvedFromName;
+      }
+    }
+
+    const title = effectiveLabel
+      ? `Otto · ${type} · ${effectiveLabel}`
+      : `Otto · ${type} · ${channelId}${threadId ? `:${threadId}` : ''}`;
+    const sessionId = await createOpencodeSession({ projectPath: effectivePath, title });
     bridgeStore.bind({
       type,
       botTokenHash: hash,
       targetKey: key,
       sessionId,
-      projectPath,
-      projectLabel,
+      projectPath: effectivePath,
+      projectLabel: effectiveLabel,
     });
-    return sessionId;
+    broadcastEvent?.('messenger.bridge.session_bound', {
+      type,
+      channelId,
+      threadId,
+      sessionId,
+      projectPath: effectivePath,
+      projectLabel: effectiveLabel,
+      autoResolved,
+      resolvedFromName,
+    });
+    return { sessionId, projectPath: effectivePath, autoResolved };
   }
 
   // Outbound (OpenCode → messenger) ---------------------------------------
@@ -365,8 +504,9 @@ export function createMessengerOpencodeBridge({
     ensureSubscribed();
 
     let sessionId;
+    let effectiveProjectPath = projectPath ?? null;
     try {
-      sessionId = await resolveOrCreateSession({
+      const resolved = await resolveOrCreateSession({
         type,
         token,
         channelId,
@@ -374,6 +514,8 @@ export function createMessengerOpencodeBridge({
         projectPath,
         projectLabel,
       });
+      sessionId = resolved.sessionId;
+      effectiveProjectPath = resolved.projectPath ?? effectiveProjectPath;
     } catch (err) {
       return { ok: false, error: err?.message ?? 'session resolve failed' };
     }
@@ -409,7 +551,7 @@ export function createMessengerOpencodeBridge({
     });
 
     try {
-      await sendOpencodePrompt({ sessionId, projectPath, text });
+      await sendOpencodePrompt({ sessionId, projectPath: effectiveProjectPath, text });
     } catch (err) {
       const errMsg = err?.message ?? 'prompt failed';
       // Surface the failure in the same starter message so the user sees it.
