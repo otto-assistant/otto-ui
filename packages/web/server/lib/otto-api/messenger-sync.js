@@ -508,6 +508,7 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
       let threadId = null;
       let threadName = null;
       let threadCreated = false;
+      let threadError = null;
 
       if (channel && !entryError) {
         // Post the per-project status message.
@@ -534,7 +535,9 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
         }
 
         // Optional: start a thread from that message so details stay out of
-        // the main channel feed.
+        // the main channel feed. We keep thread errors SEPARATE from
+        // entryError so the row can render "channel ✓ message ✓ thread ✗"
+        // instead of dropping the whole project on the floor.
         if (!entryError && messageId && createThreads !== false) {
           threadName = `Otto sync — ${new Date().toISOString().slice(0, 10)}`;
           try {
@@ -554,13 +557,22 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
               threadId = tJson.id ?? null;
               threadCreated = true;
             } else {
-              // Thread creation failure is not fatal — channel + message succeeded.
               const text = await tResp.text();
-              entryError =
-                entryError ?? `Thread skipped: Discord ${tResp.status} — ${friendlyDiscordError(tResp.status, text)}`;
+              const hint =
+                tResp.status === 403
+                  ? 'Bot lacks Create Public Threads + Send Messages in Threads on this channel. ' +
+                    'Either grant the bot Administrator or check the channel-level permission overrides ' +
+                    '(server-level Administrator can still be overridden per-channel).'
+                  : tResp.status === 400
+                    ? "Discord rejected the thread creation — common causes: 'auto_archive_duration' " +
+                      'not allowed for this server tier, channel is a forum/announcement type that ' +
+                      "doesn't accept message-threads, or the channel was just created and isn't fully " +
+                      'visible yet (retry once).'
+                    : friendlyDiscordError(tResp.status, text);
+              threadError = `Discord: ${tResp.status} — ${hint}`;
             }
           } catch (err) {
-            entryError = entryError ?? `Thread skipped: ${err?.message ?? 'thread create failed'}`;
+            threadError = err?.message ?? 'thread create failed';
           }
         }
       }
@@ -575,7 +587,9 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
         threadName,
         created,
         threadCreated,
+        threadRequested: createThreads !== false,
         error: entryError,
+        threadError,
       });
     }
 
@@ -820,17 +834,66 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
       return res.json({ ok: false, checks });
     }
 
-    // Intents reminder — we can't read them from REST, but we can flag the
-    // requirement for the gateway listener to work.
-    push({
-      id: 'intents',
-      ok: true,
-      severity: 'info',
-      title: 'Message Content intent must be enabled in Developer Portal',
-      detail:
-        "Otherwise the gateway will close with code 4014 and the listener won't see any non-mention messages.",
-      fix: 'Developer Portal → your app → Bot → "Privileged Gateway Intents" → enable "MESSAGE CONTENT INTENT" → Save.',
-    });
+    // Intents check — REST doesn't expose intent state, so we infer from the
+    // *live* listener. When the listener is currently connected the IDENTIFY
+    // succeeded → MESSAGE_CONTENT is on. When it has actually delivered a
+    // raw MESSAGE_CREATE event we have the strongest possible proof.
+    const live = discordListener.inspect ? discordListener.inspect(token) : null;
+    if (live?.connected) {
+      if ((live.totalRawMessages ?? 0) > 0) {
+        push({
+          id: 'intents',
+          ok: true,
+          severity: 'ok',
+          title: 'Message Content intent verified by live gateway',
+          detail: `Listener has received ${live.totalRawMessages} raw MESSAGE_CREATE event${live.totalRawMessages === 1 ? '' : 's'}${live.lastRawMessageGuildId ? ` (most recent from guild ${live.lastRawMessageGuildId})` : ''}.`,
+        });
+        // Surface the guild-mismatch case if the user enabled scopeToGuild.
+        if (
+          live.scopeToGuild &&
+          live.guildId &&
+          live.lastRawMessageGuildId &&
+          live.lastRawMessageGuildId !== live.guildId
+        ) {
+          push({
+            id: 'guild-mismatch',
+            ok: false,
+            severity: 'warn',
+            title: 'Saved Server ID does not match the guild the bot is hearing from',
+            detail: `Listener filtered ${live.filteredOutCount} message${live.filteredOutCount === 1 ? '' : 's'} from guild ${live.lastFilteredGuildId ?? '?'} because the saved Server ID is ${live.guildId}.`,
+            fix: 'Update the Server (Guild) ID to match the server you want, or disable scope-to-guild so messages from every server the bot is in reach the UI.',
+          });
+        }
+      } else {
+        push({
+          id: 'intents',
+          ok: true,
+          severity: 'ok',
+          title: 'Gateway IDENTIFY accepted',
+          detail:
+            'Listener is connected (no 4014). MESSAGE_CONTENT intent is requested and accepted — post a message in any channel the bot can see to confirm end-to-end.',
+        });
+      }
+    } else if (live?.lastError && live.lastError.includes('4014')) {
+      push({
+        id: 'intents',
+        ok: false,
+        severity: 'error',
+        title: 'Message Content intent NOT enabled in Developer Portal',
+        detail: `Gateway closed with code 4014: ${live.lastError}`,
+        fix: 'Developer Portal → your app → Bot → "Privileged Gateway Intents" → enable "MESSAGE CONTENT INTENT" → Save. Then restart the listener.',
+      });
+    } else {
+      push({
+        id: 'intents',
+        ok: true,
+        severity: 'info',
+        title: 'Message Content intent must be enabled in Developer Portal',
+        detail:
+          "Otherwise the gateway will close with code 4014 and the listener won't see any non-mention messages. (Start the listener so this check can verify it live.)",
+        fix: 'Developer Portal → your app → Bot → "Privileged Gateway Intents" → enable "MESSAGE CONTENT INTENT" → Save.',
+      });
+    }
 
     // Guild access
     if (guildId) {

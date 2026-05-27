@@ -90,7 +90,12 @@ export interface MessengerConnection {
     threadName: string | null;
     created: boolean;
     threadCreated: boolean;
+    /** True when the request asked for a thread (toggle was on at sync time). */
+    threadRequested?: boolean;
+    /** Channel / message-level error — fatal for this row. */
     error: string | null;
+    /** Thread-level error only — channel + message still succeeded. */
+    threadError?: string | null;
   }[];
 
   // Telegram long-poll listener state (set after start/status calls)
@@ -109,8 +114,16 @@ export interface MessengerConnection {
   discordListenerLastUpdateAt?: number | null;
   discordListenerTotalReceived?: number;
   discordListenerTotalReplied?: number;
+  /** Every MESSAGE_CREATE the gateway delivered, even those filtered out. */
+  discordListenerTotalRawMessages?: number;
+  discordListenerLastRawMessageAt?: number | null;
+  discordListenerLastRawMessageGuildId?: string | null;
+  discordListenerFilteredOutCount?: number;
+  discordListenerLastFilteredGuildId?: string | null;
   discordListenerError?: string | null;
   discordListenerAutoReply?: boolean;
+  /** When true, scope the listener strictly to the saved Server (Guild) ID. */
+  discordListenerScopeToGuild?: boolean;
 
   // Sync config
   syncMode: SyncMode;
@@ -573,6 +586,8 @@ export const useMessengerStore = create<MessengerState>()(
           }
 
           const errored = results.filter((r) => r.error);
+          const threadFailed = results.filter((r) => r.threadError);
+          const threadRequested = results.filter((r) => r.threadRequested).length;
           const createdCh = results.filter((r) => r.created).length;
           const createdTh = results.filter((r) => r.threadCreated).length;
           const postedMsgs = results.filter((r) => r.messageId).length;
@@ -582,20 +597,28 @@ export const useMessengerStore = create<MessengerState>()(
           if (postedMsgs > 0)
             parts.push(`${postedMsgs} message${postedMsgs === 1 ? '' : 's'} posted`);
           if (createdTh > 0) parts.push(`${createdTh} thread${createdTh === 1 ? '' : 's'} opened`);
+          // Be honest when threads were *requested* but didn't open — the
+          // previous version silently swallowed this case which read as
+          // "sync complete" but produced zero threads.
+          if (threadRequested > 0 && threadFailed.length > 0) {
+            parts.push(`${threadFailed.length}/${threadRequested} thread${threadRequested === 1 ? '' : 's'} failed`);
+          }
           if (errored.length > 0)
             parts.push(`${errored.length} error${errored.length === 1 ? '' : 's'}`);
           const summaryMsg = parts.length > 0 ? parts.join(', ') + ' ✓' : 'Sync sent ✓';
 
+          const hasAnyError = errored.length > 0 || threadFailed.length > 0;
+          const firstErrorMsg = errored[0]?.error ?? threadFailed[0]?.threadError;
+
           get().updateConnection('discord', {
             lastSyncAt: Date.now(),
-            lastSyncStatus: errored.length > 0 ? 'error' : 'ok',
-            lastSyncMessage:
-              errored.length > 0
-                ? `${summaryMsg} — first error: ${errored[0].error}`
-                : summaryMsg,
+            lastSyncStatus: hasAnyError ? 'error' : 'ok',
+            lastSyncMessage: hasAnyError
+              ? `${summaryMsg} — first error: ${firstErrorMsg}`
+              : summaryMsg,
             lastSyncChannels: results,
           });
-          return errored.length === 0;
+          return !hasAnyError;
         } catch (e) {
           get().updateConnection('discord', {
             lastSyncStatus: 'error',
@@ -1066,11 +1089,16 @@ export const useMessengerStore = create<MessengerState>()(
             lastUpdateAt?: number | null;
             totalReceived?: number;
             totalReplied?: number;
+            totalRawMessages?: number;
             lastError?: string | null;
             botUsername?: string;
           }>('/api/otto/messenger/discord/listener/start', {
             token: conn.botToken,
             guildId: conn.discordGuildId,
+            // Default OFF — we'd rather show every message the gateway
+            // delivers than silently drop messages from a different guild
+            // because the saved Server ID is wrong by one digit.
+            scopeToGuild: Boolean(conn.discordListenerScopeToGuild),
             autoReply: conn.discordListenerAutoReply !== false,
           });
           if (!data.ok) return false;
@@ -1081,6 +1109,7 @@ export const useMessengerStore = create<MessengerState>()(
             discordListenerLastUpdateAt: data.lastUpdateAt ?? null,
             discordListenerTotalReceived: data.totalReceived ?? 0,
             discordListenerTotalReplied: data.totalReplied ?? 0,
+            discordListenerTotalRawMessages: data.totalRawMessages ?? 0,
             discordListenerError: data.lastError ?? null,
             discordListenerAutoReply: data.autoReply ?? true,
           });
@@ -1123,10 +1152,17 @@ export const useMessengerStore = create<MessengerState>()(
             running?: boolean;
             connected?: boolean;
             autoReply?: boolean;
+            scopeToGuild?: boolean;
+            guildId?: string | null;
             startedAt?: number;
             lastUpdateAt?: number | null;
             totalReceived?: number;
             totalReplied?: number;
+            totalRawMessages?: number;
+            lastRawMessageAt?: number | null;
+            lastRawMessageGuildId?: string | null;
+            filteredOutCount?: number;
+            lastFilteredGuildId?: string | null;
             lastError?: string | null;
           }>('/api/otto/messenger/discord/listener/status', { token: conn.botToken });
           if (!data.ok) return;
@@ -1137,8 +1173,14 @@ export const useMessengerStore = create<MessengerState>()(
             discordListenerLastUpdateAt: data.lastUpdateAt ?? null,
             discordListenerTotalReceived: data.totalReceived ?? 0,
             discordListenerTotalReplied: data.totalReplied ?? 0,
+            discordListenerTotalRawMessages: data.totalRawMessages ?? 0,
+            discordListenerLastRawMessageAt: data.lastRawMessageAt ?? null,
+            discordListenerLastRawMessageGuildId: data.lastRawMessageGuildId ?? null,
+            discordListenerFilteredOutCount: data.filteredOutCount ?? 0,
+            discordListenerLastFilteredGuildId: data.lastFilteredGuildId ?? null,
             discordListenerError: data.lastError ?? null,
             discordListenerAutoReply: data.autoReply ?? true,
+            discordListenerScopeToGuild: data.scopeToGuild ?? false,
           });
         } catch {
           // ignore
