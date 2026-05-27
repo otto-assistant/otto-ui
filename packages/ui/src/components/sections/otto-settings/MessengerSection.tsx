@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   RiDiscordLine,
   RiTelegramLine,
@@ -15,13 +15,18 @@ import {
   RiExternalLinkLine,
   RiEyeLine,
   RiEyeOffLine,
+  RiPlayCircleLine,
+  RiStopCircleLine,
+  RiChatSmile3Line,
 } from '@remixicon/react';
 import {
   useMessengerStore,
   type MessengerType,
   type MessengerConnection,
   type SyncMode,
+  type TelegramInboundMessage,
 } from '@/stores/useMessengerStore';
+import { useOttoEventsStore, type OttoUiRealtimeEvent } from '@/stores/useOttoEventsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useTasksStore } from '@/stores/useTasksStore';
 import { cn } from '@/lib/utils';
@@ -156,13 +161,194 @@ function ChecklistItem({
   );
 }
 
-function formatRelative(ts: number | null): string {
+function formatRelative(ts: number | null | undefined): string {
   if (!ts) return 'never';
   const diff = Date.now() - ts;
   if (diff < 60_000) return 'just now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return new Date(ts).toLocaleString();
+}
+
+function TelegramListenerPanel({
+  conn,
+  inbound,
+  startListener,
+  stopListener,
+  refreshStatus,
+  loadRecent,
+  onToggleAutoReply,
+}: {
+  conn: MessengerConnection;
+  inbound: TelegramInboundMessage[];
+  startListener: () => Promise<boolean>;
+  stopListener: () => Promise<boolean>;
+  refreshStatus: () => Promise<void>;
+  loadRecent: () => Promise<void>;
+  onToggleAutoReply: (v: boolean) => void;
+}) {
+  const running = Boolean(conn.telegramListenerRunning);
+  const autoReply = conn.telegramListenerAutoReply !== false;
+  const subscribeToEvents = useOttoEventsStore((s) => s.subscribeToEvents);
+  const ingestTelegramInbound = useMessengerStore((s) => s.ingestTelegramInbound);
+
+  // Subscribe to realtime telegram message_received events so the UI updates
+  // instantly when a new message arrives, without waiting for the next poll.
+  useEffect(() => {
+    if (!running) return;
+    const handler = (event: OttoUiRealtimeEvent) => {
+      if (event.eventType !== 'messenger.telegram.message_received') return;
+      const data = event.data as TelegramInboundMessage | undefined;
+      if (data && typeof data === 'object' && 'updateId' in data) {
+        ingestTelegramInbound(data as TelegramInboundMessage);
+      }
+    };
+    return subscribeToEvents(handler);
+  }, [running, subscribeToEvents, ingestTelegramInbound]);
+
+  // Refresh status + recent every 10s while listener is running (fallback when
+  // WS isn't connected).
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      await Promise.all([refreshStatus(), loadRecent()]);
+    };
+    tick();
+    const id = setInterval(tick, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [running, refreshStatus, loadRecent]);
+
+  // On mount, fetch server-side status so reload reflects the real state.
+  useEffect(() => {
+    refreshStatus();
+    loadRecent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+          <RiChatSmile3Line className="size-4 text-primary" />
+          Listen for incoming messages
+          <span
+            className={cn(
+              'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
+              running
+                ? 'bg-green-500/20 text-green-600 dark:text-green-400'
+                : 'bg-muted text-muted-foreground',
+            )}
+          >
+            {running ? 'live' : 'off'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {!running ? (
+            <button
+              type="button"
+              onClick={() => startListener()}
+              className="inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <RiPlayCircleLine className="size-3.5" />
+              Start listening
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => stopListener()}
+              className="inline-flex items-center gap-1 rounded border border-destructive/40 px-2.5 py-1 text-[11px] font-medium text-destructive hover:bg-destructive/10"
+            >
+              <RiStopCircleLine className="size-3.5" />
+              Stop
+            </button>
+          )}
+          <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoReply}
+              onChange={(e) => onToggleAutoReply(e.target.checked)}
+              className="rounded border-border accent-primary"
+            />
+            Auto-reply
+          </label>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-[10px]">
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Received</div>
+          <div className="text-foreground font-medium">
+            {conn.telegramListenerTotalReceived ?? 0}
+          </div>
+        </div>
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Replied</div>
+          <div className="text-foreground font-medium">
+            {conn.telegramListenerTotalReplied ?? 0}
+          </div>
+        </div>
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Last update</div>
+          <div className="text-foreground font-medium">
+            {formatRelative(conn.telegramListenerLastUpdateAt ?? null)}
+          </div>
+        </div>
+      </div>
+
+      {conn.telegramListenerError && (
+        <div className="text-[11px] text-destructive flex items-start gap-1.5">
+          <RiAlertLine className="size-3.5 shrink-0 mt-0.5" />
+          {conn.telegramListenerError}
+        </div>
+      )}
+
+      {!running ? (
+        <div className="text-[11px] text-muted-foreground leading-snug">
+          Start the listener so Otto can answer messages sent to the bot. While running,
+          incoming messages appear below, and the auto-reply confirms each round-trip.
+          Open Telegram → message your bot → send <code className="bg-muted px-1 rounded">/start</code>{' '}
+          or any text. You'll see it here within seconds.
+        </div>
+      ) : inbound.length === 0 ? (
+        <div className="text-[11px] text-muted-foreground italic">
+          Waiting for messages… Send your bot a message in Telegram to test.
+        </div>
+      ) : (
+        <ul className="space-y-1.5 max-h-48 overflow-y-auto">
+          {inbound.slice(0, 8).map((m) => (
+            <li
+              key={m.updateId}
+              className="rounded bg-background border border-border px-2 py-1.5 text-[11px] space-y-0.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-foreground truncate">
+                  {m.from?.firstName ?? m.from?.username ?? 'Unknown'}
+                  {m.from?.username ? (
+                    <span className="text-muted-foreground"> @{m.from.username}</span>
+                  ) : null}
+                </span>
+                <span className="text-[9px] text-muted-foreground shrink-0">
+                  {new Date(m.receivedAt).toLocaleTimeString()}
+                </span>
+              </div>
+              <div className="text-muted-foreground break-words">
+                {m.text ?? <em>(non-text message)</em>}
+              </div>
+              <div className="text-[9px] text-muted-foreground">
+                {m.chatTitle ?? `chat ${m.chatId}`}
+                {m.threadId ? ` · topic ${m.threadId}` : ''}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function ConnectionCard({ conn }: { conn: MessengerConnection }) {
@@ -174,6 +360,12 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const fetchDiscordInviteUrl = useMessengerStore((s) => s.fetchDiscordInviteUrl);
   const sendTestMessage = useMessengerStore((s) => s.sendTestMessage);
   const sendSyncSummary = useMessengerStore((s) => s.sendSyncSummary);
+  const syncTelegramProjects = useMessengerStore((s) => s.syncTelegramProjects);
+  const startTelegramListener = useMessengerStore((s) => s.startTelegramListener);
+  const stopTelegramListener = useMessengerStore((s) => s.stopTelegramListener);
+  const refreshTelegramListenerStatus = useMessengerStore((s) => s.refreshTelegramListenerStatus);
+  const loadRecentTelegramMessages = useMessengerStore((s) => s.loadRecentTelegramMessages);
+  const telegramInbound = useMessengerStore((s) => s.telegramInbound);
   const projects = useProjectsStore((s) => s.projects);
   const tasks = useTasksStore((s) => s.tasks);
   const projectMappings = useMessengerStore((s) => s.projectMappings);
@@ -226,6 +418,39 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
 
   const inputClass =
     'w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring';
+
+  const buildProjectPayloads = (): { id: string; label: string; body: string }[] => {
+    const now = new Date().toLocaleString();
+    return projects.map((p) => {
+      const label = p.label || p.path.split('/').pop() || p.path;
+      const projectTasks = tasks.filter(
+        (t) => t.projectId === p.id || t.projectPath === p.path,
+      );
+      const open = projectTasks.filter(
+        (t) => t.status !== 'done' && t.status !== 'cancelled',
+      );
+      const done = projectTasks.filter((t) => t.status === 'done');
+      const next = projectTasks
+        .filter((t) => t.dueAt && t.status !== 'done' && t.status !== 'cancelled')
+        .sort((a, b) => Date.parse(a.dueAt!) - Date.parse(b.dueAt!))
+        .slice(0, 3);
+      const lines = [
+        `🤖 Otto sync — ${label}`,
+        '',
+        `• Open tasks: ${open.length}`,
+        `• Done: ${done.length}`,
+      ];
+      if (next.length > 0) {
+        lines.push('', 'Upcoming:');
+        for (const t of next) {
+          const when = t.dueAt ? new Date(t.dueAt).toLocaleString() : '';
+          lines.push(`• ${t.title}${when ? ` — ${when}` : ''}`);
+        }
+      }
+      lines.push('', `Last synced ${now}`);
+      return { id: p.id, label, body: lines.join('\n') };
+    });
+  };
 
   const buildSummary = (): string => {
     const projectCount = projects.length;
@@ -610,7 +835,14 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
             </button>
             <button
               type="button"
-              onClick={() => sendSyncSummary(conn.type, buildSummary())}
+              onClick={() => {
+                if (conn.type === 'telegram') {
+                  // Per-project sync that also creates forum topics when applicable.
+                  syncTelegramProjects(buildProjectPayloads(), buildSummary());
+                } else {
+                  sendSyncSummary(conn.type, buildSummary());
+                }
+              }}
               disabled={conn.lastSyncStatus === 'sending'}
               className="inline-flex items-center gap-1.5 rounded-md border border-primary/40 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
             >
@@ -638,6 +870,21 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
             </div>
           )}
         </div>
+      )}
+
+      {/* Telegram inbound listener */}
+      {conn.type === 'telegram' && hasToken && hasTarget && (
+        <TelegramListenerPanel
+          conn={conn}
+          inbound={telegramInbound}
+          startListener={startTelegramListener}
+          stopListener={stopTelegramListener}
+          refreshStatus={refreshTelegramListenerStatus}
+          loadRecent={loadRecentTelegramMessages}
+          onToggleAutoReply={(v) =>
+            updateConnection('telegram', { telegramListenerAutoReply: v })
+          }
+        />
       )}
 
       {/* Sync mode */}

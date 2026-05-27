@@ -1,4 +1,5 @@
 import express, { Router } from 'express';
+import { createTelegramListenerRegistry } from './telegram-listener.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -20,6 +21,8 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
   const router = Router();
 
   router.use(express.json({ limit: '256kb' }));
+
+  const telegramListener = createTelegramListenerRegistry({ broadcastEvent });
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
@@ -285,6 +288,179 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
     } catch (err) {
       return res.json({ ok: false, error: err?.message ?? 'resolve-chat failed' });
     }
+  });
+
+  /**
+   * Start a Telegram long-poll listener for incoming messages.
+   * Body: { token, autoReply? }
+   * Idempotent: returns the existing listener if one is already running for that token.
+   */
+  router.post('/telegram/listener/start', (req, res) => {
+    const { token, autoReply } = req.body ?? {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    const result = telegramListener.start(token, { autoReply: autoReply !== false });
+    res.json(result);
+  });
+
+  router.post('/telegram/listener/stop', (req, res) => {
+    const { token } = req.body ?? {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    res.json(telegramListener.stop(token));
+  });
+
+  router.post('/telegram/listener/status', (req, res) => {
+    const token = req.body?.token ?? req.query?.token;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    res.json(telegramListener.status(token));
+  });
+
+  router.post('/telegram/listener/recent', (req, res) => {
+    const token = req.body?.token ?? req.query?.token;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    const limit = req.body?.limit ?? 25;
+    res.json(telegramListener.recent(token, limit));
+  });
+
+  /**
+   * Telegram per-project sync. For forum chats this creates a forum topic per
+   * project (using stored mappings when present) and posts a status message
+   * inside each topic. For non-forum chats it falls back to one bullet-list
+   * message in the main chat.
+   *
+   * Body: {
+   *   token: string,
+   *   chatId: string | number,
+   *   isForum: boolean,
+   *   summary: string,                 // top-line summary (non-forum mode + intro)
+   *   projects: [{ id, label, body }], // per-project payload
+   *   mappings: [{ projectId, telegram?: { topicId, topicName } }],
+   * }
+   *
+   * Returns: { ok, postedTo: 'forum'|'chat', topics: [{ projectId, topicId, topicName, messageId, created, error? }] }
+   */
+  router.post('/telegram/sync-projects', async (req, res) => {
+    const { token, chatId, isForum, summary, projects, mappings } = req.body ?? {};
+    if (!token || !chatId) {
+      return res.status(400).json({ error: 'token and chatId required' });
+    }
+    const projectList = Array.isArray(projects) ? projects : [];
+    const mappingByProject = new Map(
+      (Array.isArray(mappings) ? mappings : [])
+        .filter((m) => m && m.projectId)
+        .map((m) => [m.projectId, m]),
+    );
+
+    const tgCall = async (method, body) => {
+      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return r.json();
+    };
+
+    // Non-forum: send the summary as a single message, optionally followed by per-project lines.
+    if (!isForum || projectList.length === 0) {
+      const text =
+        summary && summary.trim().length > 0
+          ? summary
+          : projectList.length === 0
+            ? '🤖 Otto sync — no projects configured yet.'
+            : `🤖 Otto sync\n\n${projectList.map((p) => `• ${p.label}`).join('\n')}`;
+      const sent = await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: String(text).slice(0, 4096),
+      });
+      if (!sent.ok) {
+        return res.json({
+          ok: false,
+          postedTo: 'chat',
+          error: sent.description ?? 'sendMessage failed',
+        });
+      }
+      return res.json({
+        ok: true,
+        postedTo: 'chat',
+        topics: [],
+        mainMessageId: sent.result?.message_id,
+      });
+    }
+
+    // Forum: optional summary in the General topic first.
+    let mainMessageId = null;
+    if (summary && summary.trim().length > 0) {
+      const sumResp = await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: String(summary).slice(0, 4096),
+      });
+      if (sumResp.ok) {
+        mainMessageId = sumResp.result?.message_id ?? null;
+      }
+    }
+
+    const topics = [];
+    for (const project of projectList) {
+      const existing = mappingByProject.get(project.id)?.telegram;
+      let topicId = existing?.topicId && /^\d+$/.test(String(existing.topicId))
+        ? Number(existing.topicId)
+        : null;
+      const topicName = existing?.topicName || project.label || `Project ${project.id}`;
+      let created = false;
+      let entryError = null;
+
+      // Create the topic if we don't have one stored.
+      if (topicId == null) {
+        const createResp = await tgCall('createForumTopic', {
+          chat_id: chatId,
+          name: topicName.slice(0, 128),
+        });
+        if (createResp.ok && createResp.result?.message_thread_id) {
+          topicId = createResp.result.message_thread_id;
+          created = true;
+        } else {
+          entryError = createResp.description ?? 'createForumTopic failed';
+        }
+      }
+
+      let messageId = null;
+      if (topicId != null && !entryError) {
+        const msgResp = await tgCall('sendMessage', {
+          chat_id: chatId,
+          message_thread_id: topicId,
+          text: String(project.body ?? `🤖 Sync update for ${project.label}`).slice(0, 4096),
+        });
+        if (msgResp.ok) {
+          messageId = msgResp.result?.message_id ?? null;
+        } else {
+          entryError = msgResp.description ?? 'sendMessage failed';
+        }
+      }
+
+      topics.push({
+        projectId: project.id,
+        projectLabel: project.label,
+        topicId: topicId != null ? String(topicId) : null,
+        topicName,
+        messageId,
+        created,
+        error: entryError,
+      });
+    }
+
+    res.json({
+      ok: topics.every((t) => !t.error),
+      postedTo: 'forum',
+      mainMessageId,
+      topics,
+    });
   });
 
   // Webhook for incoming messages from messengers

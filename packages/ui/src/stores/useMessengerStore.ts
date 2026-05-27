@@ -43,6 +43,15 @@ export interface MessengerConnection {
   lastSyncStatus: 'idle' | 'sending' | 'ok' | 'error';
   lastSyncMessage: string | null;
 
+  // Telegram long-poll listener state (set after start/status calls)
+  telegramListenerRunning?: boolean;
+  telegramListenerStartedAt?: number | null;
+  telegramListenerLastUpdateAt?: number | null;
+  telegramListenerTotalReceived?: number;
+  telegramListenerTotalReplied?: number;
+  telegramListenerError?: string | null;
+  telegramListenerAutoReply?: boolean;
+
   // Sync config
   syncMode: SyncMode;
   syncProjects: boolean;
@@ -58,11 +67,32 @@ export interface ProjectMessengerMapping {
   telegram?: { topicId: string; topicName: string };
 }
 
+export interface TelegramInboundMessage {
+  updateId: number;
+  chatId: number | string;
+  chatTitle: string | null;
+  chatType: string | null;
+  threadId: number | null;
+  from:
+    | {
+        id: number;
+        username: string | null;
+        firstName: string | null;
+        isBot: boolean;
+      }
+    | null;
+  text: string | null;
+  receivedAt: string;
+}
+
 interface MessengerState {
   connections: MessengerConnection[];
   projectMappings: ProjectMessengerMapping[];
   onboardingStep: number | null;
   onboardingType: MessengerType | null;
+
+  /** In-memory ring buffer of recent inbound Telegram messages (newest first). */
+  telegramInbound: TelegramInboundMessage[];
 
   addConnection: (type: MessengerType) => void;
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
@@ -73,6 +103,15 @@ interface MessengerState {
   fetchDiscordInviteUrl: () => Promise<string | null>;
   sendTestMessage: (type: MessengerType) => Promise<boolean>;
   sendSyncSummary: (type: MessengerType, summary: string) => Promise<boolean>;
+  syncTelegramProjects: (
+    projects: { id: string; label: string; body: string }[],
+    summary: string,
+  ) => Promise<boolean>;
+  startTelegramListener: () => Promise<boolean>;
+  stopTelegramListener: () => Promise<boolean>;
+  refreshTelegramListenerStatus: () => Promise<void>;
+  loadRecentTelegramMessages: () => Promise<void>;
+  ingestTelegramInbound: (msg: TelegramInboundMessage) => void;
   setProjectMapping: (mapping: ProjectMessengerMapping) => void;
   removeProjectMapping: (projectId: string) => void;
   startOnboarding: (type: MessengerType) => void;
@@ -111,6 +150,7 @@ export const useMessengerStore = create<MessengerState>()(
       projectMappings: [],
       onboardingStep: null,
       onboardingType: null,
+      telegramInbound: [],
 
       addConnection: (type) => {
         const existing = get().connections.find((c) => c.type === type);
@@ -387,6 +427,214 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
+      syncTelegramProjects: async (projects, summary) => {
+        const conn = get().connections.find((c) => c.type === 'telegram');
+        if (!conn?.telegramBotToken || !conn.telegramChatId) {
+          get().updateConnection('telegram', {
+            lastSyncStatus: 'error',
+            lastSyncMessage: 'Add Telegram bot token and chat ID first',
+          });
+          return false;
+        }
+
+        get().updateConnection('telegram', {
+          lastSyncStatus: 'sending',
+          lastSyncMessage:
+            conn.telegramIsForum && projects.length > 0
+              ? `Creating ${projects.length} topic${projects.length === 1 ? '' : 's'}…`
+              : 'Sending sync summary…',
+        });
+
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            postedTo?: 'forum' | 'chat';
+            error?: string;
+            topics?: {
+              projectId: string;
+              projectLabel: string;
+              topicId: string | null;
+              topicName: string;
+              messageId: number | null;
+              created: boolean;
+              error: string | null;
+            }[];
+          }>('/api/otto/messenger/telegram/sync-projects', {
+            token: conn.telegramBotToken,
+            chatId: conn.telegramChatId,
+            isForum: Boolean(conn.telegramIsForum),
+            summary,
+            projects,
+            mappings: get().projectMappings,
+          });
+
+          if (!data.ok && (!data.topics || data.topics.length === 0)) {
+            get().updateConnection('telegram', {
+              lastSyncStatus: 'error',
+              lastSyncMessage: data.error ?? 'Sync failed',
+            });
+            return false;
+          }
+
+          // Persist newly-created topic ids back into project mappings.
+          const newTopics = (data.topics ?? []).filter(
+            (t) => t.topicId && !t.error,
+          );
+          for (const t of newTopics) {
+            get().setProjectMapping({
+              projectId: t.projectId,
+              projectLabel: t.projectLabel,
+              telegram: { topicId: String(t.topicId), topicName: t.topicName },
+            });
+          }
+
+          const errored = (data.topics ?? []).filter((t) => t.error);
+          const createdCount = (data.topics ?? []).filter((t) => t.created).length;
+          const postedCount = (data.topics ?? []).filter((t) => t.messageId).length;
+
+          let summaryMsg: string;
+          if (data.postedTo === 'forum') {
+            const parts = [];
+            if (createdCount > 0) parts.push(`${createdCount} topic${createdCount === 1 ? '' : 's'} created`);
+            if (postedCount > 0) parts.push(`${postedCount} message${postedCount === 1 ? '' : 's'} sent`);
+            if (errored.length > 0) parts.push(`${errored.length} error${errored.length === 1 ? '' : 's'}`);
+            summaryMsg = parts.length > 0 ? parts.join(', ') + ' ✓' : 'Sync sent ✓';
+          } else {
+            summaryMsg = 'Sync summary sent ✓';
+          }
+
+          get().updateConnection('telegram', {
+            lastSyncAt: Date.now(),
+            lastSyncStatus: errored.length > 0 ? 'error' : 'ok',
+            lastSyncMessage:
+              errored.length > 0
+                ? `${summaryMsg} — first error: ${errored[0].error}`
+                : summaryMsg,
+          });
+          return errored.length === 0;
+        } catch (e) {
+          get().updateConnection('telegram', {
+            lastSyncStatus: 'error',
+            lastSyncMessage: e instanceof Error ? e.message : 'Sync failed',
+          });
+          return false;
+        }
+      },
+
+      startTelegramListener: async () => {
+        const conn = get().connections.find((c) => c.type === 'telegram');
+        if (!conn?.telegramBotToken) return false;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            running?: boolean;
+            startedAt?: number;
+            autoReply?: boolean;
+            lastUpdateAt?: number | null;
+            totalReceived?: number;
+            totalReplied?: number;
+            lastError?: string | null;
+          }>('/api/otto/messenger/telegram/listener/start', {
+            token: conn.telegramBotToken,
+            autoReply: conn.telegramListenerAutoReply !== false,
+          });
+          if (!data.ok) return false;
+          get().updateConnection('telegram', {
+            telegramListenerRunning: data.running ?? true,
+            telegramListenerStartedAt: data.startedAt ?? Date.now(),
+            telegramListenerLastUpdateAt: data.lastUpdateAt ?? null,
+            telegramListenerTotalReceived: data.totalReceived ?? 0,
+            telegramListenerTotalReplied: data.totalReplied ?? 0,
+            telegramListenerError: data.lastError ?? null,
+            telegramListenerAutoReply: data.autoReply ?? true,
+          });
+          return true;
+        } catch (e) {
+          get().updateConnection('telegram', {
+            telegramListenerError: e instanceof Error ? e.message : 'start failed',
+            telegramListenerRunning: false,
+          });
+          return false;
+        }
+      },
+
+      stopTelegramListener: async () => {
+        const conn = get().connections.find((c) => c.type === 'telegram');
+        if (!conn?.telegramBotToken) return false;
+        try {
+          await postJson('/api/otto/messenger/telegram/listener/stop', {
+            token: conn.telegramBotToken,
+          });
+          get().updateConnection('telegram', {
+            telegramListenerRunning: false,
+          });
+          return true;
+        } catch (e) {
+          get().updateConnection('telegram', {
+            telegramListenerError: e instanceof Error ? e.message : 'stop failed',
+          });
+          return false;
+        }
+      },
+
+      refreshTelegramListenerStatus: async () => {
+        const conn = get().connections.find((c) => c.type === 'telegram');
+        if (!conn?.telegramBotToken) return;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            running?: boolean;
+            startedAt?: number;
+            autoReply?: boolean;
+            lastUpdateAt?: number | null;
+            totalReceived?: number;
+            totalReplied?: number;
+            lastError?: string | null;
+          }>('/api/otto/messenger/telegram/listener/status', {
+            token: conn.telegramBotToken,
+          });
+          if (!data.ok) return;
+          get().updateConnection('telegram', {
+            telegramListenerRunning: data.running ?? false,
+            telegramListenerStartedAt: data.startedAt ?? null,
+            telegramListenerLastUpdateAt: data.lastUpdateAt ?? null,
+            telegramListenerTotalReceived: data.totalReceived ?? 0,
+            telegramListenerTotalReplied: data.totalReplied ?? 0,
+            telegramListenerError: data.lastError ?? null,
+            telegramListenerAutoReply: data.autoReply ?? true,
+          });
+        } catch {
+          // ignore — background poll
+        }
+      },
+
+      loadRecentTelegramMessages: async () => {
+        const conn = get().connections.find((c) => c.type === 'telegram');
+        if (!conn?.telegramBotToken) return;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            running?: boolean;
+            messages?: TelegramInboundMessage[];
+          }>('/api/otto/messenger/telegram/listener/recent', {
+            token: conn.telegramBotToken,
+            limit: 25,
+          });
+          if (data.ok && Array.isArray(data.messages)) {
+            set({ telegramInbound: data.messages });
+          }
+        } catch {
+          // ignore
+        }
+      },
+
+      ingestTelegramInbound: (msg) => {
+        const cur = get().telegramInbound;
+        // Dedupe by updateId; keep newest first; cap at 50.
+        const next = [msg, ...cur.filter((m) => m.updateId !== msg.updateId)].slice(0, 50);
+        set({ telegramInbound: next });
+      },
+
       setProjectMapping: (mapping) => {
         set({
           projectMappings: [
@@ -426,6 +674,11 @@ export const useMessengerStore = create<MessengerState>()(
           error: null,
           lastSyncStatus: 'idle' as const,
           lastSyncMessage: null,
+          // Listener state lives on the server — clear it so the UI re-syncs after reload.
+          telegramListenerRunning: false,
+          telegramListenerStartedAt: null,
+          telegramListenerLastUpdateAt: null,
+          telegramListenerError: null,
         })),
         projectMappings: state.projectMappings,
       }),
