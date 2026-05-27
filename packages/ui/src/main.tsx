@@ -28,6 +28,22 @@ const runtimeAPIs = (typeof window !== 'undefined' && window.__OPENCHAMBER_RUNTI
 
 initializeLocale();
 
+// Prefetch the global session list as early as possible so the network
+// request flies in parallel with the rest of the React mount + bootstrap
+// chain. By the time `SessionSidebar` mounts and calls
+// `refreshGlobalSessions`, the inflight-load guard will dedupe and the
+// data is likely already in flight (or done) instead of a fresh fetch.
+// Lazy-imported to avoid pulling the zustand store into the critical
+// parse path of main.tsx.
+void (async () => {
+  try {
+    const mod = await import('./stores/useGlobalSessionsStore');
+    void mod.useGlobalSessionsStore.getState().loadSessions();
+  } catch (error) {
+    console.warn('[main] global session prefetch skipped:', error);
+  }
+})();
+
 // Initialize settings asynchronously — the app renders with defaults first
 // and hydrates once persisted preferences are applied. Users with non-default
 // themes may briefly see default appearance on cold start; accepted trade-off

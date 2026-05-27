@@ -454,8 +454,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
     // Use `ensure` rather than `refresh` so we don't force a full
     // /api/experimental/session re-fetch when another mount path (e.g.
-    // useSessionAutoCleanup) already loaded the global list. With many
-    // sessions this response is multi-megabyte; doing it twice on every
+    // useSessionAutoCleanup or the index.html prefetch from 81bbc8f0)
+    // already loaded the global list. With many
     // mount of the sidebar was a major contributor to "dev server loads
     // crazy slow". Live updates still arrive via SSE; this is just the
     // initial snapshot.
