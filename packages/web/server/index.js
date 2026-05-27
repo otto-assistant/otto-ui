@@ -1183,6 +1183,12 @@ async function main(options = {}) {
       const settings = await readSettingsFromDiskMigrated();
       return sanitizeProjects(settings?.projects || []);
     },
+    // Bootstrap flow ("clone <url>" / "path <abs>" / "new <name>") — the
+    // helper writes the new project into settings the same way the web
+    // UI does via PUT /api/config/settings.
+    readSettings: readSettingsFromDiskMigrated,
+    persistSettings,
+    sanitizeProjects,
   }));
 
   // Discord ↔ Web UI sync routes

@@ -319,6 +319,13 @@ export function createMessengerOpencodeBridge({
   broadcastEvent,
   store,
   listProjects,
+  /**
+   * Optional bootstrap handler called when an unbound channel sends a
+   * `clone <url>` / `path <abs>` / `new <label>` reply. Signature:
+   *   ({ action, url?, path?, label? }) => { ok, project?: { id, path, label }, error? }
+   * If unset, the bridge falls back to slug-matching / first-project.
+   */
+  bootstrapProject = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
@@ -337,6 +344,42 @@ export function createMessengerOpencodeBridge({
    * }>}
    */
   const sessionContexts = new Map();
+
+  // Per-surface project bootstrap dialogue state. When a new channel sends
+  // its first message and we have no slug-match (and the user has not yet
+  // told us what project this channel maps to), we stash the original
+  // text here and ask "clone | path | new". The follow-up reply lands here
+  // and triggers the bootstrap.
+  /** @type {Map<string, { type, token, channelId, threadId, sourceMessageId, originalText, askedAt }>} */
+  const bootstrapPending = new Map();
+
+  /**
+   * Bootstrap dialogue key — uses the same Discord-aware semantics as
+   * targetKey so the first message's stash and the user's reply (which
+   * arrives with `channel_id = thread_id` on Discord) land on the same
+   * surface.
+   */
+  function bootstrapKey({ type, channelId, threadId }) {
+    return `${type}:${targetKey({ type, channelId, threadId })}`;
+  }
+
+  /**
+   * Parse a user's bootstrap reply. Returns `{ action, url?, path?, label? }`
+   * or null when the message isn't a bootstrap command.
+   */
+  function parseBootstrapReply(text) {
+    if (typeof text !== 'string') return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const m = trimmed.match(/^(clone|path|new)\s+(.+)$/i);
+    if (!m) return null;
+    const action = m[1].toLowerCase();
+    const rest = m[2].trim();
+    if (action === 'clone') return { action: 'clone', url: rest };
+    if (action === 'path') return { action: 'path', path: rest };
+    if (action === 'new') return { action: 'new', label: rest };
+    return null;
+  }
 
   // Cache: target name lookups (for slug-matching projects).
   const nameCache = new Map();
@@ -483,18 +526,18 @@ export function createMessengerOpencodeBridge({
 
   // --- Outbound: post one message per renderable part --------------------
   async function postToSurface(ctx, content) {
+    return postMessengerSurface(ctx, content);
+  }
+
+  /** Like postToSurface but takes a raw surface descriptor — used by the
+   *  bootstrap dialogue before a session exists. */
+  async function postMessengerSurface({ type, token, channelId, threadId }, content) {
     if (!content) return { ok: false, error: 'empty content' };
-    if (ctx.type === 'discord') {
-      // Post into the thread (or channel if no thread).
-      const channelId = ctx.threadId ?? ctx.channelId;
-      return sendDiscord({ token: ctx.token, channelId, content });
+    if (type === 'discord') {
+      const ch = threadId ?? channelId;
+      return sendDiscord({ token, channelId: ch, content });
     }
-    return sendTelegram({
-      token: ctx.token,
-      chatId: ctx.channelId,
-      threadId: ctx.threadId,
-      content,
-    });
+    return sendTelegram({ token, chatId: channelId, threadId, content });
   }
 
   function startTypingPulse(ctx) {
@@ -647,10 +690,117 @@ export function createMessengerOpencodeBridge({
     }
     ensureSubscribed();
 
-    // Discord conversation surface: prefer a thread on the user's message.
-    // If we already have a threadId we're being called from inside a thread —
-    // reuse it. Otherwise spawn one off the user's message so the bot
-    // doesn't pollute the channel.
+    // -----------------------------------------------------------------
+    // Step 1 — Bootstrap dialogue
+    //
+    // Done BEFORE any thread creation, so the dialogue is conducted in
+    // the user's original surface (channel or thread). Only after we know
+    // which project this conversation belongs to do we spawn a thread and
+    // resolve a session. This avoids the bug where the reply to our
+    // bootstrap prompt landed on a different surface key than the stash.
+    // -----------------------------------------------------------------
+    const surfaceKey = bootstrapKey({ type, channelId, threadId: threadId ?? null });
+    if (bootstrapProject) {
+      const pending = bootstrapPending.get(surfaceKey);
+      const reply = parseBootstrapReply(text);
+
+      if (pending && reply) {
+        try {
+          const result = await bootstrapProject(reply);
+          if (!result.ok || !result.project) {
+            await postMessengerSurface(
+              { type, token, channelId, threadId: threadId ?? null },
+              `⚠ Could not bootstrap project: ${escapeMd(clipBlock(result.error ?? 'unknown error', 400))}`,
+            );
+            return { ok: false, error: result.error ?? 'bootstrap failed' };
+          }
+          bootstrapPending.delete(surfaceKey);
+          await postMessengerSurface(
+            { type, token, channelId, threadId: threadId ?? null },
+            `✓ Project ready: *${escapeMd(result.project.label ?? result.project.path)}* → ${escapeMd(result.project.path)}\nOtto will use this directory from now on. Re-sending your earlier message…`,
+          );
+          // Recurse with the stashed original text + the now-known project.
+          // sourceMessageId remains from the ORIGINAL message so the thread
+          // (when we create it below) is anchored on the user's first
+          // message, matching kimaki's UX.
+          return routeInbound({
+            type,
+            token,
+            channelId,
+            threadId: threadId ?? null,
+            sourceMessageId: pending.sourceMessageId ?? sourceMessageId,
+            text: pending.originalText,
+            projectPath: result.project.path,
+            projectLabel: result.project.label,
+            from,
+          });
+        } catch (err) {
+          await postMessengerSurface(
+            { type, token, channelId, threadId: threadId ?? null },
+            `⚠ Could not bootstrap project: ${escapeMd(clipBlock(err?.message ?? String(err), 400))}`,
+          );
+          return { ok: false, error: err?.message ?? 'bootstrap failed' };
+        }
+      }
+
+      // No pending dialogue — decide whether to open one.
+      if (!projectPath) {
+        const hash = tokenHash(token);
+        const keyForStore = targetKey({ type, channelId, threadId: threadId ?? null });
+        const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: keyForStore });
+        if (!stored?.sessionId) {
+          const auto = await autoResolveProject({
+            type,
+            token,
+            channelId,
+            threadId: threadId ?? null,
+          });
+          if (!auto || auto.autoResolved !== 'slug-match') {
+            bootstrapPending.set(surfaceKey, {
+              type,
+              token,
+              channelId,
+              threadId: threadId ?? null,
+              sourceMessageId,
+              originalText: text,
+              askedAt: Date.now(),
+            });
+            const intro =
+              type === 'discord'
+                ? `**Otto — new channel detected**`
+                : `🤖 *Otto — new chat detected*`;
+            const guidance = [
+              intro,
+              ``,
+              `I don't have a project bound to this ${type === 'discord' ? 'channel' : 'chat'} yet.`,
+              `Reply with one of:`,
+              `• \`clone <git-url>\` — git-clone the repo into Otto's projects folder`,
+              `• \`path </absolute/path>\` — use an existing folder on the server`,
+              `• \`new <project-name>\` — create an empty project`,
+              ``,
+              `Your message _"${clipBlock(text, 120)}"_ is stashed; I'll re-send it to Otto once the project is ready.`,
+            ].join('\n');
+            await postMessengerSurface(
+              { type, token, channelId, threadId: threadId ?? null },
+              guidance,
+            );
+            broadcastEvent?.('messenger.bridge.bootstrap_prompt', {
+              type,
+              channelId,
+              threadId: threadId ?? null,
+              originalText: text,
+            });
+            return { ok: true, awaitingBootstrap: true };
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 2 — Spawn a thread on the user's message (Discord only).
+    // We only get here once we know what project this conversation
+    // belongs to.
+    // -----------------------------------------------------------------
     let effectiveThreadId = threadId ?? null;
     if (type === 'discord' && !effectiveThreadId && sourceMessageId) {
       const threadName = clipBlock(text.split('\n')[0] ?? 'Otto', 80);
@@ -663,8 +813,9 @@ export function createMessengerOpencodeBridge({
       if (thread.ok && thread.threadId) {
         effectiveThreadId = thread.threadId;
       }
-      // If thread creation failed (e.g. permission missing), keep going in
-      // the channel — falling back gracefully is better than refusing.
+      // If thread creation failed (e.g. message is already in a thread, or
+      // bot lacks Create Public Threads), keep going in the existing
+      // surface — gracefully falling back is better than refusing.
     }
 
     let sessionId;

@@ -5,6 +5,7 @@ import {
   generateApprovalId,
 } from './discord-listener.js';
 import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
+import { bootstrapProject as bootstrapProjectFn } from '../projects/project-bootstrap.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -34,10 +35,27 @@ export function createMessengerSyncRouter({
   // → project resolution by slug, so the user doesn't have to fill in a
   // Channel/Topic Mapping by hand.
   listProjects = null,
+  // Hooks for the project bootstrap flow (clone / path / new) that the
+  // bridge fires when a channel has no resolved project. The two hooks
+  // wrap settings-runtime.js so this router stays free of disk I/O.
+  readSettings = null,
+  persistSettings = null,
+  sanitizeProjects = null,
 }) {
   const router = Router();
 
   router.use(express.json({ limit: '256kb' }));
+
+  const projectBootstrap =
+    readSettings && persistSettings && sanitizeProjects
+      ? (params) =>
+          bootstrapProjectFn({
+            ...params,
+            readSettings,
+            persistSettings,
+            sanitizeProjects,
+          })
+      : null;
 
   const bridge =
     globalEventHub && buildOpenCodeUrl
@@ -47,6 +65,7 @@ export function createMessengerSyncRouter({
           getOpenCodeAuthHeaders,
           broadcastEvent,
           listProjects,
+          bootstrapProject: projectBootstrap,
         })
       : null;
   if (bridge) {
@@ -649,6 +668,165 @@ export function createMessengerSyncRouter({
     if (!bridge) return res.json({ ok: true, enabled: false, bindings: [], active: [] });
     const { type, token } = req.body ?? {};
     return res.json({ ok: true, enabled: true, ...bridge.statusSnapshot({ type, token }) });
+  });
+
+  /**
+   * Called by the server when a brand-new project is added to settings.
+   * Creates a matching surface in every connected messenger:
+   *   - Discord: a new text channel named after the project's slug, posted
+   *     in the configured guild + parent category.
+   *   - Telegram: a new forum topic when the configured chat is a forum.
+   * Best-effort — failures are reported but don't block the project create.
+   */
+  async function autoCreateMessengerSurfacesForProject(project, opts = {}) {
+    const results = [];
+    if (!project || !project.path) return results;
+    const projectLabel = project.label ?? project.path.split('/').pop() ?? project.path;
+    const slug = (projectLabel || 'project')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+
+    const discord = opts.discord ?? null;
+    if (discord?.token && discord?.guildId) {
+      try {
+        const channel = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(discord.guildId)}/channels`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bot ${discord.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              name: slug,
+              type: 0,
+              parent_id: discord.parentCategoryId ?? null,
+              topic: `Otto sync channel for ${projectLabel}`.slice(0, 1024),
+            }),
+          },
+        );
+        if (channel.ok) {
+          const data = await channel.json();
+          results.push({ type: 'discord', ok: true, channelId: data.id, channelName: data.name });
+          // Pre-bind so the bridge skips the "no project" dialogue for first message.
+          if (bridge?.store) {
+            const tokenHash = (await import('node:crypto'))
+              .createHash('sha256')
+              .update(discord.token)
+              .digest('hex')
+              .slice(0, 12);
+            bridge.store.bind({
+              type: 'discord',
+              botTokenHash: tokenHash,
+              targetKey: data.id,
+              sessionId: '', // session is lazily created on first message
+              projectPath: project.path,
+              projectLabel,
+            });
+          }
+        } else {
+          results.push({
+            type: 'discord',
+            ok: false,
+            error: `Discord ${channel.status}: ${(await channel.text()).slice(0, 200)}`,
+          });
+        }
+      } catch (err) {
+        results.push({ type: 'discord', ok: false, error: err?.message ?? 'create-channel failed' });
+      }
+    }
+
+    const telegram = opts.telegram ?? null;
+    if (telegram?.token && telegram?.chatId && telegram?.isForum) {
+      try {
+        const r = await fetch(`https://api.telegram.org/bot${telegram.token}/createForumTopic`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: telegram.chatId, name: projectLabel.slice(0, 128) }),
+        });
+        const data = await r.json();
+        if (data.ok && data.result?.message_thread_id != null) {
+          results.push({
+            type: 'telegram',
+            ok: true,
+            chatId: telegram.chatId,
+            topicId: String(data.result.message_thread_id),
+            topicName: projectLabel,
+          });
+          if (bridge?.store) {
+            const tokenHash = (await import('node:crypto'))
+              .createHash('sha256')
+              .update(telegram.token)
+              .digest('hex')
+              .slice(0, 12);
+            bridge.store.bind({
+              type: 'telegram',
+              botTokenHash: tokenHash,
+              targetKey: `${telegram.chatId}:${data.result.message_thread_id}`,
+              sessionId: '',
+              projectPath: project.path,
+              projectLabel,
+            });
+          }
+        } else {
+          results.push({ type: 'telegram', ok: false, error: data.description ?? 'createForumTopic failed' });
+        }
+      } catch (err) {
+        results.push({ type: 'telegram', ok: false, error: err?.message ?? 'create-topic failed' });
+      }
+    }
+    broadcastEvent?.('messenger.bridge.project_autocreated', {
+      projectId: project.id,
+      projectLabel,
+      results,
+    });
+    return results;
+  }
+
+  /**
+   * Explicit endpoint — the UI calls this right after a project is added so
+   * we don't tightly couple settings-runtime to messenger code.
+   * Body: {
+   *   project: { id, path, label },
+   *   discord?: { token, guildId, parentCategoryId? },
+   *   telegram?: { token, chatId, isForum }
+   * }
+   */
+  router.post('/bridge/project-added', async (req, res) => {
+    const { project, discord, telegram } = req.body ?? {};
+    if (!project || !project.path) {
+      return res.status(400).json({ ok: false, error: 'project { id, path, label } required' });
+    }
+    const results = await autoCreateMessengerSurfacesForProject(project, { discord, telegram });
+    res.json({ ok: results.every((r) => r.ok), results });
+  });
+
+  /**
+   * Bootstrap a new OpenChamber project from a Discord/Telegram conversation
+   * (or programmatically). Body: { action: 'clone'|'path'|'new', url?, path?, label? }.
+   * Returns { ok, project } on success or { ok: false, error } on failure.
+   * Powers the in-chat dialogue ("clone <url>" etc.) AND can be used by the
+   * Settings UI directly.
+   */
+  router.post('/bridge/bootstrap-project', async (req, res) => {
+    if (!projectBootstrap) {
+      return res
+        .status(503)
+        .json({ ok: false, error: 'project bootstrap is not wired in this server' });
+    }
+    const { action, url, path: targetPath, label } = req.body ?? {};
+    if (!action || !['clone', 'path', 'new'].includes(action)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "action must be one of 'clone' | 'path' | 'new'" });
+    }
+    try {
+      const result = await projectBootstrap({ action, url, path: targetPath, label });
+      return res.json(result);
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'bootstrap failed' });
+    }
   });
 
   router.post('/discord/listener/start', (req, res) => {
