@@ -1,13 +1,33 @@
 import express, { Router } from 'express';
+import { createTelegramListenerRegistry } from './telegram-listener.js';
+import {
+  createDiscordListenerRegistry,
+  generateApprovalId,
+} from './discord-listener.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
  * Handles project↔channel/topic mapping, message format adaptation, and onboarding.
  */
+/** Map a Discord HTTP failure into a short, human-friendly message. */
+function friendlyDiscordError(status, rawText) {
+  const trimmed = (rawText ?? '').slice(0, 300);
+  if (status === 401) return 'Invalid bot token.';
+  if (status === 403) {
+    return 'Bot has no access — invite it to the server and grant View Channel + Send Messages permission.';
+  }
+  if (status === 404) return 'Not found. Double-check the ID (right-click → Copy ID in Discord).';
+  if (status === 429) return 'Rate-limited by Discord. Wait a few seconds and retry.';
+  return trimmed || `HTTP ${status}`;
+}
+
 export function createMessengerSyncRouter({ broadcastEvent }) {
   const router = Router();
 
   router.use(express.json({ limit: '256kb' }));
+
+  const telegramListener = createTelegramListenerRegistry({ broadcastEvent });
+  const discordListener = createDiscordListenerRegistry({ broadcastEvent });
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
@@ -36,15 +56,39 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
 
     try {
       if (type === 'discord') {
-        const resp = await fetch('https://discord.com/api/v10/users/@me', {
-          headers: { Authorization: `Bot ${token}` },
-        });
+        const headers = { Authorization: `Bot ${token}` };
+        const resp = await fetch('https://discord.com/api/v10/users/@me', { headers });
         if (!resp.ok) {
           const text = await resp.text();
-          return res.json({ ok: false, error: `Discord: ${resp.status} ${text.slice(0, 200)}` });
+          return res.json({
+            ok: false,
+            error: `Discord: ${resp.status} — ${friendlyDiscordError(resp.status, text)}`,
+          });
         }
         const data = await resp.json();
-        return res.json({ ok: true, username: data.username, discriminator: data.discriminator });
+
+        // Fetch guilds the bot belongs to so the UI can show server context.
+        // Failure here should not break verify — keep the response best-effort.
+        let guilds = [];
+        try {
+          const gResp = await fetch('https://discord.com/api/v10/users/@me/guilds', { headers });
+          if (gResp.ok) {
+            const list = await gResp.json();
+            guilds = Array.isArray(list)
+              ? list.slice(0, 25).map((g) => ({ id: g.id, name: g.name }))
+              : [];
+          }
+        } catch {
+          // ignore — guilds is optional
+        }
+
+        return res.json({
+          ok: true,
+          id: data.id,
+          username: data.username,
+          discriminator: data.discriminator,
+          guilds,
+        });
       }
 
       if (type === 'telegram') {
@@ -53,7 +97,20 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
         if (!data.ok) {
           return res.json({ ok: false, error: data.description ?? 'Invalid token' });
         }
-        return res.json({ ok: true, username: data.result?.username, firstName: data.result?.first_name });
+        const r = data.result ?? {};
+        return res.json({
+          ok: true,
+          id: r.id,
+          username: r.username,
+          firstName: r.first_name,
+          // Bot privacy / group capability flags. `can_read_all_group_messages: false`
+          // means Privacy Mode is enabled, so the bot only sees commands, mentions,
+          // and replies in groups — the #1 cause of "I message the bot and get no
+          // reply".
+          canJoinGroups: Boolean(r.can_join_groups),
+          canReadAllGroupMessages: Boolean(r.can_read_all_group_messages),
+          supportsInlineQueries: Boolean(r.supports_inline_queries),
+        });
       }
 
       return res.status(400).json({ error: `Unknown messenger type: ${type}` });
@@ -107,7 +164,10 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
         });
         if (!resp.ok) {
           const errText = await resp.text();
-          return res.json({ ok: false, error: `Discord: ${resp.status} ${errText.slice(0, 300)}` });
+          return res.json({
+            ok: false,
+            error: `Discord: ${resp.status} — ${friendlyDiscordError(resp.status, errText)}`,
+          });
         }
         const data = await resp.json();
         broadcastEvent?.('messenger.discord.sent', { target, messageId: data.id });
@@ -118,6 +178,803 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
     } catch (err) {
       return res.json({ ok: false, error: err?.message ?? 'Send failed' });
     }
+  });
+
+  /**
+   * Resolve a Discord channel by id and (best-effort) its guild name.
+   * Body: { token, channelId }
+   * Returns: { ok, channelId, channelName, channelType, guildId, guildName, parentId, canSend }
+   *
+   * channelType numeric mapping (Discord): 0=text, 5=announcement, 11=public_thread,
+   * 12=private_thread, 15=forum, 16=media, 2=voice — we just expose the raw int + a label.
+   */
+  router.post('/discord/resolve-channel', async (req, res) => {
+    const { token, channelId } = req.body ?? {};
+    if (!token || !channelId) {
+      return res.status(400).json({ error: 'token and channelId required' });
+    }
+    const headers = { Authorization: `Bot ${token}` };
+    try {
+      const chResp = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+        { headers },
+      );
+      if (!chResp.ok) {
+        const text = await chResp.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${chResp.status} — ${friendlyDiscordError(chResp.status, text)}`,
+        });
+      }
+      const ch = await chResp.json();
+
+      // Best-effort fetch of guild name for nicer UX. The bot only sees guilds it joined.
+      let guildName = null;
+      if (ch.guild_id) {
+        try {
+          const gResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(ch.guild_id)}`,
+            { headers },
+          );
+          if (gResp.ok) {
+            const g = await gResp.json();
+            guildName = g?.name ?? null;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const typeLabels = {
+        0: 'text',
+        2: 'voice',
+        4: 'category',
+        5: 'announcement',
+        10: 'announcement-thread',
+        11: 'public-thread',
+        12: 'private-thread',
+        13: 'stage',
+        15: 'forum',
+        16: 'media',
+      };
+
+      return res.json({
+        ok: true,
+        channelId: ch.id,
+        channelName: ch.name ?? null,
+        channelType: ch.type,
+        channelTypeLabel: typeLabels[ch.type] ?? `type-${ch.type}`,
+        guildId: ch.guild_id ?? null,
+        guildName,
+        parentId: ch.parent_id ?? null,
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'resolve-channel failed' });
+    }
+  });
+
+  /**
+   * Resolve a Discord guild (server) by id and return its channel + thread
+   * topology so the UI can show "12 channels · 3 categories · 4 active threads"
+   * and the user can pick a parent category for per-project channels.
+   *
+   * Body: { token, guildId }
+   * Returns: { ok, id, name, iconHash, channels, categories, activeThreads, defaultChannelId }
+   *   - channels[]:   text/announcement/forum channels (type 0/5/15) suitable for posting
+   *   - categories[]: channel.type === 4
+   *   - activeThreads[]: from /guilds/{id}/threads/active
+   *   - defaultChannelId: first text channel id (used for test messages when nothing is set)
+   */
+  router.post('/discord/resolve-guild', async (req, res) => {
+    const { token, guildId } = req.body ?? {};
+    if (!token || !guildId) {
+      return res.status(400).json({ error: 'token and guildId required' });
+    }
+    const headers = { Authorization: `Bot ${token}` };
+    try {
+      const gResp = await fetch(
+        `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}`,
+        { headers },
+      );
+      if (!gResp.ok) {
+        const text = await gResp.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${gResp.status} — ${friendlyDiscordError(gResp.status, text)}`,
+        });
+      }
+      const guild = await gResp.json();
+
+      let rawChannels = [];
+      try {
+        const chResp = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/channels`,
+          { headers },
+        );
+        if (chResp.ok) {
+          rawChannels = await chResp.json();
+        }
+      } catch {
+        // ignore — channels best-effort
+      }
+
+      let activeThreads = [];
+      try {
+        const thResp = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/threads/active`,
+          { headers },
+        );
+        if (thResp.ok) {
+          const thData = await thResp.json();
+          activeThreads = Array.isArray(thData?.threads)
+            ? thData.threads.map((t) => ({
+                id: t.id,
+                name: t.name,
+                parentId: t.parent_id ?? null,
+                type: t.type,
+                archived: Boolean(t.thread_metadata?.archived),
+              }))
+            : [];
+        }
+      } catch {
+        // ignore — threads best-effort
+      }
+
+      const channels = rawChannels
+        .filter((c) => [0, 5, 15].includes(c.type))
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          type: c.type,
+          parentId: c.parent_id ?? null,
+          position: c.position,
+        }))
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+      const categories = rawChannels
+        .filter((c) => c.type === 4)
+        .map((c) => ({ id: c.id, name: c.name, position: c.position }))
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+      return res.json({
+        ok: true,
+        id: guild.id,
+        name: guild.name,
+        iconHash: guild.icon ?? null,
+        channels,
+        categories,
+        activeThreads,
+        defaultChannelId: channels[0]?.id ?? null,
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'resolve-guild failed' });
+    }
+  });
+
+  /**
+   * Per-project Discord sync. For each project we find-or-create a text channel
+   * under an optional parent category, post a status message, and (optionally)
+   * spawn a thread from that message named "Otto sync — {date}" so details
+   * stay out of the main channel feed.
+   *
+   * Body: {
+   *   token, guildId,
+   *   parentCategoryId?: string,
+   *   summary?: string,
+   *   projects: [{ id, label, body }],
+   *   mappings: ProjectMessengerMapping[],
+   *   createThreads?: boolean,
+   * }
+   *
+   * Returns: {
+   *   ok,
+   *   guildId,
+   *   summaryMessageId?,
+   *   channels: [{
+   *     projectId, projectLabel,
+   *     channelId, channelName,
+   *     messageId,
+   *     threadId, threadName,
+   *     created,             // true = channel was just created
+   *     threadCreated,
+   *     error,
+   *   }],
+   * }
+   */
+  router.post('/discord/sync-projects', async (req, res) => {
+    const { token, guildId, parentCategoryId, summary, projects, mappings, createThreads } =
+      req.body ?? {};
+    if (!token || !guildId) {
+      return res.status(400).json({ error: 'token and guildId required' });
+    }
+    const headers = {
+      Authorization: `Bot ${token}`,
+      'Content-Type': 'application/json',
+    };
+    const projectList = Array.isArray(projects) ? projects : [];
+    const mappingByProject = new Map(
+      (Array.isArray(mappings) ? mappings : [])
+        .filter((m) => m && m.projectId)
+        .map((m) => [m.projectId, m]),
+    );
+
+    const slugify = (s) =>
+      String(s ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 90) || 'project';
+
+    // Fetch existing channels so we can do find-by-name before creating.
+    let existingChannels = [];
+    try {
+      const cResp = await fetch(
+        `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/channels`,
+        { headers: { Authorization: `Bot ${token}` } },
+      );
+      if (cResp.ok) {
+        existingChannels = await cResp.json();
+      } else {
+        const text = await cResp.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${cResp.status} — ${friendlyDiscordError(cResp.status, text)}`,
+        });
+      }
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'failed to list channels' });
+    }
+
+    const existingByName = new Map(
+      existingChannels
+        .filter((c) => c.type === 0 || c.type === 5)
+        .map((c) => [String(c.name).toLowerCase(), c]),
+    );
+    const existingById = new Map(existingChannels.map((c) => [c.id, c]));
+
+    // Optional top-level summary message in the first text channel of the
+    // parent category (or first text channel of the guild if no category).
+    let summaryMessageId = null;
+    if (summary && summary.trim().length > 0) {
+      const candidate = parentCategoryId
+        ? existingChannels.find(
+            (c) => (c.type === 0 || c.type === 5) && c.parent_id === parentCategoryId,
+          )
+        : existingChannels.find((c) => c.type === 0 || c.type === 5);
+      if (candidate) {
+        try {
+          const sResp = await fetch(
+            `https://discord.com/api/v10/channels/${encodeURIComponent(candidate.id)}/messages`,
+            { method: 'POST', headers, body: JSON.stringify({ content: String(summary).slice(0, 2000) }) },
+          );
+          if (sResp.ok) {
+            const sJson = await sResp.json();
+            summaryMessageId = sJson.id ?? null;
+          }
+        } catch {
+          // ignore — summary is best-effort
+        }
+      }
+    }
+
+    const channelResults = [];
+
+    for (const project of projectList) {
+      const label = project.label || `Project ${project.id}`;
+      const desiredSlug = slugify(label);
+      let channel = null;
+      let created = false;
+      let entryError = null;
+
+      // 1) Try the stored mapping channel id first
+      const stored = mappingByProject.get(project.id)?.discord;
+      if (stored?.channelId && existingById.has(stored.channelId)) {
+        channel = existingById.get(stored.channelId);
+      }
+      // 2) Then try find-by-name (case-insensitive)
+      if (!channel) {
+        channel = existingByName.get(desiredSlug) ?? null;
+      }
+      // 3) Otherwise create it
+      if (!channel) {
+        try {
+          const cResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/channels`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                name: desiredSlug,
+                type: 0, // GUILD_TEXT
+                parent_id: parentCategoryId || null,
+                topic: `Otto sync channel for project ${label}`.slice(0, 1024),
+              }),
+            },
+          );
+          if (cResp.ok) {
+            channel = await cResp.json();
+            created = true;
+            existingById.set(channel.id, channel);
+            existingByName.set(String(channel.name).toLowerCase(), channel);
+          } else {
+            const text = await cResp.text();
+            entryError = `Discord: ${cResp.status} — ${friendlyDiscordError(cResp.status, text)}`;
+          }
+        } catch (err) {
+          entryError = err?.message ?? 'create channel failed';
+        }
+      }
+
+      let messageId = null;
+      let threadId = null;
+      let threadName = null;
+      let threadCreated = false;
+
+      if (channel && !entryError) {
+        // Post the per-project status message.
+        try {
+          const mResp = await fetch(
+            `https://discord.com/api/v10/channels/${encodeURIComponent(channel.id)}/messages`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                content: String(project.body ?? `Otto sync update for ${label}`).slice(0, 2000),
+              }),
+            },
+          );
+          if (mResp.ok) {
+            const mJson = await mResp.json();
+            messageId = mJson.id ?? null;
+          } else {
+            const text = await mResp.text();
+            entryError = `Discord: ${mResp.status} — ${friendlyDiscordError(mResp.status, text)}`;
+          }
+        } catch (err) {
+          entryError = err?.message ?? 'send message failed';
+        }
+
+        // Optional: start a thread from that message so details stay out of
+        // the main channel feed.
+        if (!entryError && messageId && createThreads !== false) {
+          threadName = `Otto sync — ${new Date().toISOString().slice(0, 10)}`;
+          try {
+            const tResp = await fetch(
+              `https://discord.com/api/v10/channels/${encodeURIComponent(channel.id)}/messages/${messageId}/threads`,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  name: threadName.slice(0, 100),
+                  auto_archive_duration: 1440, // 1 day
+                }),
+              },
+            );
+            if (tResp.ok) {
+              const tJson = await tResp.json();
+              threadId = tJson.id ?? null;
+              threadCreated = true;
+            } else {
+              // Thread creation failure is not fatal — channel + message succeeded.
+              const text = await tResp.text();
+              entryError =
+                entryError ?? `Thread skipped: Discord ${tResp.status} — ${friendlyDiscordError(tResp.status, text)}`;
+            }
+          } catch (err) {
+            entryError = entryError ?? `Thread skipped: ${err?.message ?? 'thread create failed'}`;
+          }
+        }
+      }
+
+      channelResults.push({
+        projectId: project.id,
+        projectLabel: label,
+        channelId: channel?.id ?? null,
+        channelName: channel?.name ?? null,
+        messageId,
+        threadId,
+        threadName,
+        created,
+        threadCreated,
+        error: entryError,
+      });
+    }
+
+    broadcastEvent?.('messenger.discord.synced', {
+      guildId,
+      projectCount: projectList.length,
+      created: channelResults.filter((c) => c.created).length,
+      errors: channelResults.filter((c) => c.error).length,
+    });
+
+    res.json({
+      ok: channelResults.every((c) => !c.error),
+      guildId,
+      summaryMessageId,
+      channels: channelResults,
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Discord Gateway listener (parity with Telegram long-poll listener)
+  // ──────────────────────────────────────────────────────────────────────────
+  router.post('/discord/listener/start', (req, res) => {
+    const { token, guildId, autoReply } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.start(token, { guildId, autoReply: autoReply !== false }));
+  });
+
+  router.post('/discord/listener/stop', (req, res) => {
+    const { token } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.stop(token));
+  });
+
+  router.post('/discord/listener/status', (req, res) => {
+    const token = req.body?.token;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.status(token));
+  });
+
+  router.post('/discord/listener/recent', (req, res) => {
+    const token = req.body?.token;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    res.json(discordListener.recent(token, req.body?.limit ?? 25));
+  });
+
+  /**
+   * Fetch the last N messages from a Discord channel or thread via REST.
+   * Body: { token, channelId, limit? } — limit clamped to 1..100.
+   * Returns: { ok, messages: [{ id, content, author, timestamp, threadId }] }
+   */
+  router.post('/discord/history', async (req, res) => {
+    const { token, channelId } = req.body ?? {};
+    const limit = Math.min(100, Math.max(1, Number(req.body?.limit ?? 50)));
+    if (!token || !channelId) {
+      return res.status(400).json({ error: 'token and channelId required' });
+    }
+    try {
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages?limit=${limit}`,
+        { headers: { Authorization: `Bot ${token}` } },
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+        });
+      }
+      const raw = await r.json();
+      const messages = (Array.isArray(raw) ? raw : []).map((m) => ({
+        id: m.id,
+        channelId: m.channel_id,
+        content: m.content ?? '',
+        timestamp: m.timestamp,
+        author: {
+          id: m.author?.id,
+          username: m.author?.username ?? null,
+          globalName: m.author?.global_name ?? null,
+          isBot: Boolean(m.author?.bot),
+        },
+        attachmentCount: Array.isArray(m.attachments) ? m.attachments.length : 0,
+        threadId: null,
+      }));
+      return res.json({ ok: true, messages });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'history fetch failed' });
+    }
+  });
+
+  /**
+   * Post an approval-request message with two buttons (Approve / Deny) in a
+   * Discord channel. The button custom_ids embed the approvalId so the
+   * gateway listener can route the click back as a structured event.
+   *
+   * Body: { token, channelId, prompt, approvalId? }
+   */
+  router.post('/discord/send-approval', async (req, res) => {
+    const { token, channelId, prompt, approvalId } = req.body ?? {};
+    if (!token || !channelId || !prompt) {
+      return res.status(400).json({ error: 'token, channelId and prompt required' });
+    }
+    const id = approvalId || generateApprovalId();
+    const body = {
+      content: `**Otto needs approval**\n${String(prompt).slice(0, 1600)}`,
+      components: [
+        {
+          type: 1, // ACTION_ROW
+          components: [
+            {
+              type: 2, // BUTTON
+              style: 3, // SUCCESS (green)
+              label: 'Approve',
+              custom_id: `otto-approve:${id}`,
+            },
+            {
+              type: 2,
+              style: 4, // DANGER (red)
+              label: 'Deny',
+              custom_id: `otto-deny:${id}`,
+            },
+          ],
+        },
+      ],
+    };
+    try {
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+        });
+      }
+      const data = await r.json();
+      return res.json({
+        ok: true,
+        approvalId: id,
+        messageId: data.id,
+        channelId: data.channel_id ?? channelId,
+        sentAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'send-approval failed' });
+    }
+  });
+
+  /**
+   * Post an approval-request message with an inline keyboard in Telegram.
+   * Body: { token, chatId, threadId?, prompt, approvalId? }
+   */
+  router.post('/telegram/send-approval', async (req, res) => {
+    const { token, chatId, threadId, prompt, approvalId } = req.body ?? {};
+    if (!token || !chatId || !prompt) {
+      return res.status(400).json({ error: 'token, chatId and prompt required' });
+    }
+    const id = approvalId || generateApprovalId();
+    const body = {
+      chat_id: chatId,
+      text: `🤖 Otto needs approval\n\n${String(prompt).slice(0, 3800)}`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ Approve', callback_data: `otto-approve:${id}` },
+            { text: '❌ Deny', callback_data: `otto-deny:${id}` },
+          ],
+        ],
+      },
+    };
+    if (threadId) body.message_thread_id = Number(threadId);
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!data.ok) {
+        return res.json({ ok: false, error: data.description ?? `Telegram error ${r.status}` });
+      }
+      return res.json({
+        ok: true,
+        approvalId: id,
+        messageId: data.result?.message_id,
+        chatId,
+        sentAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'send-approval failed' });
+    }
+  });
+
+  /**
+   * Discord setup diagnosis — parity with /telegram/diagnose.
+   * Verifies token, intents, guild access, default channel post + admin rights.
+   * Body: { token, guildId?, channelId? }
+   */
+  router.post('/discord/diagnose', async (req, res) => {
+    const { token, guildId, channelId } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+    const headers = { Authorization: `Bot ${token}` };
+    const checks = [];
+    const push = (c) => checks.push(c);
+
+    let bot = null;
+    try {
+      const r = await fetch('https://discord.com/api/v10/users/@me', { headers });
+      if (!r.ok) {
+        const text = await r.text();
+        push({
+          id: 'token',
+          ok: false,
+          severity: 'error',
+          title: 'Invalid bot token',
+          detail: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+          fix: 'Re-paste the token from Discord Developer Portal → your app → Bot → Reset Token.',
+        });
+        return res.json({ ok: false, checks });
+      }
+      bot = await r.json();
+      push({
+        id: 'token',
+        ok: true,
+        severity: 'ok',
+        title: `Bot is reachable as ${bot.username}${bot.discriminator && bot.discriminator !== '0' ? '#' + bot.discriminator : ''}`,
+        detail: `Bot id ${bot.id}.`,
+      });
+    } catch (err) {
+      push({
+        id: 'token',
+        ok: false,
+        severity: 'error',
+        title: 'Could not reach Discord',
+        detail: err?.message ?? 'network error',
+      });
+      return res.json({ ok: false, checks });
+    }
+
+    // Intents reminder — we can't read them from REST, but we can flag the
+    // requirement for the gateway listener to work.
+    push({
+      id: 'intents',
+      ok: true,
+      severity: 'info',
+      title: 'Message Content intent must be enabled in Developer Portal',
+      detail:
+        "Otherwise the gateway will close with code 4014 and the listener won't see any non-mention messages.",
+      fix: 'Developer Portal → your app → Bot → "Privileged Gateway Intents" → enable "MESSAGE CONTENT INTENT" → Save.',
+    });
+
+    // Guild access
+    if (guildId) {
+      try {
+        const r = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}`,
+          { headers },
+        );
+        if (!r.ok) {
+          const text = await r.text();
+          push({
+            id: 'guild',
+            ok: false,
+            severity: 'error',
+            title: 'Cannot access server',
+            detail: `Discord: ${r.status} — ${friendlyDiscordError(r.status, text)}`,
+            fix: 'Invite the bot to the server via the invite URL above.',
+          });
+          return res.json({ ok: false, checks });
+        }
+        const guild = await r.json();
+        push({
+          id: 'guild',
+          ok: true,
+          severity: 'ok',
+          title: `Server "${guild.name}" reachable`,
+          detail: `Server id ${guild.id}.`,
+        });
+
+        // Bot member + permissions
+        try {
+          const mResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(bot.id)}`,
+            { headers },
+          );
+          if (mResp.ok) {
+            const member = await mResp.json();
+            const roleCount = Array.isArray(member.roles) ? member.roles.length : 0;
+            push({
+              id: 'membership',
+              ok: true,
+              severity: 'ok',
+              title: 'Bot is a member of the server',
+              detail: `Roles: ${roleCount}. (Channel-level rights are enforced per-channel; if posting fails, check the channel's Permissions.)`,
+            });
+          } else {
+            push({
+              id: 'membership',
+              ok: false,
+              severity: 'warn',
+              title: 'Could not fetch bot membership',
+              detail: `Discord: ${mResp.status} — ${friendlyDiscordError(mResp.status, await mResp.text())}`,
+              fix: 'Ensure the bot is invited to the server.',
+            });
+          }
+        } catch (err) {
+          push({
+            id: 'membership',
+            ok: false,
+            severity: 'warn',
+            title: 'Membership check failed',
+            detail: err?.message ?? 'network error',
+          });
+        }
+      } catch (err) {
+        push({
+          id: 'guild',
+          ok: false,
+          severity: 'error',
+          title: 'getGuild failed',
+          detail: err?.message ?? 'network error',
+        });
+      }
+    } else {
+      push({
+        id: 'guild',
+        ok: false,
+        severity: 'warn',
+        title: 'No Server ID configured',
+        detail: 'Add a Server ID to enable per-project channel + thread sync.',
+      });
+    }
+
+    // Default channel post check
+    if (channelId) {
+      try {
+        const r = await fetch(
+          `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+          { headers },
+        );
+        if (!r.ok) {
+          push({
+            id: 'channel',
+            ok: false,
+            severity: 'error',
+            title: 'Cannot access default channel',
+            detail: `Discord: ${r.status} — ${friendlyDiscordError(r.status, await r.text())}`,
+            fix: 'Right-click the channel → "Copy Channel ID" and re-save, or invite the bot to that channel.',
+          });
+        } else {
+          const ch = await r.json();
+          push({
+            id: 'channel',
+            ok: true,
+            severity: 'ok',
+            title: `Default channel #${ch.name} reachable`,
+            detail: `Channel id ${ch.id} · type ${ch.type}.`,
+          });
+        }
+      } catch (err) {
+        push({
+          id: 'channel',
+          ok: false,
+          severity: 'error',
+          title: 'getChannel failed',
+          detail: err?.message ?? 'network error',
+        });
+      }
+    }
+
+    return res.json({ ok: checks.every((c) => c.ok || c.severity === 'info'), checks });
+  });
+
+  /**
+   * Build a Discord bot invite URL the user can click to add the bot to a server.
+   * Body: { clientId, permissions? }
+   *   - clientId: the bot/application id (returned by /test for discord)
+   *   - permissions: integer bitfield; defaults to a conservative "Send Messages, Embed Links,
+   *     Read Message History, View Channel" set so messenger sync can actually post.
+   */
+  router.post('/discord/invite-url', (req, res) => {
+    const { clientId, permissions } = req.body ?? {};
+    if (!clientId || typeof clientId !== 'string') {
+      return res.status(400).json({ error: 'clientId required' });
+    }
+    // Default perms: View Channel (1<<10) | Send Messages (1<<11) | Embed Links (1<<14)
+    //              | Read Message History (1<<16) = 117760
+    const perms = typeof permissions === 'string' || typeof permissions === 'number'
+      ? String(permissions)
+      : '117760';
+    const url =
+      `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}` +
+      `&permissions=${encodeURIComponent(perms)}&scope=bot%20applications.commands`;
+    return res.json({ ok: true, url });
   });
 
   /**
@@ -150,6 +1007,441 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
     } catch (err) {
       return res.json({ ok: false, error: err?.message ?? 'resolve-chat failed' });
     }
+  });
+
+  /**
+   * Run a full setup diagnosis for a Telegram bot + chat.
+   * Body: { token, chatId }
+   * Returns: { ok, checks: [{ id, ok, severity, title, detail, fix? }] }
+   *
+   * Each check is a structured row the UI renders as a green/yellow/red bullet.
+   * Diagnosed problems include: invalid token, Privacy Mode enabled, chat not
+   * found, chat not a forum (so no per-project topics), bot not in chat, bot
+   * not admin, bot admin but missing manage_topics permission, etc.
+   */
+  router.post('/telegram/diagnose', async (req, res) => {
+    const { token, chatId } = req.body ?? {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    const tgGet = async (method, body) => {
+      const init = body
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        : undefined;
+      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, init);
+      return r.json();
+    };
+
+    const checks = [];
+    const push = (c) => checks.push(c);
+
+    // 1) Token / bot identity
+    let bot = null;
+    try {
+      const me = await tgGet('getMe');
+      if (!me.ok) {
+        push({
+          id: 'token',
+          ok: false,
+          severity: 'error',
+          title: 'Invalid bot token',
+          detail: me.description ?? 'getMe failed',
+          fix: 'Re-paste the token from @BotFather (/mybots → your bot → API Token).',
+        });
+        return res.json({ ok: false, checks });
+      }
+      bot = me.result;
+      push({
+        id: 'token',
+        ok: true,
+        severity: 'ok',
+        title: `Bot is reachable as @${bot.username}`,
+        detail: `Bot id ${bot.id}.`,
+      });
+
+      // 2) Privacy mode — by far the most common reason a bot 'doesn't reply' in groups.
+      if (bot.can_read_all_group_messages) {
+        push({
+          id: 'privacy',
+          ok: true,
+          severity: 'ok',
+          title: 'Privacy mode is OFF',
+          detail: 'Bot can read every message in groups it joins.',
+        });
+      } else {
+        push({
+          id: 'privacy',
+          ok: false,
+          severity: 'warn',
+          title: 'Privacy mode is ON — bot only sees /commands, @mentions and replies in groups',
+          detail:
+            'This is the #1 reason a Telegram bot looks unresponsive: plain group messages never reach getUpdates.',
+          fix: 'Open @BotFather → /setprivacy → choose your bot → Disable. Then remove and re-add the bot to the group so the new privacy setting takes effect.',
+        });
+      }
+    } catch (err) {
+      push({
+        id: 'token',
+        ok: false,
+        severity: 'error',
+        title: 'Could not reach Telegram',
+        detail: err?.message ?? 'network error',
+      });
+      return res.json({ ok: false, checks });
+    }
+
+    if (!chatId) {
+      push({
+        id: 'chat',
+        ok: false,
+        severity: 'warn',
+        title: 'No chat ID configured yet',
+        detail: 'Save a chat ID first to run the chat / membership / topic checks.',
+      });
+      return res.json({ ok: checks.every((c) => c.ok), checks });
+    }
+
+    // 3) Chat exists / type / forum
+    let chat = null;
+    try {
+      const gc = await tgGet('getChat', { chat_id: chatId });
+      if (!gc.ok) {
+        push({
+          id: 'chat',
+          ok: false,
+          severity: 'error',
+          title: 'Chat not found / bot has no access',
+          detail: gc.description ?? 'getChat failed',
+          fix: 'Make sure the bot has been added to the target chat and that the chat ID is correct (groups start with -100…).',
+        });
+        return res.json({ ok: false, checks });
+      }
+      chat = gc.result;
+      push({
+        id: 'chat',
+        ok: true,
+        severity: 'ok',
+        title: `Chat "${chat.title ?? chat.username ?? chat.id}" reachable`,
+        detail: `Type: ${chat.type}${chat.is_forum ? ' · forum (topics enabled)' : ''}.`,
+      });
+
+      // 4) Forum capability for per-project topics
+      if (chat.type === 'private') {
+        push({
+          id: 'forum',
+          ok: false,
+          severity: 'info',
+          title: 'Chat is a private DM',
+          detail: 'Otto will post one summary message; per-project topics only work in supergroups with topics enabled.',
+        });
+      } else if (chat.is_forum) {
+        push({
+          id: 'forum',
+          ok: true,
+          severity: 'ok',
+          title: 'Topics are enabled in this chat',
+          detail: 'Sync now will create / re-use one forum topic per project.',
+        });
+      } else {
+        push({
+          id: 'forum',
+          ok: false,
+          severity: 'warn',
+          title: 'Topics are NOT enabled in this chat',
+          detail: 'Sync now will fall back to a single summary message in the main chat.',
+          fix:
+            chat.type === 'supergroup' || chat.type === 'group'
+              ? 'In Telegram open the group → Manage Group → Topics → enable. (Requires the supergroup to have ≥ 200 members on some clients, or convert via Manage Group → Group Type → Public/Private supergroup.)'
+              : 'Per-project topics are only supported in supergroups with topics enabled.',
+        });
+      }
+    } catch (err) {
+      push({
+        id: 'chat',
+        ok: false,
+        severity: 'error',
+        title: 'getChat failed',
+        detail: err?.message ?? 'network error',
+      });
+      return res.json({ ok: false, checks });
+    }
+
+    // 5) Membership / admin / manage_topics permission
+    if (chat.type === 'group' || chat.type === 'supergroup' || chat.type === 'channel') {
+      try {
+        const cm = await tgGet('getChatMember', { chat_id: chatId, user_id: bot.id });
+        if (!cm.ok) {
+          push({
+            id: 'membership',
+            ok: false,
+            severity: 'error',
+            title: 'Could not check bot membership',
+            detail: cm.description ?? 'getChatMember failed',
+            fix: 'Add the bot to the chat (Group settings → Add Member → search by username).',
+          });
+        } else {
+          const m = cm.result;
+          const status = m.status; // 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked'
+          if (status === 'left' || status === 'kicked') {
+            push({
+              id: 'membership',
+              ok: false,
+              severity: 'error',
+              title: 'Bot is not in the chat',
+              detail: `getChatMember returned status="${status}".`,
+              fix: 'Open the chat → Members → Add → search for your bot by username and add it.',
+            });
+          } else if (status === 'restricted') {
+            push({
+              id: 'membership',
+              ok: false,
+              severity: 'warn',
+              title: 'Bot is restricted in this chat',
+              detail: 'Restricted bots cannot post messages.',
+              fix: 'Promote the bot or remove the restriction in Group → Manage → Permissions.',
+            });
+          } else if (status === 'administrator' || status === 'creator') {
+            const canManageTopics = m.can_manage_topics ?? false;
+            if (chat.is_forum && !canManageTopics) {
+              push({
+                id: 'membership',
+                ok: false,
+                severity: 'warn',
+                title: 'Bot is admin but cannot manage topics',
+                detail:
+                  'createForumTopic will fail with "not enough rights to manage topics".',
+                fix: 'Group → Manage → Administrators → your bot → enable "Manage topics", then save.',
+              });
+            } else {
+              push({
+                id: 'membership',
+                ok: true,
+                severity: 'ok',
+                title: `Bot is ${status === 'creator' ? 'the creator' : 'an administrator'}`,
+                detail: chat.is_forum
+                  ? `Manage topics: ${canManageTopics ? 'yes' : 'no'}.`
+                  : 'Admin permissions confirmed.',
+              });
+            }
+          } else {
+            // status === 'member'
+            if (chat.is_forum) {
+              push({
+                id: 'membership',
+                ok: false,
+                severity: 'warn',
+                title: 'Bot is a regular member, not admin',
+                detail:
+                  'createForumTopic requires the bot to be admin with the "Manage topics" right.',
+                fix: 'Group → Manage → Administrators → Add → pick your bot → enable "Manage topics".',
+              });
+            } else {
+              push({
+                id: 'membership',
+                ok: true,
+                severity: 'ok',
+                title: 'Bot is a member',
+                detail: 'Plain sendMessage will work; admin rights only required for managing topics.',
+              });
+            }
+          }
+        }
+      } catch (err) {
+        push({
+          id: 'membership',
+          ok: false,
+          severity: 'error',
+          title: 'Could not check bot membership',
+          detail: err?.message ?? 'network error',
+        });
+      }
+    } else {
+      push({
+        id: 'membership',
+        ok: true,
+        severity: 'ok',
+        title: 'Private chat — no membership/admin check needed',
+        detail: 'Direct messages always reach the bot.',
+      });
+    }
+
+    return res.json({ ok: checks.every((c) => c.ok), checks });
+  });
+
+  /**
+   * Start a Telegram long-poll listener for incoming messages.
+   * Body: { token, autoReply? }
+   * Idempotent: returns the existing listener if one is already running for that token.
+   */
+  router.post('/telegram/listener/start', (req, res) => {
+    const { token, autoReply } = req.body ?? {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    const result = telegramListener.start(token, { autoReply: autoReply !== false });
+    res.json(result);
+  });
+
+  router.post('/telegram/listener/stop', (req, res) => {
+    const { token } = req.body ?? {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    res.json(telegramListener.stop(token));
+  });
+
+  router.post('/telegram/listener/status', (req, res) => {
+    const token = req.body?.token ?? req.query?.token;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    res.json(telegramListener.status(token));
+  });
+
+  router.post('/telegram/listener/recent', (req, res) => {
+    const token = req.body?.token ?? req.query?.token;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'token required' });
+    }
+    const limit = req.body?.limit ?? 25;
+    res.json(telegramListener.recent(token, limit));
+  });
+
+  /**
+   * Telegram per-project sync. For forum chats this creates a forum topic per
+   * project (using stored mappings when present) and posts a status message
+   * inside each topic. For non-forum chats it falls back to one bullet-list
+   * message in the main chat.
+   *
+   * Body: {
+   *   token: string,
+   *   chatId: string | number,
+   *   isForum: boolean,
+   *   summary: string,                 // top-line summary (non-forum mode + intro)
+   *   projects: [{ id, label, body }], // per-project payload
+   *   mappings: [{ projectId, telegram?: { topicId, topicName } }],
+   * }
+   *
+   * Returns: { ok, postedTo: 'forum'|'chat', topics: [{ projectId, topicId, topicName, messageId, created, error? }] }
+   */
+  router.post('/telegram/sync-projects', async (req, res) => {
+    const { token, chatId, isForum, summary, projects, mappings } = req.body ?? {};
+    if (!token || !chatId) {
+      return res.status(400).json({ error: 'token and chatId required' });
+    }
+    const projectList = Array.isArray(projects) ? projects : [];
+    const mappingByProject = new Map(
+      (Array.isArray(mappings) ? mappings : [])
+        .filter((m) => m && m.projectId)
+        .map((m) => [m.projectId, m]),
+    );
+
+    const tgCall = async (method, body) => {
+      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return r.json();
+    };
+
+    // Non-forum: send the summary as a single message, optionally followed by per-project lines.
+    if (!isForum || projectList.length === 0) {
+      const text =
+        summary && summary.trim().length > 0
+          ? summary
+          : projectList.length === 0
+            ? '🤖 Otto sync — no projects configured yet.'
+            : `🤖 Otto sync\n\n${projectList.map((p) => `• ${p.label}`).join('\n')}`;
+      const sent = await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: String(text).slice(0, 4096),
+      });
+      if (!sent.ok) {
+        return res.json({
+          ok: false,
+          postedTo: 'chat',
+          error: sent.description ?? 'sendMessage failed',
+        });
+      }
+      return res.json({
+        ok: true,
+        postedTo: 'chat',
+        topics: [],
+        mainMessageId: sent.result?.message_id,
+      });
+    }
+
+    // Forum: optional summary in the General topic first.
+    let mainMessageId = null;
+    if (summary && summary.trim().length > 0) {
+      const sumResp = await tgCall('sendMessage', {
+        chat_id: chatId,
+        text: String(summary).slice(0, 4096),
+      });
+      if (sumResp.ok) {
+        mainMessageId = sumResp.result?.message_id ?? null;
+      }
+    }
+
+    const topics = [];
+    for (const project of projectList) {
+      const existing = mappingByProject.get(project.id)?.telegram;
+      let topicId = existing?.topicId && /^\d+$/.test(String(existing.topicId))
+        ? Number(existing.topicId)
+        : null;
+      const topicName = existing?.topicName || project.label || `Project ${project.id}`;
+      let created = false;
+      let entryError = null;
+
+      // Create the topic if we don't have one stored.
+      if (topicId == null) {
+        const createResp = await tgCall('createForumTopic', {
+          chat_id: chatId,
+          name: topicName.slice(0, 128),
+        });
+        if (createResp.ok && createResp.result?.message_thread_id) {
+          topicId = createResp.result.message_thread_id;
+          created = true;
+        } else {
+          entryError = createResp.description ?? 'createForumTopic failed';
+        }
+      }
+
+      let messageId = null;
+      if (topicId != null && !entryError) {
+        const msgResp = await tgCall('sendMessage', {
+          chat_id: chatId,
+          message_thread_id: topicId,
+          text: String(project.body ?? `🤖 Sync update for ${project.label}`).slice(0, 4096),
+        });
+        if (msgResp.ok) {
+          messageId = msgResp.result?.message_id ?? null;
+        } else {
+          entryError = msgResp.description ?? 'sendMessage failed';
+        }
+      }
+
+      topics.push({
+        projectId: project.id,
+        projectLabel: project.label,
+        topicId: topicId != null ? String(topicId) : null,
+        topicName,
+        messageId,
+        created,
+        error: entryError,
+      });
+    }
+
+    res.json({
+      ok: topics.every((t) => !t.error),
+      postedTo: 'forum',
+      mainMessageId,
+      topics,
+    });
   });
 
   // Webhook for incoming messages from messengers
