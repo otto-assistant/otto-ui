@@ -670,12 +670,34 @@ function DiscordListenerPanel({
             />
             Auto-reply
           </label>
+          <label
+            className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer"
+            title="When on, only messages from the saved Server (Guild) ID reach the UI. When off (default) every message the bot can see is forwarded."
+          >
+            <input
+              type="checkbox"
+              checked={Boolean(conn.discordListenerScopeToGuild)}
+              onChange={(e) =>
+                useMessengerStore
+                  .getState()
+                  .updateConnection('discord', { discordListenerScopeToGuild: e.target.checked })
+              }
+              className="rounded border-border accent-primary"
+            />
+            Scope to saved server
+          </label>
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-[10px]">
+      <div className="grid grid-cols-4 gap-2 text-[10px]">
         <div className="rounded bg-background border border-border px-2 py-1.5">
-          <div className="text-muted-foreground">Received</div>
+          <div className="text-muted-foreground">Gateway saw</div>
+          <div className="text-foreground font-medium">
+            {conn.discordListenerTotalRawMessages ?? 0}
+          </div>
+        </div>
+        <div className="rounded bg-background border border-border px-2 py-1.5">
+          <div className="text-muted-foreground">Forwarded</div>
           <div className="text-foreground font-medium">
             {conn.discordListenerTotalReceived ?? 0}
           </div>
@@ -693,6 +715,43 @@ function DiscordListenerPanel({
           </div>
         </div>
       </div>
+
+      {/* Loud diagnostic when the saved guild ID doesn't match the guild the
+          gateway is actually delivering messages from — common root cause of
+          "the bot doesn't reply to my messages". */}
+      {(conn.discordListenerFilteredOutCount ?? 0) > 0 &&
+        conn.discordListenerScopeToGuild &&
+        conn.discordListenerLastFilteredGuildId &&
+        conn.discordListenerLastFilteredGuildId !== conn.discordGuildId && (
+          <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-[11px] text-yellow-800 dark:text-yellow-300 flex items-start gap-2 leading-snug">
+            <RiAlertLine className="size-3.5 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-medium">
+                Filtered out {conn.discordListenerFilteredOutCount} message
+                {conn.discordListenerFilteredOutCount === 1 ? '' : 's'} from guild{' '}
+                <code className="bg-muted px-1 rounded">{conn.discordListenerLastFilteredGuildId}</code>
+              </div>
+              <div className="mt-0.5">
+                The listener is scoped to your saved Server ID (
+                <code className="bg-muted px-1 rounded">{conn.discordGuildId}</code>) but the bot
+                is also hearing from another server. Update the Server ID, or turn off
+                "Scope to saved server" below.
+              </div>
+            </div>
+          </div>
+        )}
+
+      {/* Hint when the gateway is connected but no messages have arrived yet —
+          either the bot has no channel access, or MESSAGE_CONTENT is off. */}
+      {connected && (conn.discordListenerTotalRawMessages ?? 0) === 0 && (
+        <div className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground leading-snug">
+          Gateway connected — IDENTIFY accepted. Post a message in a channel the bot can see to
+          confirm end-to-end. If nothing arrives:
+          (1) the bot must have <em>View Channel</em> on that channel,
+          (2) <em>Message Content</em> intent must be enabled in the Developer Portal, then
+          restart the listener for the new intent to apply.
+        </div>
+      )}
 
       {conn.discordListenerError && (
         <div className="text-[11px] text-destructive flex items-start gap-1.5 leading-snug">
@@ -1013,42 +1072,71 @@ function DiscordSyncResults({
         )}
       </div>
       <ul className="space-y-1">
-        {channels.map((c) => (
-          <li
-            key={c.projectId}
-            className="rounded bg-background border border-border px-2 py-1.5 text-[11px] flex items-start gap-2"
-          >
-            <span
-              className={cn(
-                'mt-0.5',
-                c.error
-                  ? 'text-destructive'
-                  : c.created
-                    ? 'text-green-600 dark:text-green-400'
-                    : 'text-muted-foreground',
-              )}
+        {channels.map((c) => {
+          const channelOk = !c.error && Boolean(c.messageId);
+          const threadAsked = c.threadRequested !== false;
+          // Status icon priority: channel-failed > thread-failed-but-channel-ok > all-ok > nothing-done
+          const iconState = c.error
+            ? 'channel-error'
+            : threadAsked && c.threadError
+              ? 'thread-error'
+              : c.created
+                ? 'new'
+                : channelOk
+                  ? 'reused'
+                  : 'idle';
+          return (
+            <li
+              key={c.projectId}
+              className="rounded bg-background border border-border px-2 py-1.5 text-[11px] flex items-start gap-2"
             >
-              {c.error ? '✗' : c.created ? '✓ new' : '·'}
-            </span>
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-foreground truncate">
-                {c.projectLabel}{' '}
-                <span className="text-muted-foreground font-normal">
-                  → {c.channelName ? `#${c.channelName}` : '(no channel)'}
-                  {c.threadId ? ` › ${c.threadName ?? 'thread'}` : ''}
-                </span>
-              </div>
-              {c.error && (
-                <div className="text-destructive leading-snug">{c.error}</div>
-              )}
-              {!c.error && c.messageId && (
-                <div className="text-[10px] text-muted-foreground">
-                  message {c.messageId} sent{c.threadCreated ? ' · thread opened' : ''}
+              <span
+                className={cn(
+                  'mt-0.5',
+                  iconState === 'channel-error' && 'text-destructive',
+                  iconState === 'thread-error' && 'text-yellow-600 dark:text-yellow-400',
+                  iconState === 'new' && 'text-green-600 dark:text-green-400',
+                  (iconState === 'reused' || iconState === 'idle') && 'text-muted-foreground',
+                )}
+              >
+                {iconState === 'channel-error'
+                  ? '✗'
+                  : iconState === 'thread-error'
+                    ? '⚠'
+                    : iconState === 'new'
+                      ? '✓ new'
+                      : '·'}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-foreground truncate">
+                  {c.projectLabel}{' '}
+                  <span className="text-muted-foreground font-normal">
+                    → {c.channelName ? `#${c.channelName}` : '(no channel)'}
+                    {c.threadId ? ` › ${c.threadName ?? 'thread'}` : ''}
+                  </span>
                 </div>
-              )}
-            </div>
-          </li>
-        ))}
+                {channelOk && (
+                  <div className="text-[10px] text-muted-foreground">
+                    message {c.messageId} sent
+                    {c.threadCreated
+                      ? ' · thread opened'
+                      : threadAsked
+                        ? ' · thread NOT opened'
+                        : ''}
+                  </div>
+                )}
+                {c.error && (
+                  <div className="text-destructive leading-snug">{c.error}</div>
+                )}
+                {!c.error && c.threadError && (
+                  <div className="text-yellow-700 dark:text-yellow-400 leading-snug">
+                    Thread skipped — {c.threadError}
+                  </div>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

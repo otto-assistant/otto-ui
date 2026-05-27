@@ -112,9 +112,23 @@ function inboundFromMessage(message) {
 }
 
 async function dispatchMessageCreate(state, message, broadcastEvent) {
-  // Filter: only act when the message is in a guild we care about, or a DM.
-  // If state.guildId is set, scope to that guild.
-  if (state.guildId && message.guild_id && message.guild_id !== state.guildId) return;
+  // Always count the raw event so the user can tell the difference between
+  // "Gateway delivers no messages" (intent / permission issue) and
+  // "Gateway delivers messages but we filter them all out" (wrong guildId
+  // saved). Both used to look identical to the user.
+  state.totalRawMessages += 1;
+  state.lastRawMessageAt = Date.now();
+  state.lastRawMessageGuildId = message.guild_id ?? null;
+
+  // Optional guild filter — kept for cases where someone explicitly wants to
+  // limit a token to one server, but off by default. When the configured
+  // guildId doesn't match we record the mismatch so the UI can flag it
+  // (previously the message just disappeared).
+  if (state.scopeToGuild && state.guildId && message.guild_id && message.guild_id !== state.guildId) {
+    state.filteredOutCount += 1;
+    state.lastFilteredGuildId = message.guild_id;
+    return;
+  }
 
   const inbound = inboundFromMessage(message);
   state.recent.push(inbound);
@@ -370,6 +384,10 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
     const state = {
       token,
       guildId: opts.guildId ?? null,
+      // Off by default so a multi-server bot's events all reach the UI. When
+      // explicitly requested via opts.scopeToGuild, we still filter — but
+      // record what we filter so the user can tell why.
+      scopeToGuild: Boolean(opts.scopeToGuild),
       intents: opts.intents ?? DEFAULT_INTENTS,
       autoReply: opts.autoReply !== false,
       ws: null,
@@ -388,6 +406,11 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
       consecutiveErrors: 0,
       totalReceived: 0,
       totalReplied: 0,
+      totalRawMessages: 0,
+      lastRawMessageAt: null,
+      lastRawMessageGuildId: null,
+      filteredOutCount: 0,
+      lastFilteredGuildId: null,
       recent: [],
       reconnectTimer: null,
     };
@@ -438,6 +461,8 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
       running: state.running,
       connected: state.connected,
       autoReply: state.autoReply,
+      scopeToGuild: state.scopeToGuild,
+      guildId: state.guildId,
       botId: state.botId,
       botUsername: state.botUsername,
       startedAt: state.startedAt,
@@ -445,11 +470,23 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
       lastError: state.lastError,
       totalReceived: state.totalReceived,
       totalReplied: state.totalReplied,
+      totalRawMessages: state.totalRawMessages,
+      lastRawMessageAt: state.lastRawMessageAt,
+      lastRawMessageGuildId: state.lastRawMessageGuildId,
+      filteredOutCount: state.filteredOutCount,
+      lastFilteredGuildId: state.lastFilteredGuildId,
       recentCount: state.recent.length,
     };
   }
 
-  return { start, stop, status, recent };
+  /** Allow other modules (e.g. diagnose) to peek at the live state. */
+  function inspect(token) {
+    const state = listeners.get(tokenKey(token));
+    if (!state) return null;
+    return statusSnapshot(state);
+  }
+
+  return { start, stop, status, recent, inspect };
 }
 
 export function generateApprovalId() {
