@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { getSafeStorage } from './utils/safeStorage';
+import { useProjectsStore } from './useProjectsStore';
 
 export type MessengerType = 'discord' | 'telegram';
 export type SyncMode = 'full' | 'notifications' | 'off';
@@ -124,6 +125,11 @@ export interface MessengerConnection {
   discordListenerAutoReply?: boolean;
   /** When true, scope the listener strictly to the saved Server (Guild) ID. */
   discordListenerScopeToGuild?: boolean;
+  /**
+   * Bridge inbound channel/chat messages to OpenCode (default true). When
+   * off, the listener only does the legacy "Otto received: ..." auto-reply.
+   */
+  bridgeEnabled?: boolean;
 
   // Sync config
   syncMode: SyncMode;
@@ -260,6 +266,31 @@ interface MessengerState {
   /** Pending + answered approvals across both messengers, newest first. */
   approvals: MessengerApproval[];
 
+  /**
+   * Snapshot of OpenCode↔messenger session bindings (per channel/topic) +
+   * in-flight prompt contexts. Refreshed on demand from /bridge/status.
+   */
+  bridgeStatus: {
+    enabled: boolean;
+    bindings: {
+      type: MessengerType;
+      targetKey: string;
+      sessionId: string;
+      projectPath: string | null;
+      projectLabel: string | null;
+      createdAt: string;
+      lastUsedAt: string;
+    }[];
+    active: {
+      type: MessengerType;
+      channelId: string;
+      threadId: string | null;
+      messageId: string | number | null;
+      startedAt: number;
+      lastError: string | null;
+    }[];
+  };
+
   addConnection: (type: MessengerType) => void;
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
   removeConnection: (type: MessengerType) => void;
@@ -280,6 +311,7 @@ interface MessengerState {
   ) => Promise<boolean>;
   diagnoseTelegram: () => Promise<boolean>;
   diagnoseDiscord: () => Promise<boolean>;
+  refreshBridgeStatus: (type?: MessengerType) => Promise<void>;
   startDiscordListener: () => Promise<boolean>;
   stopDiscordListener: () => Promise<boolean>;
   refreshDiscordListenerStatus: () => Promise<void>;
@@ -348,6 +380,7 @@ export const useMessengerStore = create<MessengerState>()(
       discordDiagnosis: null,
       discordDiagnosisRunning: false,
       approvals: [],
+      bridgeStatus: { enabled: false, bindings: [], active: [] },
 
       addConnection: (type) => {
         const existing = get().connections.find((c) => c.type === type);
@@ -886,12 +919,28 @@ export const useMessengerStore = create<MessengerState>()(
       startTelegramListener: async () => {
         const conn = get().connections.find((c) => c.type === 'telegram');
         if (!conn?.telegramBotToken) return false;
+        const projects = useProjectsStore.getState().projects;
+        const projectBindings = get()
+          .projectMappings.flatMap((m) => {
+            if (!m.telegram) return [];
+            const project = projects.find((p) => p.id === m.projectId);
+            if (!project) return [];
+            return [
+              {
+                chatId: conn.telegramChatId,
+                threadId: m.telegram.topicId ?? null,
+                projectPath: project.path,
+                projectLabel: project.label ?? project.path,
+              },
+            ];
+          });
         try {
           const data = await postJson<{
             ok: boolean;
             running?: boolean;
             startedAt?: number;
             autoReply?: boolean;
+            bridgeEnabled?: boolean;
             lastUpdateAt?: number | null;
             totalReceived?: number;
             totalReplied?: number;
@@ -899,6 +948,8 @@ export const useMessengerStore = create<MessengerState>()(
           }>('/api/otto/messenger/telegram/listener/start', {
             token: conn.telegramBotToken,
             autoReply: conn.telegramListenerAutoReply !== false,
+            bridgeEnabled: conn.bridgeEnabled !== false,
+            projectBindings,
           });
           if (!data.ok) return false;
           get().updateConnection('telegram', {
@@ -1033,6 +1084,28 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
+      refreshBridgeStatus: async (type) => {
+        const conn = type ? get().connections.find((c) => c.type === type) : undefined;
+        const token = type === 'telegram' ? conn?.telegramBotToken : conn?.botToken;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            enabled?: boolean;
+            bindings?: MessengerState['bridgeStatus']['bindings'];
+            active?: MessengerState['bridgeStatus']['active'];
+          }>('/api/otto/messenger/bridge/status', { type, token });
+          set({
+            bridgeStatus: {
+              enabled: Boolean(data.enabled),
+              bindings: data.bindings ?? [],
+              active: data.active ?? [],
+            },
+          });
+        } catch {
+          // ignore
+        }
+      },
+
       diagnoseDiscord: async () => {
         const conn = get().connections.find((c) => c.type === 'discord');
         if (!conn?.botToken) return false;
@@ -1079,6 +1152,20 @@ export const useMessengerStore = create<MessengerState>()(
       startDiscordListener: async () => {
         const conn = get().connections.find((c) => c.type === 'discord');
         if (!conn?.botToken) return false;
+        const projects = useProjectsStore.getState().projects;
+        const projectBindings = get()
+          .projectMappings.flatMap((m) => {
+            if (!m.discord?.channelId) return [];
+            const project = projects.find((p) => p.id === m.projectId);
+            if (!project) return [];
+            return [
+              {
+                channelId: m.discord.channelId,
+                projectPath: project.path,
+                projectLabel: project.label ?? project.path,
+              },
+            ];
+          });
         try {
           const data = await postJson<{
             ok: boolean;
@@ -1086,6 +1173,7 @@ export const useMessengerStore = create<MessengerState>()(
             connected?: boolean;
             startedAt?: number;
             autoReply?: boolean;
+            bridgeEnabled?: boolean;
             lastUpdateAt?: number | null;
             totalReceived?: number;
             totalReplied?: number;
@@ -1100,6 +1188,8 @@ export const useMessengerStore = create<MessengerState>()(
             // because the saved Server ID is wrong by one digit.
             scopeToGuild: Boolean(conn.discordListenerScopeToGuild),
             autoReply: conn.discordListenerAutoReply !== false,
+            bridgeEnabled: conn.bridgeEnabled !== false,
+            projectBindings,
           });
           if (!data.ok) return false;
           get().updateConnection('discord', {
