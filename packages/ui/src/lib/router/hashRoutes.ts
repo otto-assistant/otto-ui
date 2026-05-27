@@ -9,17 +9,16 @@ import type { AppActiveView } from '@/constants/agentNav';
  *   #/tasks      → tasks (Tasks hub; List tab by default)
  *   #/chat       → chat
  *   #/settings   → settings
- *   #/projects   → projects
  *
  * Deep links:
  *   #/tasks/:id        → tasks view with task detail
  *
- * Legacy:
- *   #/persona  → redirects to #/settings (persona config now lives under
- *                Settings → Agents).
- *   #/schedule → redirects to #/tasks (schedule is now a tab inside the
- *                Tasks hub). The hash watcher in `useHashRoute` switches
- *                the hub tab to "schedule" when this redirect fires.
+ * Legacy redirects:
+ *   #/persona  → #/settings   (persona config now lives under Settings → Agents)
+ *   #/schedule → #/tasks      (schedule is a tab inside the Tasks hub; the hash
+ *                              watcher in `useHashRoute` switches the hub tab
+ *                              to "schedule" when this redirect fires)
+ *   #/projects → #/           (projects now render on the Dashboard)
  */
 
 export interface HashRouteState {
@@ -29,7 +28,6 @@ export interface HashRouteState {
 
 const VIEW_TO_PATH: Record<AppActiveView, string> = {
   dashboard: '/',
-  projects: '/projects',
   memory: '/memory',
   tasks: '/tasks',
   chat: '/chat',
@@ -39,7 +37,7 @@ const VIEW_TO_PATH: Record<AppActiveView, string> = {
 const PATH_TO_VIEW: Record<string, AppActiveView> = {
   '/': 'dashboard',
   '/dashboard': 'dashboard',
-  '/projects': 'projects',
+  '/projects': 'dashboard',
   '/persona': 'settings',
   '/memory': 'memory',
   '/tasks': 'tasks',

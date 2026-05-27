@@ -3,7 +3,6 @@ import {
   RiBrainLine,
   RiChat3Line,
   RiDashboardLine,
-  RiFolderLine,
   RiSettings3Line,
   RiTaskLine,
   type RemixiconComponentType,
@@ -30,7 +29,6 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: 'Tools',
     items: [
-      { id: 'projects', label: 'Projects', icon: RiFolderLine },
       { id: 'memory', label: 'Memory', icon: RiBrainLine },
     ],
   },
