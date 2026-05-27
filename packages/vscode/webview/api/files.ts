@@ -96,13 +96,23 @@ export const createVSCodeFilesAPI = (): FilesAPI => ({
     };
   },
 
-  async readFile(path: string): Promise<{ content: string; path: string }> {
+  async readFile(path: string, options?: { optional?: boolean }): Promise<{ content: string; path: string } | null> {
     const target = normalizePath(path);
-    const data = await sendBridgeMessage<{ content: string; path: string }>('api:fs:read', { path: target });
-    return {
-      content: typeof data?.content === 'string' ? data.content : '',
-      path: typeof data?.path === 'string' ? normalizePath(data.path) : target,
-    };
+    try {
+      const data = await sendBridgeMessage<{ content: string; path: string }>('api:fs:read', { path: target });
+      return {
+        content: typeof data?.content === 'string' ? data.content : '',
+        path: typeof data?.path === 'string' ? normalizePath(data.path) : target,
+      };
+    } catch (error) {
+      // For optional reads we treat any failure (missing file, permission,
+      // bridge error) as "not present" so callers can probe without surfacing
+      // noisy errors. Non-optional reads keep the original throw semantics.
+      if (options?.optional) {
+        return null;
+      }
+      throw error;
+    }
   },
 
   async writeFile(path: string, content: string): Promise<{ success: boolean; path: string }> {

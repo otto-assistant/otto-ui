@@ -128,9 +128,19 @@ export const createWebFilesAPI = (): FilesAPI => ({
     };
   },
 
-  async readFile(path: string): Promise<{ content: string; path: string }> {
+  async readFile(path: string, options?: { optional?: boolean }): Promise<{ content: string; path: string } | null> {
     const target = normalizePath(path);
-    const response = await fetch(`/api/fs/read?path=${encodeURIComponent(target)}`);
+    const params = new URLSearchParams({ path: target });
+    if (options?.optional) {
+      // optional=1 — server returns 204 No Content (instead of 404) when the
+      // file is absent so the browser console stays clean for benign probes.
+      params.set('optional', '1');
+    }
+    const response = await fetch(`/api/fs/read?${params.toString()}`);
+
+    if (response.status === 204) {
+      return null;
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: response.statusText }));

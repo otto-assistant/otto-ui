@@ -160,8 +160,15 @@ const readTextFile = async (path: string): Promise<string | null> => {
   const runtimeFiles = getRuntimeFilesAPI();
   if (runtimeFiles?.readFile) {
     try {
-      const result = await runtimeFiles.readFile(path);
-      const content = typeof result?.content === 'string' ? result.content : '';
+      // Probes for legacy/user config files are expected to miss on most
+      // installs — pass `optional: true` so runtimes that honor it (the web
+      // runtime) issue `optional=1` to the API, returning 204 instead of 404
+      // and keeping the browser console quiet.
+      const result = await runtimeFiles.readFile(path, { optional: true });
+      if (!result) {
+        return null;
+      }
+      const content = typeof result.content === 'string' ? result.content : '';
       return content;
     } catch {
       return null;
@@ -169,10 +176,6 @@ const readTextFile = async (path: string): Promise<string | null> => {
   }
 
   try {
-    // `optional=1` lets the server return 204 (instead of 404) when the file
-    // is absent — these probes for legacy/user config files are expected to
-    // miss on most installs and shouldn't pollute the browser console with
-    // "GET /api/fs/read ... 404 (Not Found)" errors.
     const response = await fetch(
       `${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}&optional=1`,
     );

@@ -524,7 +524,7 @@ export interface FilesAPI {
   search(payload: FileSearchQuery): Promise<FileSearchResult[]>;
   createDirectory(path: string): Promise<{ success: boolean; path: string }>;
   statFile?(path: string): Promise<{ path: string; isFile: boolean; size: number; mtimeMs?: number }>;
-  readFile?(path: string): Promise<{ content: string; path: string }>;
+  readFile?(path: string, options?: { optional?: boolean }): Promise<{ content: string; path: string } | null>;
   readFileBinary?(path: string): Promise<{ dataUrl: string; path: string }>;
   writeFile?(path: string, content: string): Promise<{ success: boolean; path: string }>;
   delete?(path: string): Promise<{ success: boolean }>;
