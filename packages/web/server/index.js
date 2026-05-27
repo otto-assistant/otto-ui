@@ -1168,9 +1168,14 @@ async function main(options = {}) {
   // MemPalace memory bridge
   app.use('/api/otto/mempalace', createMempalaceBridgeRouter());
 
-  // Messenger sync routes (Discord + Telegram)
+  // Messenger sync routes (Discord + Telegram). The bridge plumbing lets
+  // listeners forward inbound messages to OpenCode and mirror streamed
+  // responses back into the originating channel/thread.
   app.use('/api/otto/messenger', createMessengerSyncRouter({
     broadcastEvent: (type, data) => ottoEventsBroadcast(type, data),
+    globalEventHub: globalMessageStreamHub,
+    buildOpenCodeUrl,
+    getOpenCodeAuthHeaders,
   }));
 
   // Discord ↔ Web UI sync routes

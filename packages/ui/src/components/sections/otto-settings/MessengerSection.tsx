@@ -1055,6 +1055,99 @@ function ApprovalsPanel({
   );
 }
 
+function BridgePanel({
+  conn,
+  type,
+  bridgeStatus,
+  refreshBridgeStatus,
+  onToggle,
+}: {
+  conn: MessengerConnection;
+  type: MessengerType;
+  bridgeStatus: ReturnType<typeof useMessengerStore.getState>['bridgeStatus'];
+  refreshBridgeStatus: (t?: MessengerType) => Promise<void>;
+  onToggle: (v: boolean) => void;
+}) {
+  const enabled = conn.bridgeEnabled !== false;
+  useEffect(() => {
+    refreshBridgeStatus(type);
+    const id = setInterval(() => refreshBridgeStatus(type), 8000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type]);
+
+  const bindings = bridgeStatus.bindings.filter((b) => b.type === type);
+  const active = bridgeStatus.active.filter((a) => a.type === type);
+
+  return (
+    <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+          <RiChatSmile3Line className="size-4 text-primary" />
+          OpenCode bridge
+          <span
+            className={cn(
+              'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
+              bridgeStatus.enabled && enabled
+                ? 'bg-green-500/20 text-green-700 dark:text-green-400'
+                : 'bg-muted text-muted-foreground',
+            )}
+          >
+            {!bridgeStatus.enabled ? 'unavailable' : enabled ? 'on' : 'off'}
+          </span>
+        </div>
+        <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={!bridgeStatus.enabled}
+            onChange={(e) => onToggle(e.target.checked)}
+            className="rounded border-border accent-primary"
+          />
+          Forward messages to OpenCode
+        </label>
+      </div>
+      <div className="text-[11px] text-muted-foreground leading-snug">
+        When on, every non-command message posted to a {type === 'telegram' ? 'chat / topic' : 'channel'} mapped
+        to a project is forwarded to an OpenCode session in that project's directory.
+        OpenCode's streaming response is edited back into the same{' '}
+        {type === 'telegram' ? 'chat' : 'channel'} so the conversation is shared with the
+        web UI. Restart the listener after toggling this for it to take effect.
+      </div>
+      {!bridgeStatus.enabled && (
+        <div className="text-[10px] text-yellow-700 dark:text-yellow-400">
+          The web server reports the bridge is unavailable — OpenCode may not be reachable yet.
+        </div>
+      )}
+      {bindings.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-medium text-foreground">
+            Channel ↔ session bindings ({bindings.length})
+          </div>
+          <ul className="space-y-0.5 max-h-32 overflow-y-auto">
+            {bindings.slice(0, 8).map((b) => (
+              <li
+                key={`${b.type}:${b.targetKey}:${b.sessionId}`}
+                className="text-[10px] text-muted-foreground"
+              >
+                <code className="bg-muted px-1 rounded">{b.targetKey}</code> →{' '}
+                <code className="bg-muted px-1 rounded">{b.sessionId.slice(0, 16)}…</code>
+                {b.projectLabel ? ` · ${b.projectLabel}` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {active.length > 0 && (
+        <div className="text-[10px] text-muted-foreground">
+          <span className="text-primary">▶</span> {active.length} prompt
+          {active.length === 1 ? '' : 's'} streaming…
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DiscordSyncResults({
   channels,
   guildName,
@@ -1165,6 +1258,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const diagnoseDiscord = useMessengerStore((s) => s.diagnoseDiscord);
   const discordDiagnosis = useMessengerStore((s) => s.discordDiagnosis);
   const discordDiagnosisRunning = useMessengerStore((s) => s.discordDiagnosisRunning);
+  const refreshBridgeStatus = useMessengerStore((s) => s.refreshBridgeStatus);
+  const bridgeStatus = useMessengerStore((s) => s.bridgeStatus);
   const startDiscordListener = useMessengerStore((s) => s.startDiscordListener);
   const stopDiscordListener = useMessengerStore((s) => s.stopDiscordListener);
   const refreshDiscordListenerStatus = useMessengerStore((s) => s.refreshDiscordListenerStatus);
@@ -1852,6 +1947,20 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
       {/* Telegram inline warnings — explain real Telegram pitfalls before the user clicks Sync now */}
       {conn.type === 'telegram' && hasToken && isConnected && (
         <TelegramWarnings conn={conn} />
+      )}
+
+      {/* OpenCode bridge — when on, the listeners route inbound messages
+          through OpenCode and stream the response back. This is what turns
+          the messenger into a real OpenChamber chat surface, instead of the
+          legacy "Otto received: ..." ping echo. */}
+      {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (
+        <BridgePanel
+          conn={conn}
+          type={conn.type}
+          bridgeStatus={bridgeStatus}
+          refreshBridgeStatus={refreshBridgeStatus}
+          onToggle={(v) => updateConnection(conn.type, { bridgeEnabled: v })}
+        />
       )}
 
       {/* Telegram inbound listener */}

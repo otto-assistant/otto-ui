@@ -4,6 +4,7 @@ import {
   createDiscordListenerRegistry,
   generateApprovalId,
 } from './discord-listener.js';
+import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -21,13 +22,38 @@ function friendlyDiscordError(status, rawText) {
   return trimmed || `HTTP ${status}`;
 }
 
-export function createMessengerSyncRouter({ broadcastEvent }) {
+export function createMessengerSyncRouter({
+  broadcastEvent,
+  // Optional plumbing for the OpenCode↔messenger bridge. When provided,
+  // inbound messages routed through the listeners are forwarded to OpenCode
+  // and the streaming response is mirrored back into the messenger.
+  globalEventHub = null,
+  buildOpenCodeUrl = null,
+  getOpenCodeAuthHeaders = null,
+}) {
   const router = Router();
 
   router.use(express.json({ limit: '256kb' }));
 
-  const telegramListener = createTelegramListenerRegistry({ broadcastEvent });
-  const discordListener = createDiscordListenerRegistry({ broadcastEvent });
+  const bridge =
+    globalEventHub && buildOpenCodeUrl
+      ? createMessengerOpencodeBridge({
+          globalEventHub,
+          buildOpenCodeUrl,
+          getOpenCodeAuthHeaders,
+          broadcastEvent,
+        })
+      : null;
+  if (bridge) {
+    try {
+      bridge.ensureSubscribed();
+    } catch {
+      // ignore — subscription only fails when the hub itself is unavailable
+    }
+  }
+
+  const telegramListener = createTelegramListenerRegistry({ broadcastEvent, bridge });
+  const discordListener = createDiscordListenerRegistry({ broadcastEvent, bridge });
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
@@ -611,10 +637,39 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
   // ──────────────────────────────────────────────────────────────────────────
   // Discord Gateway listener (parity with Telegram long-poll listener)
   // ──────────────────────────────────────────────────────────────────────────
+  // Snapshot of the OpenCode bridge — list of channel↔session bindings and
+  // any prompts currently in flight. Useful for the settings UI to show
+  // "Discord channel X is bound to session Y".
+  router.post('/bridge/status', (req, res) => {
+    if (!bridge) return res.json({ ok: true, enabled: false, bindings: [], active: [] });
+    const { type, token } = req.body ?? {};
+    return res.json({ ok: true, enabled: true, ...bridge.statusSnapshot({ type, token }) });
+  });
+
   router.post('/discord/listener/start', (req, res) => {
-    const { token, guildId, autoReply } = req.body ?? {};
+    const { token, guildId, autoReply, scopeToGuild, bridgeEnabled, projectBindings } =
+      req.body ?? {};
     if (!token) return res.status(400).json({ error: 'token required' });
-    res.json(discordListener.start(token, { guildId, autoReply: autoReply !== false }));
+    const bindingMap = new Map(
+      Array.isArray(projectBindings)
+        ? projectBindings
+            .filter((b) => b && b.channelId)
+            .map((b) => [
+              String(b.channelId),
+              { path: b.projectPath ?? null, label: b.projectLabel ?? null },
+            ])
+        : [],
+    );
+    const resolveProject = ({ channelId }) => bindingMap.get(String(channelId)) ?? null;
+    res.json(
+      discordListener.start(token, {
+        guildId,
+        autoReply: autoReply !== false,
+        scopeToGuild: Boolean(scopeToGuild),
+        bridgeEnabled: bridgeEnabled !== false && Boolean(bridge),
+        resolveProject,
+      }),
+    );
   });
 
   router.post('/discord/listener/stop', (req, res) => {
@@ -1340,11 +1395,34 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
    * Idempotent: returns the existing listener if one is already running for that token.
    */
   router.post('/telegram/listener/start', (req, res) => {
-    const { token, autoReply } = req.body ?? {};
+    const { token, autoReply, bridgeEnabled, projectBindings } = req.body ?? {};
     if (!token || typeof token !== 'string') {
       return res.status(400).json({ error: 'token required' });
     }
-    const result = telegramListener.start(token, { autoReply: autoReply !== false });
+    // Per-chat (and per-topic) project resolution from the user-defined
+    // mappings in the UI. The UI sends bindings like:
+    //   [{ chatId, threadId?, projectPath, projectLabel }]
+    // and the listener calls resolveProject({ chatId, threadId }) on every
+    // inbound message to figure out which project's cwd OpenCode should run in.
+    const bindingMap = new Map(
+      Array.isArray(projectBindings)
+        ? projectBindings
+            .filter((b) => b && b.chatId)
+            .map((b) => [
+              `${b.chatId}${b.threadId ? `:${b.threadId}` : ''}`,
+              { path: b.projectPath ?? null, label: b.projectLabel ?? null },
+            ])
+        : [],
+    );
+    const resolveProject = ({ chatId, threadId }) => {
+      const key = `${chatId}${threadId ? `:${threadId}` : ''}`;
+      return bindingMap.get(key) ?? bindingMap.get(String(chatId)) ?? null;
+    };
+    const result = telegramListener.start(token, {
+      autoReply: autoReply !== false,
+      bridgeEnabled: bridgeEnabled !== false && Boolean(bridge),
+      resolveProject,
+    });
     res.json(result);
   });
 

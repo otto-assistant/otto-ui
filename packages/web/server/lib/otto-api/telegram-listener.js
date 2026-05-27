@@ -131,7 +131,7 @@ async function processCallbackQuery(state, cb, broadcastEvent) {
   } catch {}
 }
 
-async function processUpdate(state, update, broadcastEvent) {
+async function processUpdate(state, update, broadcastEvent, bridge) {
   if (update.callback_query) {
     await processCallbackQuery(state, update.callback_query, broadcastEvent);
     return;
@@ -170,9 +170,51 @@ async function processUpdate(state, update, broadcastEvent) {
     // ignore broadcast failures
   }
 
-  // Auto-reply (skip bot-to-bot, skip when explicitly disabled by caller)
-  if (!state.autoReply) return;
+  // Skip bot-to-bot to avoid feedback loops.
   if (msg.from?.is_bot) return;
+
+  const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+
+  // OpenCode bridge — every non-command, non-empty text message is forwarded
+  // to OpenCode and the streaming response is mirrored back into the same
+  // chat/topic. This is what makes Telegram a real OpenChamber chat surface.
+  if (bridge && state.bridgeEnabled !== false && text.length > 0 && !text.startsWith('/')) {
+    try {
+      // Project resolution from the caller-supplied registry (chat → project).
+      const project = state.resolveProject?.({
+        chatId: String(msg.chat.id),
+        threadId: msg.message_thread_id ? String(msg.message_thread_id) : null,
+      });
+      const bridged = await bridge.routeInbound({
+        type: 'telegram',
+        token: state.token,
+        channelId: String(msg.chat.id),
+        threadId: msg.message_thread_id ? String(msg.message_thread_id) : null,
+        text,
+        projectPath: project?.path ?? null,
+        projectLabel: project?.label ?? null,
+        from: {
+          id: msg.from?.id,
+          username: msg.from?.username,
+          firstName: msg.from?.first_name,
+        },
+      });
+      if (bridged.ok) {
+        state.totalReplied += 1;
+        state.lastError = null;
+        return;
+      }
+      state.lastError = bridged.error ?? 'bridge failed';
+      // Fall through to the auto-reply path so the user at least sees that
+      // something tried to happen.
+    } catch (err) {
+      state.lastError = err?.message ?? 'bridge failed';
+    }
+  }
+
+  // Auto-reply fallback — runs when the bridge is off, the message is a
+  // shorthand command (`/start`, `/ping`, …) or the bridge threw.
+  if (!state.autoReply) return;
 
   const reply = buildAutoReply(update);
   if (!reply) return;
@@ -201,7 +243,7 @@ async function processUpdate(state, update, broadcastEvent) {
   }
 }
 
-async function pollLoop(state, broadcastEvent) {
+async function pollLoop(state, broadcastEvent, bridge) {
   // Clear any stale webhook so getUpdates doesn't 409.
   try {
     await tg(state.token, 'deleteWebhook', { drop_pending_updates: false });
@@ -236,7 +278,7 @@ async function pollLoop(state, broadcastEvent) {
 
     if (Array.isArray(updates) && updates.length > 0) {
       for (const upd of updates) {
-        await processUpdate(state, upd, broadcastEvent);
+        await processUpdate(state, upd, broadcastEvent, bridge);
         if (typeof upd.update_id === 'number') {
           state.offset = upd.update_id + 1;
         }
@@ -247,7 +289,7 @@ async function pollLoop(state, broadcastEvent) {
   state.running = false;
 }
 
-export function createTelegramListenerRegistry({ broadcastEvent } = {}) {
+export function createTelegramListenerRegistry({ broadcastEvent, bridge = null } = {}) {
   function getState(token) {
     return listeners.get(tokenKey(token));
   }
@@ -264,6 +306,8 @@ export function createTelegramListenerRegistry({ broadcastEvent } = {}) {
       running: true,
       stopRequested: false,
       autoReply: opts.autoReply !== false,
+      bridgeEnabled: opts.bridgeEnabled !== false,
+      resolveProject: opts.resolveProject ?? null,
       startedAt: Date.now(),
       lastUpdateAt: null,
       lastError: null,
@@ -274,7 +318,7 @@ export function createTelegramListenerRegistry({ broadcastEvent } = {}) {
     };
     listeners.set(key, state);
     // Fire-and-forget; loop manages its own lifecycle.
-    pollLoop(state, broadcastEvent).catch((err) => {
+    pollLoop(state, broadcastEvent, bridge).catch((err) => {
       state.lastError = err?.message ?? 'poll loop crashed';
       state.running = false;
     });
@@ -312,6 +356,7 @@ export function createTelegramListenerRegistry({ broadcastEvent } = {}) {
     return {
       running: state.running,
       autoReply: state.autoReply,
+      bridgeEnabled: state.bridgeEnabled,
       startedAt: state.startedAt,
       lastUpdateAt: state.lastUpdateAt,
       lastError: state.lastError,

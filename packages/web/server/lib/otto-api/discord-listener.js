@@ -111,7 +111,7 @@ function inboundFromMessage(message) {
   };
 }
 
-async function dispatchMessageCreate(state, message, broadcastEvent) {
+async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
   // Always count the raw event so the user can tell the difference between
   // "Gateway delivers no messages" (intent / permission issue) and
   // "Gateway delivers messages but we filter them all out" (wrong guildId
@@ -144,11 +144,48 @@ async function dispatchMessageCreate(state, message, broadcastEvent) {
     // ignore
   }
 
-  if (!state.autoReply) return;
   if (message.author?.bot) return;
-  // Don't reply to ourselves
   if (state.botId && message.author?.id === state.botId) return;
 
+  const text = typeof message.content === 'string' ? message.content.trim() : '';
+
+  // OpenCode bridge — every non-empty message that isn't a `!cmd` shortcut
+  // is forwarded to OpenCode and the streaming response is mirrored back
+  // into the same channel/thread. This is what makes Discord a real
+  // OpenChamber chat surface.
+  if (bridge && state.bridgeEnabled !== false && text.length > 0 && !text.startsWith('!')) {
+    try {
+      const project = state.resolveProject?.({
+        channelId: message.channel_id,
+        guildId: message.guild_id ?? null,
+      });
+      const bridged = await bridge.routeInbound({
+        type: 'discord',
+        token: state.token,
+        channelId: message.channel_id,
+        threadId: null,
+        text,
+        projectPath: project?.path ?? null,
+        projectLabel: project?.label ?? null,
+        from: {
+          id: message.author?.id,
+          username: message.author?.username,
+          firstName: message.author?.global_name ?? null,
+        },
+      });
+      if (bridged.ok) {
+        state.totalReplied += 1;
+        state.lastError = null;
+        return;
+      }
+      state.lastError = bridged.error ?? 'bridge failed';
+    } catch (err) {
+      state.lastError = err?.message ?? 'bridge failed';
+    }
+  }
+
+  // Auto-reply fallback for `!cmd` shortcuts or when the bridge is off.
+  if (!state.autoReply) return;
   const replyText = buildAutoReply(message);
   if (!replyText) return;
 
@@ -226,14 +263,14 @@ function send(ws, payload) {
   }
 }
 
-function startSession(state, broadcastEvent) {
+function startSession(state, broadcastEvent, bridge) {
   if (state.stopRequested) return;
   let ws;
   try {
     ws = new WebSocket(GATEWAY_URL);
   } catch (err) {
     state.lastError = err?.message ?? 'gateway connect failed';
-    return scheduleReconnect(state, broadcastEvent);
+    return scheduleReconnect(state, broadcastEvent, bridge);
   }
   state.ws = ws;
   state.heartbeatAcked = true;
@@ -310,7 +347,7 @@ function startSession(state, broadcastEvent) {
           return;
         }
         if (t === 'MESSAGE_CREATE') {
-          void dispatchMessageCreate(state, payload.d, broadcastEvent);
+          void dispatchMessageCreate(state, payload.d, broadcastEvent, bridge);
           return;
         }
         if (t === 'INTERACTION_CREATE') {
@@ -336,7 +373,7 @@ function startSession(state, broadcastEvent) {
       state.running = false;
       return;
     }
-    scheduleReconnect(state, broadcastEvent);
+    scheduleReconnect(state, broadcastEvent, bridge);
   };
 
   ws.on('close', (code, reason) => {
@@ -362,7 +399,7 @@ function startSession(state, broadcastEvent) {
   });
 }
 
-function scheduleReconnect(state, broadcastEvent) {
+function scheduleReconnect(state, broadcastEvent, bridge) {
   if (state.stopRequested) {
     state.running = false;
     return;
@@ -370,11 +407,11 @@ function scheduleReconnect(state, broadcastEvent) {
   const delay = Math.min(30_000, 1000 * Math.max(1, state.consecutiveErrors));
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null;
-    startSession(state, broadcastEvent);
+    startSession(state, broadcastEvent, bridge);
   }, delay);
 }
 
-export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
+export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } = {}) {
   function start(token, opts = {}) {
     const key = tokenKey(token);
     const existing = listeners.get(key);
@@ -390,6 +427,8 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
       scopeToGuild: Boolean(opts.scopeToGuild),
       intents: opts.intents ?? DEFAULT_INTENTS,
       autoReply: opts.autoReply !== false,
+      bridgeEnabled: opts.bridgeEnabled !== false,
+      resolveProject: opts.resolveProject ?? null,
       ws: null,
       heartbeatTimer: null,
       heartbeatAcked: true,
@@ -415,7 +454,7 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
       reconnectTimer: null,
     };
     listeners.set(key, state);
-    startSession(state, broadcastEvent);
+    startSession(state, broadcastEvent, bridge);
     return { ok: true, alreadyRunning: false, ...statusSnapshot(state) };
   }
 
@@ -461,6 +500,7 @@ export function createDiscordListenerRegistry({ broadcastEvent } = {}) {
       running: state.running,
       connected: state.connected,
       autoReply: state.autoReply,
+      bridgeEnabled: state.bridgeEnabled,
       scopeToGuild: state.scopeToGuild,
       guildId: state.guildId,
       botId: state.botId,
