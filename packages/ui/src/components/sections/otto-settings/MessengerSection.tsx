@@ -558,12 +558,72 @@ function TelegramSyncResults({
   );
 }
 
+function DiscordSyncResults({
+  channels,
+  guildName,
+}: {
+  channels: NonNullable<MessengerConnection['lastSyncChannels']>;
+  guildName?: string;
+}) {
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
+      <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
+        <RiCheckLine className="size-3.5 text-primary" />
+        Last sync result{' '}
+        {guildName && (
+          <span className="text-[10px] font-normal text-muted-foreground">({guildName})</span>
+        )}
+      </div>
+      <ul className="space-y-1">
+        {channels.map((c) => (
+          <li
+            key={c.projectId}
+            className="rounded bg-background border border-border px-2 py-1.5 text-[11px] flex items-start gap-2"
+          >
+            <span
+              className={cn(
+                'mt-0.5',
+                c.error
+                  ? 'text-destructive'
+                  : c.created
+                    ? 'text-green-600 dark:text-green-400'
+                    : 'text-muted-foreground',
+              )}
+            >
+              {c.error ? '✗' : c.created ? '✓ new' : '·'}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="font-medium text-foreground truncate">
+                {c.projectLabel}{' '}
+                <span className="text-muted-foreground font-normal">
+                  → {c.channelName ? `#${c.channelName}` : '(no channel)'}
+                  {c.threadId ? ` › ${c.threadName ?? 'thread'}` : ''}
+                </span>
+              </div>
+              {c.error && (
+                <div className="text-destructive leading-snug">{c.error}</div>
+              )}
+              {!c.error && c.messageId && (
+                <div className="text-[10px] text-muted-foreground">
+                  message {c.messageId} sent{c.threadCreated ? ' · thread opened' : ''}
+                </div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const updateConnection = useMessengerStore((s) => s.updateConnection);
   const testConnection = useMessengerStore((s) => s.testConnection);
   const removeConnection = useMessengerStore((s) => s.removeConnection);
   const resolveTelegramChat = useMessengerStore((s) => s.resolveTelegramChat);
   const resolveDiscordChannel = useMessengerStore((s) => s.resolveDiscordChannel);
+  const resolveDiscordGuild = useMessengerStore((s) => s.resolveDiscordGuild);
+  const syncDiscordGuildProjects = useMessengerStore((s) => s.syncDiscordGuildProjects);
   const fetchDiscordInviteUrl = useMessengerStore((s) => s.fetchDiscordInviteUrl);
   const sendTestMessage = useMessengerStore((s) => s.sendTestMessage);
   const sendSyncSummary = useMessengerStore((s) => s.sendSyncSummary);
@@ -588,6 +648,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const [tokenInput, setTokenInput] = useState('');
   const [showTokenPlain, setShowTokenPlain] = useState(false);
   const [targetInput, setTargetInput] = useState('');
+  const [guildInput, setGuildInput] = useState('');
 
   const token = conn.type === 'discord' ? conn.botToken : conn.telegramBotToken;
   const target = conn.type === 'discord' ? conn.defaultChannelId : conn.telegramChatId;
@@ -775,8 +836,12 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
             }
           />
           <ChecklistItem
-            done={hasTarget}
-            label={`3. Add ${conn.type === 'telegram' ? 'chat ID' : 'channel ID'}`}
+            done={hasTarget || (conn.type === 'discord' && Boolean(conn.discordGuildId))}
+            label={
+              conn.type === 'telegram'
+                ? '3. Add chat ID'
+                : '3. Add Server ID (or single channel ID)'
+            }
             hint={
               hasTarget
                 ? conn.type === 'telegram'
@@ -784,7 +849,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                   : conn.discordChannelName
                     ? `#${conn.discordChannelName}${conn.guildName ? ` (${conn.guildName})` : ''}`
                     : conn.defaultChannelId
-                : 'see the field below'
+                : conn.type === 'discord' && conn.discordGuildId
+                  ? `${conn.guildName ?? conn.discordGuildId} · ${conn.discordGuildChannels?.length ?? 0} channel${(conn.discordGuildChannels?.length ?? 0) === 1 ? '' : 's'}`
+                  : 'see the field below'
             }
           />
           <ChecklistItem
@@ -935,8 +1002,166 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
             </button>
           )}
           <div className="text-[10px] text-muted-foreground leading-snug">
-            Required permissions: View Channel, Send Messages, Embed Links, Read Message History.
+            Required permissions: View Channel, Send Messages, Embed Links, Read Message History,
+            and (for server-wide sync) Manage Channels + Manage Threads.
           </div>
+        </div>
+      )}
+
+      {/* Discord-only: server (guild) ID for server-wide sync.
+          Rendered as soon as the token is saved so users see the option
+          before verify succeeds (resolve-guild itself surfaces bad-token errors). */}
+      {conn.type === 'discord' && token && (
+        <div className="rounded-md border border-primary/20 bg-primary/5 p-3 text-xs space-y-2">
+          <div className="font-medium text-foreground flex items-center gap-1.5">
+            <RiDiscordLine className="size-3.5 text-[#5865F2]" />
+            Server (Guild) ID
+            <span className="text-[10px] font-normal text-muted-foreground">
+              — for server-wide sync
+            </span>
+            {conn.discordGuildId && <RiCheckLine className="size-3 text-green-500" />}
+          </div>
+          {!conn.discordGuildId ? (
+            <>
+              <div className="text-[11px] text-muted-foreground leading-snug">
+                Paste the Discord <strong>server ID</strong> (right-click the server name in the
+                channel list → "Copy Server ID" with Developer Mode on) to let Otto sync to every
+                channel + thread on that server. With this set,{' '}
+                <strong>Sync now</strong> will find-or-create one channel per Otto project under
+                an optional category and start a thread per project for details.
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={guildInput}
+                  onChange={(e) => setGuildInput(e.target.value)}
+                  placeholder="e.g. 1234567890123456789"
+                  className={inputClass}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const v = guildInput.trim();
+                    if (!v) return;
+                    updateConnection('discord', { discordGuildId: v });
+                    setGuildInput('');
+                    setTimeout(() => resolveDiscordGuild(), 0);
+                  }}
+                  disabled={!guildInput.trim()}
+                  className="shrink-0 rounded bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
+                >
+                  Save
+                </button>
+              </div>
+              {conn.discordGuilds && conn.discordGuilds.length > 0 && (
+                <div className="text-[10px] text-muted-foreground">
+                  Quick pick from servers the bot is already in:
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {conn.discordGuilds.slice(0, 6).map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        onClick={() => {
+                          updateConnection('discord', { discordGuildId: g.id, guildName: g.name });
+                          setTimeout(() => resolveDiscordGuild(), 0);
+                        }}
+                        className="rounded-full bg-background border border-border px-2 py-0.5 text-foreground hover:border-primary/40"
+                        title={g.id}
+                      >
+                        {g.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs flex-wrap">
+                <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground">
+                  {conn.discordGuildId}
+                </code>
+                {conn.guildName && (
+                  <span className="text-muted-foreground">{conn.guildName}</span>
+                )}
+                {typeof conn.discordGuildChannels !== 'undefined' && (
+                  <span className="text-muted-foreground">
+                    · {conn.discordGuildChannels.length} channel
+                    {conn.discordGuildChannels.length === 1 ? '' : 's'}
+                    {conn.discordGuildCategories && conn.discordGuildCategories.length > 0
+                      ? ` · ${conn.discordGuildCategories.length} categor${conn.discordGuildCategories.length === 1 ? 'y' : 'ies'}`
+                      : ''}
+                    {typeof conn.discordGuildActiveThreadCount === 'number'
+                      ? ` · ${conn.discordGuildActiveThreadCount} active thread${conn.discordGuildActiveThreadCount === 1 ? '' : 's'}`
+                      : ''}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => resolveDiscordGuild()}
+                  className="text-primary text-[10px] hover:underline"
+                  title="Re-fetch server channel topology"
+                >
+                  Re-scan
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateConnection('discord', {
+                      discordGuildId: undefined,
+                      discordGuildChannels: undefined,
+                      discordGuildCategories: undefined,
+                      discordGuildActiveThreadCount: undefined,
+                      discordParentCategoryId: undefined,
+                    })
+                  }
+                  className="text-primary text-[10px] hover:underline"
+                >
+                  Change
+                </button>
+              </div>
+
+              {/* Category picker */}
+              {conn.discordGuildCategories && conn.discordGuildCategories.length > 0 && (
+                <div className="flex items-center gap-2 text-[11px]">
+                  <label htmlFor={`cat-${conn.type}`} className="text-muted-foreground">
+                    Parent category:
+                  </label>
+                  <select
+                    id={`cat-${conn.type}`}
+                    value={conn.discordParentCategoryId ?? ''}
+                    onChange={(e) =>
+                      updateConnection('discord', {
+                        discordParentCategoryId: e.target.value || undefined,
+                      })
+                    }
+                    className="rounded border border-border bg-background px-2 py-0.5 text-foreground text-[11px]"
+                  >
+                    <option value="">(none — root of server)</option>
+                    {conn.discordGuildCategories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={conn.discordCreateThreads !== false}
+                  onChange={(e) =>
+                    updateConnection('discord', { discordCreateThreads: e.target.checked })
+                  }
+                  className="rounded border-border accent-primary"
+                />
+                <span className="text-muted-foreground">
+                  Start a thread from each project status message
+                </span>
+              </label>
+            </div>
+          )}
         </div>
       )}
 
@@ -1026,8 +1251,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         </div>
       )}
 
-      {/* Step 3: Action buttons - the visible "what next" call to action */}
-      {hasToken && hasTarget && (
+      {/* Step 3: Action buttons - the visible "what next" call to action.
+          For Discord, server-id alone also unlocks the CTA (Sync now works with just guildId). */}
+      {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (
         <div className="space-y-2 rounded-md border border-primary/20 bg-primary/5 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -1049,6 +1275,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                 if (conn.type === 'telegram') {
                   // Per-project sync that also creates forum topics when applicable.
                   syncTelegramProjects(buildProjectPayloads(), buildSummary());
+                } else if (conn.type === 'discord' && conn.discordGuildId) {
+                  // Server-wide sync: per-project channel + thread.
+                  syncDiscordGuildProjects(buildProjectPayloads(), buildSummary());
                 } else {
                   sendSyncSummary(conn.type, buildSummary());
                 }
@@ -1117,6 +1346,10 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           topics={conn.lastSyncTopics}
           postedTo={conn.lastSyncPostedTo ?? 'forum'}
         />
+      )}
+
+      {conn.type === 'discord' && conn.lastSyncChannels && conn.lastSyncChannels.length > 0 && (
+        <DiscordSyncResults channels={conn.lastSyncChannels} guildName={conn.guildName} />
       )}
 
       {/* Sync mode */}

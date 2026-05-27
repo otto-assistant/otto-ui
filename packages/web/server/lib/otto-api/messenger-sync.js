@@ -249,6 +249,347 @@ export function createMessengerSyncRouter({ broadcastEvent }) {
   });
 
   /**
+   * Resolve a Discord guild (server) by id and return its channel + thread
+   * topology so the UI can show "12 channels · 3 categories · 4 active threads"
+   * and the user can pick a parent category for per-project channels.
+   *
+   * Body: { token, guildId }
+   * Returns: { ok, id, name, iconHash, channels, categories, activeThreads, defaultChannelId }
+   *   - channels[]:   text/announcement/forum channels (type 0/5/15) suitable for posting
+   *   - categories[]: channel.type === 4
+   *   - activeThreads[]: from /guilds/{id}/threads/active
+   *   - defaultChannelId: first text channel id (used for test messages when nothing is set)
+   */
+  router.post('/discord/resolve-guild', async (req, res) => {
+    const { token, guildId } = req.body ?? {};
+    if (!token || !guildId) {
+      return res.status(400).json({ error: 'token and guildId required' });
+    }
+    const headers = { Authorization: `Bot ${token}` };
+    try {
+      const gResp = await fetch(
+        `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}`,
+        { headers },
+      );
+      if (!gResp.ok) {
+        const text = await gResp.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${gResp.status} — ${friendlyDiscordError(gResp.status, text)}`,
+        });
+      }
+      const guild = await gResp.json();
+
+      let rawChannels = [];
+      try {
+        const chResp = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/channels`,
+          { headers },
+        );
+        if (chResp.ok) {
+          rawChannels = await chResp.json();
+        }
+      } catch {
+        // ignore — channels best-effort
+      }
+
+      let activeThreads = [];
+      try {
+        const thResp = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/threads/active`,
+          { headers },
+        );
+        if (thResp.ok) {
+          const thData = await thResp.json();
+          activeThreads = Array.isArray(thData?.threads)
+            ? thData.threads.map((t) => ({
+                id: t.id,
+                name: t.name,
+                parentId: t.parent_id ?? null,
+                type: t.type,
+                archived: Boolean(t.thread_metadata?.archived),
+              }))
+            : [];
+        }
+      } catch {
+        // ignore — threads best-effort
+      }
+
+      const channels = rawChannels
+        .filter((c) => [0, 5, 15].includes(c.type))
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          type: c.type,
+          parentId: c.parent_id ?? null,
+          position: c.position,
+        }))
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+      const categories = rawChannels
+        .filter((c) => c.type === 4)
+        .map((c) => ({ id: c.id, name: c.name, position: c.position }))
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+      return res.json({
+        ok: true,
+        id: guild.id,
+        name: guild.name,
+        iconHash: guild.icon ?? null,
+        channels,
+        categories,
+        activeThreads,
+        defaultChannelId: channels[0]?.id ?? null,
+      });
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'resolve-guild failed' });
+    }
+  });
+
+  /**
+   * Per-project Discord sync. For each project we find-or-create a text channel
+   * under an optional parent category, post a status message, and (optionally)
+   * spawn a thread from that message named "Otto sync — {date}" so details
+   * stay out of the main channel feed.
+   *
+   * Body: {
+   *   token, guildId,
+   *   parentCategoryId?: string,
+   *   summary?: string,
+   *   projects: [{ id, label, body }],
+   *   mappings: ProjectMessengerMapping[],
+   *   createThreads?: boolean,
+   * }
+   *
+   * Returns: {
+   *   ok,
+   *   guildId,
+   *   summaryMessageId?,
+   *   channels: [{
+   *     projectId, projectLabel,
+   *     channelId, channelName,
+   *     messageId,
+   *     threadId, threadName,
+   *     created,             // true = channel was just created
+   *     threadCreated,
+   *     error,
+   *   }],
+   * }
+   */
+  router.post('/discord/sync-projects', async (req, res) => {
+    const { token, guildId, parentCategoryId, summary, projects, mappings, createThreads } =
+      req.body ?? {};
+    if (!token || !guildId) {
+      return res.status(400).json({ error: 'token and guildId required' });
+    }
+    const headers = {
+      Authorization: `Bot ${token}`,
+      'Content-Type': 'application/json',
+    };
+    const projectList = Array.isArray(projects) ? projects : [];
+    const mappingByProject = new Map(
+      (Array.isArray(mappings) ? mappings : [])
+        .filter((m) => m && m.projectId)
+        .map((m) => [m.projectId, m]),
+    );
+
+    const slugify = (s) =>
+      String(s ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 90) || 'project';
+
+    // Fetch existing channels so we can do find-by-name before creating.
+    let existingChannels = [];
+    try {
+      const cResp = await fetch(
+        `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/channels`,
+        { headers: { Authorization: `Bot ${token}` } },
+      );
+      if (cResp.ok) {
+        existingChannels = await cResp.json();
+      } else {
+        const text = await cResp.text();
+        return res.json({
+          ok: false,
+          error: `Discord: ${cResp.status} — ${friendlyDiscordError(cResp.status, text)}`,
+        });
+      }
+    } catch (err) {
+      return res.json({ ok: false, error: err?.message ?? 'failed to list channels' });
+    }
+
+    const existingByName = new Map(
+      existingChannels
+        .filter((c) => c.type === 0 || c.type === 5)
+        .map((c) => [String(c.name).toLowerCase(), c]),
+    );
+    const existingById = new Map(existingChannels.map((c) => [c.id, c]));
+
+    // Optional top-level summary message in the first text channel of the
+    // parent category (or first text channel of the guild if no category).
+    let summaryMessageId = null;
+    if (summary && summary.trim().length > 0) {
+      const candidate = parentCategoryId
+        ? existingChannels.find(
+            (c) => (c.type === 0 || c.type === 5) && c.parent_id === parentCategoryId,
+          )
+        : existingChannels.find((c) => c.type === 0 || c.type === 5);
+      if (candidate) {
+        try {
+          const sResp = await fetch(
+            `https://discord.com/api/v10/channels/${encodeURIComponent(candidate.id)}/messages`,
+            { method: 'POST', headers, body: JSON.stringify({ content: String(summary).slice(0, 2000) }) },
+          );
+          if (sResp.ok) {
+            const sJson = await sResp.json();
+            summaryMessageId = sJson.id ?? null;
+          }
+        } catch {
+          // ignore — summary is best-effort
+        }
+      }
+    }
+
+    const channelResults = [];
+
+    for (const project of projectList) {
+      const label = project.label || `Project ${project.id}`;
+      const desiredSlug = slugify(label);
+      let channel = null;
+      let created = false;
+      let entryError = null;
+
+      // 1) Try the stored mapping channel id first
+      const stored = mappingByProject.get(project.id)?.discord;
+      if (stored?.channelId && existingById.has(stored.channelId)) {
+        channel = existingById.get(stored.channelId);
+      }
+      // 2) Then try find-by-name (case-insensitive)
+      if (!channel) {
+        channel = existingByName.get(desiredSlug) ?? null;
+      }
+      // 3) Otherwise create it
+      if (!channel) {
+        try {
+          const cResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/channels`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                name: desiredSlug,
+                type: 0, // GUILD_TEXT
+                parent_id: parentCategoryId || null,
+                topic: `Otto sync channel for project ${label}`.slice(0, 1024),
+              }),
+            },
+          );
+          if (cResp.ok) {
+            channel = await cResp.json();
+            created = true;
+            existingById.set(channel.id, channel);
+            existingByName.set(String(channel.name).toLowerCase(), channel);
+          } else {
+            const text = await cResp.text();
+            entryError = `Discord: ${cResp.status} — ${friendlyDiscordError(cResp.status, text)}`;
+          }
+        } catch (err) {
+          entryError = err?.message ?? 'create channel failed';
+        }
+      }
+
+      let messageId = null;
+      let threadId = null;
+      let threadName = null;
+      let threadCreated = false;
+
+      if (channel && !entryError) {
+        // Post the per-project status message.
+        try {
+          const mResp = await fetch(
+            `https://discord.com/api/v10/channels/${encodeURIComponent(channel.id)}/messages`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                content: String(project.body ?? `Otto sync update for ${label}`).slice(0, 2000),
+              }),
+            },
+          );
+          if (mResp.ok) {
+            const mJson = await mResp.json();
+            messageId = mJson.id ?? null;
+          } else {
+            const text = await mResp.text();
+            entryError = `Discord: ${mResp.status} — ${friendlyDiscordError(mResp.status, text)}`;
+          }
+        } catch (err) {
+          entryError = err?.message ?? 'send message failed';
+        }
+
+        // Optional: start a thread from that message so details stay out of
+        // the main channel feed.
+        if (!entryError && messageId && createThreads !== false) {
+          threadName = `Otto sync — ${new Date().toISOString().slice(0, 10)}`;
+          try {
+            const tResp = await fetch(
+              `https://discord.com/api/v10/channels/${encodeURIComponent(channel.id)}/messages/${messageId}/threads`,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  name: threadName.slice(0, 100),
+                  auto_archive_duration: 1440, // 1 day
+                }),
+              },
+            );
+            if (tResp.ok) {
+              const tJson = await tResp.json();
+              threadId = tJson.id ?? null;
+              threadCreated = true;
+            } else {
+              // Thread creation failure is not fatal — channel + message succeeded.
+              const text = await tResp.text();
+              entryError =
+                entryError ?? `Thread skipped: Discord ${tResp.status} — ${friendlyDiscordError(tResp.status, text)}`;
+            }
+          } catch (err) {
+            entryError = entryError ?? `Thread skipped: ${err?.message ?? 'thread create failed'}`;
+          }
+        }
+      }
+
+      channelResults.push({
+        projectId: project.id,
+        projectLabel: label,
+        channelId: channel?.id ?? null,
+        channelName: channel?.name ?? null,
+        messageId,
+        threadId,
+        threadName,
+        created,
+        threadCreated,
+        error: entryError,
+      });
+    }
+
+    broadcastEvent?.('messenger.discord.synced', {
+      guildId,
+      projectCount: projectList.length,
+      created: channelResults.filter((c) => c.created).length,
+      errors: channelResults.filter((c) => c.error).length,
+    });
+
+    res.json({
+      ok: channelResults.every((c) => !c.error),
+      guildId,
+      summaryMessageId,
+      channels: channelResults,
+    });
+  });
+
+  /**
    * Build a Discord bot invite URL the user can click to add the bot to a server.
    * Body: { clientId, permissions? }
    *   - clientId: the bot/application id (returned by /test for discord)

@@ -27,6 +27,24 @@ export interface MessengerConnection {
   discordGuilds?: { id: string; name: string }[];
   /** Cached invite URL built from discordBotId so the user can re-invite the bot. */
   discordInviteUrl?: string;
+  // ---- Server-wide sync state ----
+  /** Discord guild (server) id selected for per-project channel sync. */
+  discordGuildId?: string;
+  discordGuildIconHash?: string | null;
+  /** Channels listed by /discord/resolve-guild (only post-able types). */
+  discordGuildChannels?: {
+    id: string;
+    name: string;
+    type: number;
+    parentId: string | null;
+  }[];
+  /** Categories (channel type 4) — used for the "create channels under this category" picker. */
+  discordGuildCategories?: { id: string; name: string }[];
+  discordGuildActiveThreadCount?: number;
+  /** Selected category id to nest new project channels under (optional). */
+  discordParentCategoryId?: string;
+  /** Whether sync-now should start a thread from each project status message. */
+  discordCreateThreads?: boolean;
   webhookSecret?: string;
 
   // Telegram-specific
@@ -61,6 +79,19 @@ export interface MessengerConnection {
     error: string | null;
   }[];
   lastSyncPostedTo?: 'forum' | 'chat';
+  /** Per-project results from the most recent Discord guild sync. */
+  lastSyncChannels?: {
+    projectId: string;
+    projectLabel: string;
+    channelId: string | null;
+    channelName: string | null;
+    messageId: string | null;
+    threadId: string | null;
+    threadName: string | null;
+    created: boolean;
+    threadCreated: boolean;
+    error: string | null;
+  }[];
 
   // Telegram long-poll listener state (set after start/status calls)
   telegramListenerRunning?: boolean;
@@ -82,7 +113,13 @@ export interface MessengerConnection {
 export interface ProjectMessengerMapping {
   projectId: string;
   projectLabel: string;
-  discord?: { channelId: string; channelName: string };
+  discord?: {
+    channelId: string;
+    channelName: string;
+    /** Stored from previous sync so threads are re-used instead of created. */
+    threadId?: string;
+    threadName?: string;
+  };
   telegram?: { topicId: string; topicName: string };
 }
 
@@ -136,7 +173,12 @@ interface MessengerState {
   testConnection: (type: MessengerType) => Promise<boolean>;
   resolveTelegramChat: () => Promise<boolean>;
   resolveDiscordChannel: () => Promise<boolean>;
+  resolveDiscordGuild: () => Promise<boolean>;
   fetchDiscordInviteUrl: () => Promise<string | null>;
+  syncDiscordGuildProjects: (
+    projects: { id: string; label: string; body: string }[],
+    summary: string,
+  ) => Promise<boolean>;
   sendTestMessage: (type: MessengerType) => Promise<boolean>;
   sendSyncSummary: (type: MessengerType, summary: string) => Promise<boolean>;
   syncTelegramProjects: (
@@ -326,6 +368,140 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
+      resolveDiscordGuild: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken || !conn.discordGuildId) return false;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            error?: string;
+            id?: string;
+            name?: string;
+            iconHash?: string | null;
+            channels?: { id: string; name: string; type: number; parentId: string | null }[];
+            categories?: { id: string; name: string }[];
+            activeThreads?: { id: string; name: string; parentId: string | null }[];
+            defaultChannelId?: string | null;
+          }>('/api/otto/messenger/discord/resolve-guild', {
+            token: conn.botToken,
+            guildId: conn.discordGuildId,
+          });
+          if (!data.ok) {
+            get().updateConnection('discord', { error: data.error ?? 'resolve-guild failed' });
+            return false;
+          }
+          get().updateConnection('discord', {
+            guildName: data.name ?? undefined,
+            discordGuildIconHash: data.iconHash ?? null,
+            discordGuildChannels: data.channels ?? [],
+            discordGuildCategories: data.categories ?? [],
+            discordGuildActiveThreadCount: data.activeThreads?.length ?? 0,
+            // If no default channel was set yet, auto-pick the first text channel
+            // of the server so Send-test-message just works.
+            defaultChannelId: conn.defaultChannelId ?? data.defaultChannelId ?? undefined,
+            error: null,
+          });
+          return true;
+        } catch (e) {
+          get().updateConnection('discord', {
+            error: e instanceof Error ? e.message : 'resolve-guild failed',
+          });
+          return false;
+        }
+      },
+
+      syncDiscordGuildProjects: async (projects, summary) => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken || !conn.discordGuildId) {
+          get().updateConnection('discord', {
+            lastSyncStatus: 'error',
+            lastSyncMessage: 'Add Discord bot token and Server ID first',
+          });
+          return false;
+        }
+
+        get().updateConnection('discord', {
+          lastSyncStatus: 'sending',
+          lastSyncMessage:
+            projects.length > 0
+              ? `Syncing ${projects.length} project${projects.length === 1 ? '' : 's'} to ${conn.guildName ?? 'server'}…`
+              : 'Sending sync summary…',
+        });
+
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            error?: string;
+            channels?: NonNullable<MessengerConnection['lastSyncChannels']>;
+          }>('/api/otto/messenger/discord/sync-projects', {
+            token: conn.botToken,
+            guildId: conn.discordGuildId,
+            parentCategoryId: conn.discordParentCategoryId,
+            createThreads: conn.discordCreateThreads !== false,
+            summary,
+            projects,
+            mappings: get().projectMappings,
+          });
+
+          if (data.error && (!data.channels || data.channels.length === 0)) {
+            get().updateConnection('discord', {
+              lastSyncStatus: 'error',
+              lastSyncMessage: data.error,
+            });
+            return false;
+          }
+
+          const results = data.channels ?? [];
+          // Persist channel / thread ids back into project mappings so the next
+          // sync re-uses them instead of creating duplicates.
+          for (const r of results) {
+            if (!r.channelId) continue;
+            get().setProjectMapping({
+              projectId: r.projectId,
+              projectLabel: r.projectLabel,
+              discord: {
+                channelId: r.channelId,
+                channelName: r.channelName ?? '',
+                ...(r.threadId
+                  ? { threadId: r.threadId, threadName: r.threadName ?? undefined }
+                  : {}),
+              },
+            });
+          }
+
+          const errored = results.filter((r) => r.error);
+          const createdCh = results.filter((r) => r.created).length;
+          const createdTh = results.filter((r) => r.threadCreated).length;
+          const postedMsgs = results.filter((r) => r.messageId).length;
+
+          const parts: string[] = [];
+          if (createdCh > 0) parts.push(`${createdCh} channel${createdCh === 1 ? '' : 's'} created`);
+          if (postedMsgs > 0)
+            parts.push(`${postedMsgs} message${postedMsgs === 1 ? '' : 's'} posted`);
+          if (createdTh > 0) parts.push(`${createdTh} thread${createdTh === 1 ? '' : 's'} opened`);
+          if (errored.length > 0)
+            parts.push(`${errored.length} error${errored.length === 1 ? '' : 's'}`);
+          const summaryMsg = parts.length > 0 ? parts.join(', ') + ' ✓' : 'Sync sent ✓';
+
+          get().updateConnection('discord', {
+            lastSyncAt: Date.now(),
+            lastSyncStatus: errored.length > 0 ? 'error' : 'ok',
+            lastSyncMessage:
+              errored.length > 0
+                ? `${summaryMsg} — first error: ${errored[0].error}`
+                : summaryMsg,
+            lastSyncChannels: results,
+          });
+          return errored.length === 0;
+        } catch (e) {
+          get().updateConnection('discord', {
+            lastSyncStatus: 'error',
+            lastSyncMessage: e instanceof Error ? e.message : 'Sync failed',
+          });
+          return false;
+        }
+      },
+
       fetchDiscordInviteUrl: async () => {
         const conn = get().connections.find((c) => c.type === 'discord');
         if (!conn?.discordBotId) return null;
@@ -384,14 +560,20 @@ export const useMessengerStore = create<MessengerState>()(
         if (!conn) return false;
 
         const token = type === 'discord' ? conn.botToken : conn.telegramBotToken;
-        const target = type === 'discord' ? conn.defaultChannelId : conn.telegramChatId;
+        // For Discord: fall back to the first text channel of the resolved
+        // server if no default channel is configured but a guild is set.
+        let target =
+          type === 'discord' ? conn.defaultChannelId : conn.telegramChatId;
+        if (!target && type === 'discord' && conn.discordGuildChannels && conn.discordGuildChannels.length > 0) {
+          target = conn.discordGuildChannels[0].id;
+        }
         if (!token || !target) {
           get().updateConnection(type, {
             lastSyncStatus: 'error',
             lastSyncMessage:
               type === 'telegram'
                 ? 'Add your Telegram chat ID before sending'
-                : 'Add a Discord channel ID before sending',
+                : 'Add a Discord channel ID or Server ID before sending',
           });
           return false;
         }
