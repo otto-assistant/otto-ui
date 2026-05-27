@@ -141,6 +141,12 @@ export const registerOttoApiRoutes = (app, dependencies) => {
 
   const router = express.Router();
 
+  // The shared request middleware in `core-routes.js` skips JSON body parsing
+  // for `/api/*` paths that aren't on its allowlist (including `/api/otto/...`).
+  // Mount our own parser here so create/update handlers (POST/PUT) see `req.body`.
+  // Matches the convention already used by `discord-sync.js` and `messenger-sync.js`.
+  router.use(express.json({ limit: '256kb' }));
+
   router.get('/status', (_req, res) => {
     const ottoVersion = readOttoCliVersion();
 

@@ -1220,6 +1220,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   const readFile = React.useCallback(async (path: string): Promise<string> => {
     if (files.readFile) {
       const result = await files.readFile(path);
+      if (!result) {
+        throw new Error(t('filesView.error.readFileFailed'));
+      }
       return result.content ?? '';
     }
 
