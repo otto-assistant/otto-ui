@@ -159,11 +159,22 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
         channelId: message.channel_id,
         guildId: message.guild_id ?? null,
       });
+      // Discord channels carry a `parent_id` only on threads. We can't tell
+      // from the bare MESSAGE_CREATE payload whether channel_id is a regular
+      // text channel or already inside a thread — the gateway delivers both
+      // with the same shape. The bridge handles this with `sourceMessageId`:
+      //  - if we're already in a thread, bind to it directly,
+      //  - else spawn a thread on the user's message.
+      // We pass message.id as sourceMessageId; if `channel_id` turns out to
+      // be a thread (Discord's "Start Thread from Message" 400s with code
+      // 50068 because threads can't host threads), the bridge falls back to
+      // posting in the existing surface.
       const bridged = await bridge.routeInbound({
         type: 'discord',
         token: state.token,
         channelId: message.channel_id,
         threadId: null,
+        sourceMessageId: message.id,
         text,
         projectPath: project?.path ?? null,
         projectLabel: project?.label ?? null,

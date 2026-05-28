@@ -4,40 +4,55 @@ import { MessengerBridgeStore } from './messenger-bridge-store.js';
 /**
  * Bidirectional bridge between Discord/Telegram and OpenCode chat sessions.
  *
- * What this turns the messenger settings card into:
- *   - User posts in a Discord channel  →  it reaches OpenCode like a chat
- *     message from the web UI does. OpenCode's streaming response is mirrored
- *     back into the same channel via Discord message edits.
- *   - Same flow for Telegram chats / topics.
- *   - The session is shared with the web UI, so the same conversation history
- *     is visible in both surfaces.
+ * Threading model (modelled after https://github.com/remorses/kimaki):
+ *   - Each new conversation starter in a Discord text channel spawns a public
+ *     Thread on that message via POST /channels/:id/messages/:id/threads. The
+ *     OpenCode session is bound to the THREAD, not the channel. Follow-up
+ *     messages posted inside the thread reuse the same session.
+ *   - Telegram already gets per-topic surfaces from message_thread_id; no
+ *     thread creation needed.
  *
- * Implementation outline:
- *   - For each inbound message, resolve the target's bound session id (or
- *     create a new session in the project's working directory the first time
- *     a channel is used).
- *   - Post a placeholder "Otto is thinking..." message in the messenger and
- *     remember its id.
- *   - POST /session/:id/prompt_async to OpenCode.
- *   - Subscribe once to the global OpenCode SSE stream. For each assistant
- *     part update against a session we have an in-flight messenger message
- *     for, throttle-edit the messenger message to extend the text. On
- *     session.idle, finalize.
+ * Outbound model:
+ *   - One new Discord/Telegram message per renderable OpenCode part.
+ *     No edit-in-place — text streams complete (part.time.end set) before
+ *     they're posted, tool runs post a single one-liner per state change,
+ *     reasoning posts a `┣ thinking` marker.
+ *   - Tool summaries follow kimaki's compact format: file name and ±line
+ *     count for edits, file name for reads, escaped command for bash,
+ *     match count for glob/grep, etc. Not `[⋯ tool-name]`.
+ *   - Typing indicator pulses every 7s (Discord) / 4s (Telegram) while a
+ *     session has unfinished assistant work — to give the user a visible
+ *     "thinking…" affordance without spamming the chat.
  */
 
-const STARTER_TEXT = '⏳ Otto is thinking…';
-const EDIT_THROTTLE_MS = 1500;
 const DISCORD_LIMIT = 2000;
 const TELEGRAM_LIMIT = 4096;
-// Reserve some chars so the throttled "tail" indicator fits.
-const TAIL = ' …'; // indicates "more incoming"
+const NAME_TTL_MS = 5 * 60_000;
+const TYPING_PULSE_DISCORD_MS = 7_000;
+const TYPING_PULSE_TELEGRAM_MS = 4_000;
 
 function tokenHash(token) {
   if (!token) return '';
   return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 12);
 }
 
-function targetKey({ channelId, threadId }) {
+/**
+ * Stable key identifying a conversation surface. We want the SAME key
+ * whether the gateway delivers a brand-new message in a parent channel
+ * (we're about to spawn a thread) or a follow-up inside an existing
+ * thread.
+ *
+ * Discord: thread channels carry their own unique IDs, so once a thread
+ *   exists we key purely by the thread id. The parent-channel id is
+ *   irrelevant from then on (and Discord MESSAGE_CREATE on a follow-up
+ *   gives us `channel_id = thread_id` with no `parent_id` in the payload).
+ *
+ * Telegram: forum topics are scoped per-chat, so we keep "chat:topic".
+ */
+function targetKey({ type, channelId, threadId }) {
+  if (type === 'discord') {
+    return threadId ? `${threadId}` : `${channelId}`;
+  }
   return threadId ? `${channelId}:${threadId}` : `${channelId}`;
 }
 
@@ -45,30 +60,9 @@ function maxLenFor(type) {
   return type === 'discord' ? DISCORD_LIMIT : TELEGRAM_LIMIT;
 }
 
-function clampForMessenger(text, type, withTail = false) {
-  const limit = maxLenFor(type) - (withTail ? TAIL.length : 0);
-  if (text.length <= limit) return text + (withTail ? TAIL : '');
-  return text.slice(0, limit) + (withTail ? TAIL : '…');
-}
-
-/**
- * Pull readable text out of an OpenCode message part. The SDK's part shapes:
- *   - { type: 'text', text }
- *   - { type: 'tool', tool, state: { status, input, output, ... } }
- *   - { type: 'reasoning', text }    (skipped — too noisy for chat surfaces)
- */
-function renderPart(part) {
-  if (!part || typeof part !== 'object') return '';
-  if (part.type === 'text') {
-    return typeof part.text === 'string' ? part.text : '';
-  }
-  if (part.type === 'tool') {
-    const status = part.state?.status ?? 'running';
-    const toolName = part.tool ?? 'tool';
-    const symbol = status === 'completed' ? '✓' : status === 'error' ? '✗' : '⋯';
-    return `\n[${symbol} ${toolName}${status === 'error' ? ` — ${(part.state?.error ?? '').slice(0, 200)}` : ''}]\n`;
-  }
-  return '';
+function escapeMd(s) {
+  // Light markdown escaping — keep code-fence + backticks usable.
+  return String(s ?? '').replace(/[*_]/g, (c) => `\\${c}`);
 }
 
 function slugify(s) {
@@ -78,11 +72,6 @@ function slugify(s) {
     .replace(/^-+|-+$/g, '');
 }
 
-/**
- * Best-effort channel→project resolution for cases where the listener
- * didn't pre-resolve. We slug-match the messenger surface's name against
- * each project's label and path-leaf.
- */
 function pickProjectForName(projects, name) {
   if (!name) return null;
   const wanted = slugify(name);
@@ -95,7 +84,6 @@ function pickProjectForName(projects, name) {
     ];
     if (candidates.includes(wanted)) return p;
   }
-  // Looser: prefix or substring match (handles "my-project-discord-channel").
   for (const p of projects) {
     const candidates = [
       slugify(p.label ?? ''),
@@ -106,6 +94,224 @@ function pickProjectForName(projects, name) {
   return null;
 }
 
+function shortFileName(p) {
+  if (!p) return '';
+  const last = String(p).split(/[\\/]/).pop();
+  return last || String(p);
+}
+
+function clipBlock(s, limit) {
+  if (!s) return '';
+  return s.length > limit ? s.slice(0, limit - 1) + '…' : s;
+}
+
+// ---------------------------------------------------------------------------
+// Part rendering (kimaki-style compact one-liners)
+// ---------------------------------------------------------------------------
+
+/**
+ * Render an OpenCode message part for a Discord/Telegram surface. Returns
+ * `null` when nothing should be posted (e.g. empty text, pending tools).
+ */
+export function renderPartForMessenger(part) {
+  if (!part || typeof part !== 'object') return null;
+
+  if (part.type === 'reasoning') {
+    if (!part.text || !String(part.text).trim()) return null;
+    return '┣ thinking';
+  }
+
+  if (part.type === 'text') {
+    const text = typeof part.text === 'string' ? part.text : '';
+    if (!text.trim()) return null;
+    // We only render text when streaming has settled (part.time.end set).
+    // The caller guards this; here we just format.
+    return text;
+  }
+
+  if (part.type === 'tool') {
+    return renderToolPart(part);
+  }
+
+  return null;
+}
+
+function renderToolPart(part) {
+  const tool = String(part.tool ?? 'tool');
+  const status = part.state?.status ?? 'running';
+  const input = part.state?.input ?? {};
+
+  // Tool title — usually a one-word context (e.g. "build", "test").
+  const title = typeof part.state?.title === 'string' ? part.state.title : '';
+  const titlePart = title ? ` _${escapeMd(title)}_` : '';
+
+  const summary = (() => {
+    switch (tool) {
+      case 'read': {
+        const file = shortFileName(input.filePath);
+        return file ? `*${escapeMd(file)}*` : '';
+      }
+      case 'edit':
+      case 'multiedit':
+      case 'apply_patch': {
+        const file = shortFileName(input.filePath);
+        const oldStr = typeof input.oldString === 'string' ? input.oldString : '';
+        const newStr = typeof input.newString === 'string' ? input.newString : '';
+        const removed = oldStr ? oldStr.split('\n').length : 0;
+        const added = newStr ? newStr.split('\n').length : 0;
+        const delta = added || removed ? ` (+${added}-${removed})` : '';
+        return file ? `*${escapeMd(file)}*${delta}` : delta.trim();
+      }
+      case 'write': {
+        const file = shortFileName(input.filePath);
+        return file ? `*${escapeMd(file)}*` : '';
+      }
+      case 'bash':
+      case 'shell': {
+        const cmd = (input.command ?? '').toString().split('\n')[0];
+        return cmd ? `\`${clipBlock(cmd, 150)}\`` : '';
+      }
+      case 'glob': {
+        const pattern = input.pattern ?? '';
+        const count = part.state?.metadata?.count;
+        return `\`${clipBlock(pattern, 80)}\`${typeof count === 'number' ? ` (${count} match${count === 1 ? '' : 'es'})` : ''}`;
+      }
+      case 'grep': {
+        const pattern = input.pattern ?? '';
+        const count = part.state?.metadata?.count;
+        return `\`${clipBlock(pattern, 80)}\`${typeof count === 'number' ? ` (${count} hit${count === 1 ? '' : 's'})` : ''}`;
+      }
+      case 'list':
+      case 'ls': {
+        const path = input.path ?? '';
+        return path ? `*${escapeMd(shortFileName(path))}*` : '';
+      }
+      case 'webfetch':
+      case 'fetch': {
+        return input.url ? `<${input.url}>` : '';
+      }
+      case 'task':
+      case 'subagent': {
+        const desc = input.description ?? input.prompt ?? '';
+        return desc ? `_${escapeMd(clipBlock(desc, 100))}_` : '';
+      }
+      case 'todowrite':
+      case 'todoread': {
+        const count = Array.isArray(input.todos) ? input.todos.length : null;
+        return count != null ? `(${count} todo${count === 1 ? '' : 's'})` : '';
+      }
+      default: {
+        // Unknown tool — show the first useful input string field.
+        const candidate =
+          input.filePath ?? input.path ?? input.command ?? input.url ?? input.query ?? '';
+        if (typeof candidate === 'string' && candidate.length > 0) {
+          return `*${escapeMd(shortFileName(candidate))}*`;
+        }
+        return '';
+      }
+    }
+  })();
+
+  let icon = '┣';
+  if (status === 'error') icon = '✗';
+  else if (tool === 'edit' || tool === 'write' || tool === 'multiedit' || tool === 'apply_patch') {
+    icon = '◼︎';
+  } else if (tool === 'bash' || tool === 'shell') {
+    icon = '⬦';
+  } else if (tool === 'read') {
+    icon = '📖';
+  }
+
+  let line = `${icon} ${tool}${titlePart}`;
+  if (summary) line += ` ${summary}`;
+  if (status === 'error') {
+    const errMsg = part.state?.error ?? '';
+    if (errMsg) line += ` — ${escapeMd(clipBlock(String(errMsg), 200))}`;
+  }
+  return line;
+}
+
+// ---------------------------------------------------------------------------
+// Discord / Telegram REST adapters
+// ---------------------------------------------------------------------------
+
+async function sendDiscord({ token, channelId, content }) {
+  const r = await fetch(
+    `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.slice(0, DISCORD_LIMIT) }),
+    },
+  );
+  if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+  const data = await r.json();
+  return { ok: true, id: data.id };
+}
+
+async function sendTelegram({ token, chatId, threadId, content }) {
+  const body = { chat_id: chatId, text: content.slice(0, TELEGRAM_LIMIT) };
+  if (threadId) body.message_thread_id = Number(threadId);
+  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!d.ok) return { ok: false, error: d.description ?? `Telegram ${r.status}` };
+  return { ok: true, id: d.result?.message_id };
+}
+
+/**
+ * Create a public Discord thread starting from a user's message. Returns
+ * the new thread id, or null when the API call failed (we fall back to
+ * the channel in that case so the user still gets a reply).
+ */
+async function startDiscordThread({ token, channelId, messageId, name }) {
+  if (!messageId) return { ok: false, error: 'no source message id' };
+  const safeName = (name || 'Otto').replace(/\s+/g, ' ').slice(0, 80) || 'Otto';
+  const r = await fetch(
+    `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/threads`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: safeName, auto_archive_duration: 1440 }),
+    },
+  );
+  if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+  const data = await r.json();
+  return { ok: true, threadId: data.id ?? null, threadName: data.name ?? safeName };
+}
+
+async function discordTyping({ token, channelId }) {
+  try {
+    await fetch(`https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/typing`, {
+      method: 'POST',
+      headers: { Authorization: `Bot ${token}` },
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function telegramTyping({ token, chatId, threadId }) {
+  try {
+    const body = { chat_id: chatId, action: 'typing' };
+    if (threadId) body.message_thread_id = Number(threadId);
+    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // ignore
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bridge factory
+// ---------------------------------------------------------------------------
+
 export function createMessengerOpencodeBridge({
   globalEventHub,
   buildOpenCodeUrl,
@@ -113,91 +319,125 @@ export function createMessengerOpencodeBridge({
   broadcastEvent,
   store,
   listProjects,
+  /**
+   * Optional bootstrap handler called when an unbound channel sends a
+   * `clone <url>` / `path <abs>` / `new <label>` reply. Signature:
+   *   ({ action, url?, path?, label? }) => { ok, project?: { id, path, label }, error? }
+   * If unset, the bridge falls back to slug-matching / first-project.
+   */
+  bootstrapProject = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
-  // sessionId → { type, token, channelId, threadId, messageId, content, lastFlushAt, scheduled, finalized }
-  const inflight = new Map();
-  // Cache resolved names (channel/topic) → ttl so we don't hit the messenger
-  // API for every inbound message in a long conversation.
-  const nameCache = new Map(); // key: "discord:channelId" | "telegram:chatId" → { name, expiresAt }
-  const NAME_TTL_MS = 5 * 60_000;
+  // Per-session live context. Holds the messenger surface (channel/thread)
+  // OpenCode events should be routed to, and the set of part ids we've
+  // already posted (so we don't double-post on partial-update events).
+  /** @type {Map<string, {
+   *   type: 'discord'|'telegram',
+   *   token: string,
+   *   channelId: string,
+   *   threadId: string|null,
+   *   sentPartIds: Set<string>,
+   *   typingTimer?: NodeJS.Timeout,
+   *   startedAt: number,
+   *   lastError: string|null,
+   * }>}
+   */
+  const sessionContexts = new Map();
 
-  // sessionId → buffer of part renderings keyed by partId so a single tool's
-  // status transitions update in place rather than appending duplicates.
-  const partBuffersBySession = new Map();
+  // Per-surface project bootstrap dialogue state. When a new channel sends
+  // its first message and we have no slug-match (and the user has not yet
+  // told us what project this channel maps to), we stash the original
+  // text here and ask "clone | path | new". The follow-up reply lands here
+  // and triggers the bootstrap.
+  /** @type {Map<string, { type, token, channelId, threadId, sourceMessageId, originalText, askedAt }>} */
+  const bootstrapPending = new Map();
 
-  // Telegram + Discord REST adapters ---------------------------------------
-  async function postMessengerMessage({ type, token, channelId, threadId, text }) {
-    if (type === 'telegram') {
-      const body = { chat_id: channelId, text: clampForMessenger(text, 'telegram') };
-      if (threadId) body.message_thread_id = Number(threadId);
-      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
-      if (!d.ok) return { ok: false, error: d.description ?? `Telegram ${r.status}` };
-      return { ok: true, id: d.result?.message_id };
-    }
-    if (type === 'discord') {
-      // Discord: a "thread" is itself a channel — its id IS the parent channel
-      // id for send purposes. So if threadId is set, send there instead.
-      const channel = threadId ?? channelId;
-      const r = await fetch(
-        `https://discord.com/api/v10/channels/${encodeURIComponent(channel)}/messages`,
-        {
+  /**
+   * Bootstrap dialogue key — uses the same Discord-aware semantics as
+   * targetKey so the first message's stash and the user's reply (which
+   * arrives with `channel_id = thread_id` on Discord) land on the same
+   * surface.
+   */
+  function bootstrapKey({ type, channelId, threadId }) {
+    return `${type}:${targetKey({ type, channelId, threadId })}`;
+  }
+
+  /**
+   * Parse a user's bootstrap reply. Returns `{ action, url?, path?, label? }`
+   * or null when the message isn't a bootstrap command.
+   */
+  function parseBootstrapReply(text) {
+    if (typeof text !== 'string') return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const m = trimmed.match(/^(clone|path|new)\s+(.+)$/i);
+    if (!m) return null;
+    const action = m[1].toLowerCase();
+    const rest = m[2].trim();
+    if (action === 'clone') return { action: 'clone', url: rest };
+    if (action === 'path') return { action: 'path', path: rest };
+    if (action === 'new') return { action: 'new', label: rest };
+    return null;
+  }
+
+  // Cache: target name lookups (for slug-matching projects).
+  const nameCache = new Map();
+
+  async function lookupTargetName({ type, token, channelId, threadId }) {
+    const key = `${type}:${channelId}${threadId ? `:${threadId}` : ''}`;
+    const cached = nameCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.name;
+    let name = null;
+    try {
+      if (type === 'discord') {
+        const lookupId = threadId ?? channelId;
+        const r = await fetch(
+          `https://discord.com/api/v10/channels/${encodeURIComponent(lookupId)}`,
+          { headers: { Authorization: `Bot ${token}` } },
+        );
+        if (r.ok) {
+          const data = await r.json();
+          name = data.name ?? null;
+        }
+      } else if (type === 'telegram') {
+        const r = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
           method: 'POST',
-          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: clampForMessenger(text, 'discord') }),
-        },
-      );
-      if (!r.ok) {
-        const errText = await r.text();
-        return { ok: false, error: `Discord ${r.status}: ${errText.slice(0, 200)}` };
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: channelId }),
+        });
+        const data = await r.json();
+        if (data.ok) name = data.result?.title ?? data.result?.username ?? null;
       }
-      const d = await r.json();
-      return { ok: true, id: d.id };
+    } catch {
+      // ignore
     }
-    return { ok: false, error: `Unknown messenger type ${type}` };
+    nameCache.set(key, { name, expiresAt: Date.now() + NAME_TTL_MS });
+    return name;
   }
 
-  async function editMessengerMessage({ type, token, channelId, threadId, messageId, text, withTail }) {
-    const clamped = clampForMessenger(text, type, withTail);
-    if (type === 'telegram') {
-      const r = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: channelId, message_id: messageId, text: clamped }),
-      });
-      const d = await r.json();
-      // "message is not modified" → silently ok (Telegram returns 400 in that case)
-      if (!d.ok && !/not modified/i.test(d.description ?? '')) {
-        return { ok: false, error: d.description ?? `Telegram ${r.status}` };
-      }
-      return { ok: true };
+  async function autoResolveProject({ type, token, channelId, threadId }) {
+    if (!listProjects) return null;
+    let projects = [];
+    try {
+      projects = (await listProjects()) ?? [];
+    } catch {
+      return null;
     }
-    if (type === 'discord') {
-      const channel = threadId ?? channelId;
-      const r = await fetch(
-        `https://discord.com/api/v10/channels/${encodeURIComponent(channel)}/messages/${encodeURIComponent(messageId)}`,
-        {
-          method: 'PATCH',
-          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: clamped }),
-        },
-      );
-      if (!r.ok) {
-        const errText = await r.text();
-        return { ok: false, error: `Discord ${r.status}: ${errText.slice(0, 200)}` };
-      }
-      return { ok: true };
-    }
-    return { ok: false, error: `Unknown messenger type ${type}` };
+    if (!Array.isArray(projects) || projects.length === 0) return null;
+    const name = await lookupTargetName({ type, token, channelId, threadId });
+    const matched = pickProjectForName(projects, name);
+    const project = matched ?? projects[0];
+    if (!project?.path) return null;
+    return {
+      projectPath: project.path,
+      projectLabel: project.label ?? project.path.split('/').pop() ?? project.path,
+      autoResolved: !matched ? 'fallback-first' : 'slug-match',
+      resolvedFromName: name,
+    };
   }
 
-  // OpenCode REST ----------------------------------------------------------
+  // --- OpenCode REST ------------------------------------------------------
   async function opencodeFetch(pathSuffix, init = {}) {
     const url = buildOpenCodeUrl(pathSuffix, '');
     const headers = {
@@ -226,10 +466,7 @@ export function createMessengerOpencodeBridge({
     const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
     const r = await opencodeFetch(
       `/session/${encodeURIComponent(sessionId)}/prompt_async${params}`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ parts: [{ type: 'text', text }] }),
-      },
+      { method: 'POST', body: JSON.stringify({ parts: [{ type: 'text', text }] }) },
     );
     if (!r.ok) {
       const errText = await r.text();
@@ -238,91 +475,16 @@ export function createMessengerOpencodeBridge({
     return true;
   }
 
-  // Best-effort fetch of a channel/topic's human name, used for slug-matching
-  // against project labels when the listener didn't pre-resolve a project.
-  async function lookupTargetName({ type, token, channelId, threadId }) {
-    const key = `${type}:${channelId}${threadId ? `:${threadId}` : ''}`;
-    const cached = nameCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.name;
-    let name = null;
-    try {
-      if (type === 'discord') {
-        // Threads are channels in Discord, so getChannel works for both.
-        const lookupId = threadId ?? channelId;
-        const r = await fetch(
-          `https://discord.com/api/v10/channels/${encodeURIComponent(lookupId)}`,
-          { headers: { Authorization: `Bot ${token}` } },
-        );
-        if (r.ok) {
-          const data = await r.json();
-          name = data.name ?? null;
-        }
-      } else if (type === 'telegram') {
-        // No forum-topic name endpoint in Bot API. Best we get is the
-        // supergroup title via getChat. For non-forum chats that's the
-        // chat title; for forum chats the user's topic-channel mapping is
-        // what slug-matches anyway, so fall back to the chat title.
-        const r = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: channelId }),
-        });
-        const data = await r.json();
-        if (data.ok) {
-          name = data.result?.title ?? data.result?.username ?? null;
-        }
-      }
-    } catch {
-      // Network/REST failures here are not fatal — we'll just fall back to
-      // the first project.
-    }
-    nameCache.set(key, { name, expiresAt: Date.now() + NAME_TTL_MS });
-    return name;
-  }
-
-  /**
-   * Automatic project resolution — used when the listener didn't pre-resolve.
-   * Strategy:
-   *   1. Fetch the channel/topic name via the messenger REST API.
-   *   2. Slug-match against the user's project list.
-   *   3. If still no match, fall back to the first project (single-project
-   *      installs are the common case).
-   * Returns `{ projectPath, projectLabel }` or null.
-   */
-  async function autoResolveProject({ type, token, channelId, threadId }) {
-    if (!listProjects) return null;
-    let projects = [];
-    try {
-      projects = (await listProjects()) ?? [];
-    } catch {
-      return null;
-    }
-    if (!Array.isArray(projects) || projects.length === 0) return null;
-
-    const name = await lookupTargetName({ type, token, channelId, threadId });
-    const matched = pickProjectForName(projects, name);
-    const project = matched ?? projects[0];
-    if (!project?.path) return null;
-    return {
-      projectPath: project.path,
-      projectLabel: project.label ?? project.path.split('/').pop() ?? project.path,
-      autoResolved: !matched ? 'fallback-first' : 'slug-match',
-      resolvedFromName: name,
-    };
-  }
-
-  // Session resolution -----------------------------------------------------
+  // --- Session resolution -------------------------------------------------
   async function resolveOrCreateSession({ type, token, channelId, threadId, projectPath, projectLabel }) {
     const hash = tokenHash(token);
-    const key = targetKey({ channelId, threadId });
+    const key = targetKey({ type, channelId, threadId });
     const existing = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: key });
     if (existing?.sessionId) {
       bridgeStore.touch({ type, botTokenHash: hash, targetKey: key });
       return { sessionId: existing.sessionId, projectPath: existing.projectPath, autoResolved: 'cached' };
     }
 
-    // Auto-resolve project from channel/topic name when the listener didn't
-    // supply one — the user shouldn't have to wire up channel mappings by hand.
     let effectivePath = projectPath ?? null;
     let effectiveLabel = projectLabel ?? null;
     let autoResolved = null;
@@ -362,79 +524,84 @@ export function createMessengerOpencodeBridge({
     return { sessionId, projectPath: effectivePath, autoResolved };
   }
 
-  // Outbound (OpenCode → messenger) ---------------------------------------
-  function scheduleEdit(sessionId) {
-    const ctx = inflight.get(sessionId);
-    if (!ctx || ctx.scheduled) return;
-    ctx.scheduled = true;
-    const wait = Math.max(0, EDIT_THROTTLE_MS - (Date.now() - ctx.lastFlushAt));
-    setTimeout(() => {
-      ctx.scheduled = false;
-      void flushEdit(sessionId, /* final */ false);
-    }, wait);
+  // --- Outbound: post one message per renderable part --------------------
+  async function postToSurface(ctx, content) {
+    return postMessengerSurface(ctx, content);
   }
 
-  async function flushEdit(sessionId, isFinal) {
-    const ctx = inflight.get(sessionId);
+  /** Like postToSurface but takes a raw surface descriptor — used by the
+   *  bootstrap dialogue before a session exists. */
+  async function postMessengerSurface({ type, token, channelId, threadId }, content) {
+    if (!content) return { ok: false, error: 'empty content' };
+    if (type === 'discord') {
+      const ch = threadId ?? channelId;
+      return sendDiscord({ token, channelId: ch, content });
+    }
+    return sendTelegram({ token, chatId: channelId, threadId, content });
+  }
+
+  function startTypingPulse(ctx) {
+    if (ctx.typingTimer) return;
+    const pulse = async () => {
+      if (!sessionContexts.has(ctx.sessionId)) return;
+      if (ctx.type === 'discord') {
+        await discordTyping({ token: ctx.token, channelId: ctx.threadId ?? ctx.channelId });
+      } else {
+        await telegramTyping({ token: ctx.token, chatId: ctx.channelId, threadId: ctx.threadId });
+      }
+      ctx.typingTimer = setTimeout(
+        pulse,
+        ctx.type === 'discord' ? TYPING_PULSE_DISCORD_MS : TYPING_PULSE_TELEGRAM_MS,
+      );
+    };
+    // First pulse immediately so the user sees the indicator right away.
+    void pulse();
+  }
+
+  function stopTypingPulse(ctx) {
+    if (ctx.typingTimer) {
+      clearTimeout(ctx.typingTimer);
+      ctx.typingTimer = undefined;
+    }
+  }
+
+  async function emitPart(sessionId, part) {
+    const ctx = sessionContexts.get(sessionId);
     if (!ctx) return;
-    const parts = partBuffersBySession.get(sessionId);
-    if (!parts) return;
+    const partId = part?.id;
+    const partType = part?.type;
 
-    // Re-render the full body from the ordered list of parts.
-    const body = parts.body.map((p) => p.text).join('');
-    if (!body && !isFinal) return;
+    // Skip duplicates we've already posted (parts get many updates as they
+    // stream — we only want one Discord/Telegram message per logical part).
+    // Tools transition pending → running → completed/error; we want the
+    // running/error/completed event with a stable state, not every delta.
+    if (partType === 'text') {
+      if (!part?.time?.end) return; // wait until streaming finishes
+    }
+    if (partType === 'tool') {
+      const status = part.state?.status ?? 'running';
+      // Skip "pending" (the tool is still initializing — we don't know the
+      // input yet) and "completed" (the running message already conveyed
+      // what happened; emitting again would be noise). Surface running +
+      // error.
+      if (status !== 'running' && status !== 'error') return;
+    }
+    if (partType === 'reasoning') {
+      // Post a single thinking marker per reasoning block — once.
+    }
 
-    ctx.lastFlushAt = Date.now();
-    const text = body.trim().length === 0 && isFinal ? '_(no response)_' : body;
-    const editRes = await editMessengerMessage({
-      type: ctx.type,
-      token: ctx.token,
-      channelId: ctx.channelId,
-      threadId: ctx.threadId,
-      messageId: ctx.messageId,
-      text,
-      withTail: !isFinal,
-    });
-    if (!editRes.ok) {
-      ctx.lastError = editRes.error;
-    }
-    if (isFinal) {
-      ctx.finalized = true;
-      broadcastEvent?.('messenger.bridge.session_idle', {
-        type: ctx.type,
-        sessionId,
-        channelId: ctx.channelId,
-        threadId: ctx.threadId,
-        messageId: ctx.messageId,
-      });
-      inflight.delete(sessionId);
-    }
-  }
+    const dedupKey = partId ? `${partId}:${partType}:${part?.state?.status ?? ''}` : null;
+    if (dedupKey && ctx.sentPartIds.has(dedupKey)) return;
 
-  function ensureParts(sessionId) {
-    let bucket = partBuffersBySession.get(sessionId);
-    if (!bucket) {
-      bucket = { byPartId: new Map(), body: [] };
-      partBuffersBySession.set(sessionId, bucket);
-    }
-    return bucket;
-  }
+    const rendered = renderPartForMessenger(part);
+    if (!rendered) return;
 
-  function applyPart(sessionId, part) {
-    const text = renderPart(part);
-    if (!text && part?.type !== 'tool') return;
-    const bucket = ensureParts(sessionId);
-    const partId = part?.id ?? `${part?.type}-${bucket.body.length}`;
-    const existing = bucket.byPartId.get(partId);
-    if (existing) {
-      // Update in place — tool status transitions etc.
-      existing.text = text;
-    } else {
-      const entry = { id: partId, text };
-      bucket.byPartId.set(partId, entry);
-      bucket.body.push(entry);
+    const sent = await postToSurface(ctx, rendered);
+    if (!sent.ok) {
+      ctx.lastError = sent.error;
+      return;
     }
-    scheduleEdit(sessionId);
+    if (dedupKey) ctx.sentPartIds.add(dedupKey);
   }
 
   function handleGlobalEvent(normalized) {
@@ -443,38 +610,47 @@ export function createMessengerOpencodeBridge({
     const type = payload.type ?? payload.event ?? null;
     const props = payload.properties ?? payload.props ?? payload;
 
-    let sessionId = null;
-    let part = null;
-
     if (type === 'message.part.updated') {
-      part = props?.part;
-      sessionId = part?.sessionID ?? part?.sessionId ?? props?.sessionID ?? null;
-    } else if (type === 'message.updated') {
-      const info = props?.info ?? props?.message;
-      sessionId = info?.sessionID ?? info?.sessionId ?? null;
-    } else if (type === 'session.idle') {
-      sessionId = props?.sessionID ?? props?.sessionId ?? null;
-      if (sessionId && inflight.has(sessionId)) {
-        void flushEdit(sessionId, true);
-      }
-      return;
-    } else if (type === 'session.error') {
-      sessionId = props?.sessionID ?? props?.sessionId ?? null;
-      const ctx = sessionId ? inflight.get(sessionId) : null;
-      if (ctx) {
-        ctx.lastError = props?.error?.message ?? props?.error ?? 'OpenCode session error';
-        void flushEdit(sessionId, true);
-      }
-      return;
-    } else {
+      const part = props?.part;
+      const sessionId = part?.sessionID ?? part?.sessionId ?? props?.sessionID ?? null;
+      if (!sessionId || !sessionContexts.has(sessionId)) return;
+      if (part?.role === 'user') return;
+      void emitPart(sessionId, part);
       return;
     }
-
-    if (!sessionId || !inflight.has(sessionId)) return;
-    if (!part) return;
-    // Only mirror assistant-side parts — skip the user's own echo.
-    if (part?.role === 'user') return;
-    applyPart(sessionId, part);
+    if (type === 'message.updated') {
+      // We rely on part.updated for line-by-line streaming; nothing to do here.
+      return;
+    }
+    if (type === 'session.idle') {
+      const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      const ctx = sessionId ? sessionContexts.get(sessionId) : null;
+      if (!ctx) return;
+      stopTypingPulse(ctx);
+      const ms = Date.now() - ctx.startedAt;
+      // Quiet footer — duration so the user knows the turn ended.
+      void postToSurface(ctx, `_done · ${ms < 1000 ? ms + 'ms' : Math.round(ms / 100) / 10 + 's'}_`);
+      // Keep ctx around — follow-up messages in the same thread will reuse
+      // the session id; but reset sentPartIds and startedAt for the next turn.
+      ctx.sentPartIds.clear();
+      ctx.startedAt = Date.now();
+      broadcastEvent?.('messenger.bridge.session_idle', {
+        type: ctx.type,
+        sessionId,
+        channelId: ctx.channelId,
+        threadId: ctx.threadId,
+      });
+      return;
+    }
+    if (type === 'session.error') {
+      const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      const ctx = sessionId ? sessionContexts.get(sessionId) : null;
+      if (!ctx) return;
+      stopTypingPulse(ctx);
+      const err = props?.error?.message ?? props?.error ?? 'OpenCode session error';
+      void postToSurface(ctx, `✗ session error: ${escapeMd(clipBlock(String(err), 300))}`);
+      ctx.sentPartIds.clear();
+    }
   }
 
   let unsubscribe = null;
@@ -484,15 +660,26 @@ export function createMessengerOpencodeBridge({
     unsubscribe = globalEventHub.subscribeEvent(handleGlobalEvent);
   }
 
-  // Inbound (messenger → OpenCode) ----------------------------------------
+  // --- Inbound: bridge a messenger message into OpenCode -----------------
   /**
-   * @returns {{ ok: boolean, sessionId?: string, messageId?: string|number, error?: string }}
+   * @param {object} args
+   * @param {'discord'|'telegram'} args.type
+   * @param {string} args.token
+   * @param {string} args.channelId
+   * @param {string|null} [args.threadId]
+   * @param {string} [args.sourceMessageId] - the Discord message id we should
+   *                                          start a thread off of (Discord only).
+   * @param {string} args.text
+   * @param {string|null} [args.projectPath]
+   * @param {string|null} [args.projectLabel]
+   * @param {object} [args.from]
    */
   async function routeInbound({
     type,
     token,
     channelId,
     threadId,
+    sourceMessageId,
     text,
     projectPath,
     projectLabel,
@@ -503,6 +690,134 @@ export function createMessengerOpencodeBridge({
     }
     ensureSubscribed();
 
+    // -----------------------------------------------------------------
+    // Step 1 — Bootstrap dialogue
+    //
+    // Done BEFORE any thread creation, so the dialogue is conducted in
+    // the user's original surface (channel or thread). Only after we know
+    // which project this conversation belongs to do we spawn a thread and
+    // resolve a session. This avoids the bug where the reply to our
+    // bootstrap prompt landed on a different surface key than the stash.
+    // -----------------------------------------------------------------
+    const surfaceKey = bootstrapKey({ type, channelId, threadId: threadId ?? null });
+    if (bootstrapProject) {
+      const pending = bootstrapPending.get(surfaceKey);
+      const reply = parseBootstrapReply(text);
+
+      if (pending && reply) {
+        try {
+          const result = await bootstrapProject(reply);
+          if (!result.ok || !result.project) {
+            await postMessengerSurface(
+              { type, token, channelId, threadId: threadId ?? null },
+              `⚠ Could not bootstrap project: ${escapeMd(clipBlock(result.error ?? 'unknown error', 400))}`,
+            );
+            return { ok: false, error: result.error ?? 'bootstrap failed' };
+          }
+          bootstrapPending.delete(surfaceKey);
+          await postMessengerSurface(
+            { type, token, channelId, threadId: threadId ?? null },
+            `✓ Project ready: *${escapeMd(result.project.label ?? result.project.path)}* → ${escapeMd(result.project.path)}\nOtto will use this directory from now on. Re-sending your earlier message…`,
+          );
+          // Recurse with the stashed original text + the now-known project.
+          // sourceMessageId remains from the ORIGINAL message so the thread
+          // (when we create it below) is anchored on the user's first
+          // message, matching kimaki's UX.
+          return routeInbound({
+            type,
+            token,
+            channelId,
+            threadId: threadId ?? null,
+            sourceMessageId: pending.sourceMessageId ?? sourceMessageId,
+            text: pending.originalText,
+            projectPath: result.project.path,
+            projectLabel: result.project.label,
+            from,
+          });
+        } catch (err) {
+          await postMessengerSurface(
+            { type, token, channelId, threadId: threadId ?? null },
+            `⚠ Could not bootstrap project: ${escapeMd(clipBlock(err?.message ?? String(err), 400))}`,
+          );
+          return { ok: false, error: err?.message ?? 'bootstrap failed' };
+        }
+      }
+
+      // No pending dialogue — decide whether to open one.
+      if (!projectPath) {
+        const hash = tokenHash(token);
+        const keyForStore = targetKey({ type, channelId, threadId: threadId ?? null });
+        const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: keyForStore });
+        if (!stored?.sessionId) {
+          const auto = await autoResolveProject({
+            type,
+            token,
+            channelId,
+            threadId: threadId ?? null,
+          });
+          if (!auto || auto.autoResolved !== 'slug-match') {
+            bootstrapPending.set(surfaceKey, {
+              type,
+              token,
+              channelId,
+              threadId: threadId ?? null,
+              sourceMessageId,
+              originalText: text,
+              askedAt: Date.now(),
+            });
+            const intro =
+              type === 'discord'
+                ? `**Otto — new channel detected**`
+                : `🤖 *Otto — new chat detected*`;
+            const guidance = [
+              intro,
+              ``,
+              `I don't have a project bound to this ${type === 'discord' ? 'channel' : 'chat'} yet.`,
+              `Reply with one of:`,
+              `• \`clone <git-url>\` — git-clone the repo into Otto's projects folder`,
+              `• \`path </absolute/path>\` — use an existing folder on the server`,
+              `• \`new <project-name>\` — create an empty project`,
+              ``,
+              `Your message _"${clipBlock(text, 120)}"_ is stashed; I'll re-send it to Otto once the project is ready.`,
+            ].join('\n');
+            await postMessengerSurface(
+              { type, token, channelId, threadId: threadId ?? null },
+              guidance,
+            );
+            broadcastEvent?.('messenger.bridge.bootstrap_prompt', {
+              type,
+              channelId,
+              threadId: threadId ?? null,
+              originalText: text,
+            });
+            return { ok: true, awaitingBootstrap: true };
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 2 — Spawn a thread on the user's message (Discord only).
+    // We only get here once we know what project this conversation
+    // belongs to.
+    // -----------------------------------------------------------------
+    let effectiveThreadId = threadId ?? null;
+    if (type === 'discord' && !effectiveThreadId && sourceMessageId) {
+      const threadName = clipBlock(text.split('\n')[0] ?? 'Otto', 80);
+      const thread = await startDiscordThread({
+        token,
+        channelId,
+        messageId: sourceMessageId,
+        name: threadName,
+      });
+      if (thread.ok && thread.threadId) {
+        effectiveThreadId = thread.threadId;
+      }
+      // If thread creation failed (e.g. message is already in a thread, or
+      // bot lacks Create Public Threads), keep going in the existing
+      // surface — gracefully falling back is better than refusing.
+    }
+
     let sessionId;
     let effectiveProjectPath = projectPath ?? null;
     try {
@@ -510,7 +825,7 @@ export function createMessengerOpencodeBridge({
         type,
         token,
         channelId,
-        threadId,
+        threadId: effectiveThreadId,
         projectPath,
         projectLabel,
       });
@@ -520,74 +835,59 @@ export function createMessengerOpencodeBridge({
       return { ok: false, error: err?.message ?? 'session resolve failed' };
     }
 
-    // Optimistic placeholder so the user sees something happen even before
-    // OpenCode emits its first part.
-    const starter = await postMessengerMessage({
-      type,
-      token,
-      channelId,
-      threadId,
-      text: STARTER_TEXT,
-    });
-    if (!starter.ok) {
-      return { ok: false, sessionId, error: `placeholder send failed: ${starter.error}` };
+    // Bind context so the SSE handler routes outbound parts here.
+    const existingCtx = sessionContexts.get(sessionId);
+    if (existingCtx) {
+      // Same surface, follow-up message — keep typing pulse alive but reset
+      // the dedup set so the next turn's parts post.
+      existingCtx.sentPartIds.clear();
+      existingCtx.startedAt = Date.now();
+      existingCtx.lastError = null;
+    } else {
+      const ctx = {
+        sessionId,
+        type,
+        token,
+        channelId,
+        threadId: effectiveThreadId,
+        sentPartIds: new Set(),
+        startedAt: Date.now(),
+        lastError: null,
+        from,
+      };
+      sessionContexts.set(sessionId, ctx);
     }
-
-    // Reset any leftover state from a previous interaction on the same
-    // session (multi-turn conversations are common).
-    partBuffersBySession.delete(sessionId);
-    inflight.set(sessionId, {
-      type,
-      token,
-      channelId,
-      threadId,
-      messageId: starter.id,
-      lastFlushAt: 0,
-      scheduled: false,
-      finalized: false,
-      lastError: null,
-      startedAt: Date.now(),
-      from,
-    });
+    const ctx = sessionContexts.get(sessionId);
+    startTypingPulse(ctx);
 
     try {
       await sendOpencodePrompt({ sessionId, projectPath: effectiveProjectPath, text });
     } catch (err) {
       const errMsg = err?.message ?? 'prompt failed';
-      // Surface the failure in the same starter message so the user sees it.
-      await editMessengerMessage({
-        type,
-        token,
-        channelId,
-        threadId,
-        messageId: starter.id,
-        text: `⚠ Otto could not reach OpenCode: ${errMsg}`,
-        withTail: false,
-      });
-      inflight.delete(sessionId);
-      return { ok: false, sessionId, error: errMsg };
+      stopTypingPulse(ctx);
+      await postToSurface(ctx, `⚠ Otto could not reach OpenCode: ${escapeMd(clipBlock(errMsg, 300))}`);
+      return { ok: false, sessionId, threadId: effectiveThreadId, error: errMsg };
     }
 
     broadcastEvent?.('messenger.bridge.inbound', {
       type,
       channelId,
-      threadId,
+      threadId: effectiveThreadId,
       sessionId,
       text,
     });
 
-    return { ok: true, sessionId, messageId: starter.id };
+    return { ok: true, sessionId, threadId: effectiveThreadId };
   }
 
-  // Public API ------------------------------------------------------------
   function statusSnapshot({ type, token } = {}) {
     const hash = token ? tokenHash(token) : undefined;
     const bindings = bridgeStore.list({ type, botTokenHash: hash });
-    const active = [...inflight.values()].map((ctx) => ({
+    const active = [...sessionContexts.values()].map((ctx) => ({
       type: ctx.type,
       channelId: ctx.channelId,
       threadId: ctx.threadId,
-      messageId: ctx.messageId,
+      sessionId: ctx.sessionId,
       startedAt: ctx.startedAt,
       lastError: ctx.lastError,
     }));
