@@ -62,6 +62,17 @@ export class MessengerBridgeStore {
       CREATE INDEX IF NOT EXISTS idx_messenger_session_session
         ON messenger_session_bindings (session_id);
     `);
+    // Per-surface preferences (model + agent override) so /model and /agent
+    // commands can scope a choice to a channel/topic without touching the
+    // global OpenChamber settings. ALTER TABLE is run as separate statements
+    // and ignored when the column already exists.
+    for (const col of ['model_override TEXT', 'agent_override TEXT']) {
+      try {
+        this.db.run(`ALTER TABLE messenger_session_bindings ADD COLUMN ${col}`);
+      } catch {
+        // ignore — column already exists
+      }
+    }
   }
 
   /**
@@ -75,12 +86,64 @@ export class MessengerBridgeStore {
       .prepare(
         `SELECT session_id AS sessionId, project_path AS projectPath,
                 project_label AS projectLabel, created_at AS createdAt,
-                last_used_at AS lastUsedAt
+                last_used_at AS lastUsedAt,
+                model_override AS modelOverride,
+                agent_override AS agentOverride
            FROM messenger_session_bindings
           WHERE type = ? AND bot_token_hash = ? AND target_key = ?`,
       )
       .get(type, botTokenHash, targetKey);
     return row ?? null;
+  }
+
+  /**
+   * Update per-surface preferences without touching the session binding.
+   * Used by /model and /agent in-chat commands.
+   */
+  setOverrides({ type, botTokenHash, targetKey, modelOverride, agentOverride }) {
+    const sets = [];
+    const params = [];
+    if (modelOverride !== undefined) {
+      sets.push('model_override = ?');
+      params.push(modelOverride ?? null);
+    }
+    if (agentOverride !== undefined) {
+      sets.push('agent_override = ?');
+      params.push(agentOverride ?? null);
+    }
+    if (sets.length === 0) return;
+    params.push(type, botTokenHash, targetKey);
+    // Upsert an empty row first so /model + /agent work BEFORE a session
+    // exists for the surface (common right after the bootstrap dialogue).
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO messenger_session_bindings
+           (type, target_key, session_id, project_path, project_label,
+            bot_token_hash, created_at, last_used_at)
+         VALUES (?, ?, '', NULL, NULL, ?, ?, ?)
+         ON CONFLICT(type, bot_token_hash, target_key) DO NOTHING`,
+      )
+      .run(type, targetKey, botTokenHash, now, now);
+    this.db
+      .prepare(
+        `UPDATE messenger_session_bindings
+            SET ${sets.join(', ')}, last_used_at = ?
+          WHERE type = ? AND bot_token_hash = ? AND target_key = ?`,
+      )
+      .run(...params.slice(0, -3), now, ...params.slice(-3));
+  }
+
+  /** Clear the session id for a surface — /new uses this to force the next
+   *  inbound to start a fresh OpenCode session in the same project. */
+  unbindSession({ type, botTokenHash, targetKey }) {
+    this.db
+      .prepare(
+        `UPDATE messenger_session_bindings
+            SET session_id = ''
+          WHERE type = ? AND bot_token_hash = ? AND target_key = ?`,
+      )
+      .run(type, botTokenHash, targetKey);
   }
 
   bind({ type, botTokenHash, targetKey, sessionId, projectPath, projectLabel }) {
