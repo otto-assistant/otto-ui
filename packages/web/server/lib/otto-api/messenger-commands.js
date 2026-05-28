@@ -61,14 +61,14 @@ const COMMAND_HELP = [
   { name: 'review', usage: '/review', summary: 'Run OpenCode `review` workflow' },
   {
     name: 'model',
-    usage: '/model [provider/model]',
+    usage: '/model [provider/model | default provider/model | reset]',
     summary:
-      'Without args: list providers + models. With args: set this conversation\'s model.',
+      'List models / set this conversation\'s model / `default provider/model` sets a project-wide default.',
   },
   {
     name: 'agent',
-    usage: '/agent [name]',
-    summary: 'Without args: list agents. With args: set this conversation\'s agent.',
+    usage: '/agent [name | default name | reset]',
+    summary: 'List agents / set this conversation\'s agent / `default name` sets a project-wide default.',
   },
   {
     name: 'sessions',
@@ -189,8 +189,28 @@ export async function executeMessengerCommand({
         `Project: ${binding?.projectLabel ?? binding?.projectPath ?? '_not bound — reply `clone <url>`, `path </abs>` or `new <name>` to set up_'}`,
       );
       lines.push(`Session: ${sessionId ? `\`${sessionId}\`` : '_none yet — first prompt creates one_'}`);
-      lines.push(`Model: ${binding?.modelOverride ? `\`${binding.modelOverride}\`` : '_OpenCode default_'}`);
-      lines.push(`Agent: ${binding?.agentOverride ? `\`${binding.agentOverride}\`` : '_OpenCode default_'}`);
+      const surfaceModel = binding?.modelOverride;
+      const projectModel = binding?.projectDefaults?.modelDefault;
+      lines.push(
+        `Model: ${
+          surfaceModel
+            ? `\`${surfaceModel}\` _(this conversation)_`
+            : projectModel
+              ? `\`${projectModel}\` _(project default)_`
+              : '_OpenCode default_'
+        }`,
+      );
+      const surfaceAgent = binding?.agentOverride;
+      const projectAgent = binding?.projectDefaults?.agentDefault;
+      lines.push(
+        `Agent: ${
+          surfaceAgent
+            ? `\`${surfaceAgent}\` _(this conversation)_`
+            : projectAgent
+              ? `\`${projectAgent}\` _(project default)_`
+              : '_OpenCode default_'
+        }`,
+      );
       lines.push(`Surface: ${ctx.type} · channel \`${ctx.channelId}\`${ctx.threadId ? ` thread \`${ctx.threadId}\`` : ''}`);
       return { reply: lines.join('\n') };
     }
@@ -262,35 +282,65 @@ export async function executeMessengerCommand({
 
     case 'model': {
       if (!command.args) {
-        // List view.
         const providers = await opencode.listProviders().catch(() => []);
         if (!providers || providers.length === 0) {
           return { reply: '_(no providers configured — see Settings → Providers in the web UI.)_' };
         }
-        const lines = ['**Available models** — set with `/model provider/model`', ''];
+        const lines = [
+          '**Available models** — set with `/model provider/model` (this conversation) or `/model default provider/model` (project-wide)',
+          '',
+        ];
         for (const p of providers.slice(0, 12)) {
           const ms = (p.models ?? []).slice(0, 8).map((m) => `\`${p.id}/${m.id}\``).join(' · ');
           lines.push(`**${p.name ?? p.id}** — ${ms || '_no models_'}`);
         }
         if (binding?.modelOverride) {
-          lines.push('', `Current override on this conversation: \`${binding.modelOverride}\``);
+          lines.push('', `Surface override: \`${binding.modelOverride}\``);
+        }
+        if (binding?.projectDefaults?.modelDefault) {
+          lines.push(`Project default: \`${binding.projectDefaults.modelDefault}\``);
         }
         return { reply: lines.join('\n') };
       }
-      // Set view.
-      const value = command.args.trim();
-      if (value === 'reset' || value === 'clear' || value === 'default') {
-        await surfaceMutators.setOverrides({ modelOverride: null });
-        return { reply: '✓ Model override cleared — using OpenCode default.' };
-      }
-      if (!/^[^/]+\/[^/]+$/.test(value)) {
+      const raw = command.args.trim();
+      const defaultMatch = raw.match(/^default\s+(.+)$/i);
+      if (defaultMatch) {
+        const value = defaultMatch[1].trim();
+        if (!binding?.projectPath) {
+          return {
+            reply:
+              '✗ This conversation has no project bound yet. Send a regular message first (or run the bootstrap dialogue) before setting project defaults.',
+          };
+        }
+        if (value === 'reset' || value === 'clear') {
+          await surfaceMutators.setProjectDefaults({ modelDefault: null });
+          return {
+            reply: `✓ Project default model cleared for *${binding.projectLabel ?? binding.projectPath}*.`,
+          };
+        }
+        if (!/^[^/]+\/[^/]+$/.test(value)) {
+          return {
+            reply:
+              '✗ Use `/model default provider/model` (e.g. `/model default anthropic/claude-sonnet-4`).',
+          };
+        }
+        await surfaceMutators.setProjectDefaults({ modelDefault: value });
         return {
-          reply:
-            '✗ Use `/model provider/model` (e.g. `/model anthropic/claude-sonnet-4`). Run `/model` with no args to see the list.',
+          reply: `✓ Project default model set to \`${value}\` for *${binding.projectLabel ?? binding.projectPath}*. Every Discord/Telegram session in this project uses it unless overridden.`,
         };
       }
-      await surfaceMutators.setOverrides({ modelOverride: value });
-      return { reply: `✓ Model set to \`${value}\` for this conversation.` };
+      if (raw === 'reset' || raw === 'clear') {
+        await surfaceMutators.setOverrides({ modelOverride: null });
+        return { reply: '✓ Surface model override cleared — falling back to project default / OpenCode default.' };
+      }
+      if (!/^[^/]+\/[^/]+$/.test(raw)) {
+        return {
+          reply:
+            '✗ Use `/model provider/model` (e.g. `/model anthropic/claude-sonnet-4`), or `/model default provider/model` for project-wide. Run `/model` with no args to see the list.',
+        };
+      }
+      await surfaceMutators.setOverrides({ modelOverride: raw });
+      return { reply: `✓ Model set to \`${raw}\` for this conversation.` };
     }
 
     case 'agent': {
@@ -300,7 +350,10 @@ export async function executeMessengerCommand({
         if (visible.length === 0) {
           return { reply: '_(no agents configured — see Settings → Agents in the web UI.)_' };
         }
-        const lines = ['**Available agents** — set with `/agent name`', ''];
+        const lines = [
+          '**Available agents** — set with `/agent name` (this conversation) or `/agent default name` (project-wide)',
+          '',
+        ];
         for (const a of visible.slice(0, 20)) {
           const tail = [a.model ? `model \`${a.model}\`` : null, a.description ?? null]
             .filter(Boolean)
@@ -308,17 +361,40 @@ export async function executeMessengerCommand({
           lines.push(`\`${a.name}\`${tail ? ` — ${tail}` : ''}`);
         }
         if (binding?.agentOverride) {
-          lines.push('', `Current override on this conversation: \`${binding.agentOverride}\``);
+          lines.push('', `Surface override: \`${binding.agentOverride}\``);
+        }
+        if (binding?.projectDefaults?.agentDefault) {
+          lines.push(`Project default: \`${binding.projectDefaults.agentDefault}\``);
         }
         return { reply: lines.join('\n') };
       }
-      const value = command.args.trim();
-      if (value === 'reset' || value === 'clear' || value === 'default') {
-        await surfaceMutators.setOverrides({ agentOverride: null });
-        return { reply: '✓ Agent override cleared — using OpenCode default.' };
+      const raw = command.args.trim();
+      const defaultMatch = raw.match(/^default\s+(.+)$/i);
+      if (defaultMatch) {
+        const value = defaultMatch[1].trim();
+        if (!binding?.projectPath) {
+          return {
+            reply:
+              '✗ This conversation has no project bound yet. Send a regular message first before setting project defaults.',
+          };
+        }
+        if (value === 'reset' || value === 'clear') {
+          await surfaceMutators.setProjectDefaults({ agentDefault: null });
+          return {
+            reply: `✓ Project default agent cleared for *${binding.projectLabel ?? binding.projectPath}*.`,
+          };
+        }
+        await surfaceMutators.setProjectDefaults({ agentDefault: value });
+        return {
+          reply: `✓ Project default agent set to \`${value}\` for *${binding.projectLabel ?? binding.projectPath}*.`,
+        };
       }
-      await surfaceMutators.setOverrides({ agentOverride: value });
-      return { reply: `✓ Agent set to \`${value}\` for this conversation.` };
+      if (raw === 'reset' || raw === 'clear') {
+        await surfaceMutators.setOverrides({ agentOverride: null });
+        return { reply: '✓ Surface agent override cleared — falling back to project default / OpenCode default.' };
+      }
+      await surfaceMutators.setOverrides({ agentOverride: raw });
+      return { reply: `✓ Agent set to \`${raw}\` for this conversation.` };
     }
 
     case 'sessions': {
