@@ -15,6 +15,8 @@ import { useSessionAutoCleanup } from '@/hooks/useSessionAutoCleanup';
 import { useQueuedMessageAutoSend } from '@/hooks/useQueuedMessageAutoSend';
 import { useRouter } from '@/hooks/useRouter';
 import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
+import { useOttoWebSocket } from '@/hooks/useOttoWebSocket';
+import { useMessengerBridgeToasts } from '@/hooks/useMessengerBridgeToasts';
 import { usePwaManifestSync } from '@/hooks/usePwaManifestSync';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
 import { useWindowControlsOverlayLayout } from '@/hooks/useWindowControlsOverlayLayout';
@@ -613,6 +615,14 @@ function App({ apis }: AppProps) {
   // Session attention now handled by notification-store via SSE events (session.idle/session.error)
 
   usePushVisibilityBeacon({ enabled: embeddedBackgroundWorkEnabled });
+  // Activate the Otto realtime WS so messenger.bridge.* events, approval
+  // decisions and incoming Telegram/Discord messages reach the UI. Wires
+  // the previously-orphan useOttoWebSocket hook into the lifetime of the
+  // app.
+  useOttoWebSocket();
+  // Surface bridge events as user-visible toasts (e.g. "Discord session
+  // bound to project X — open it").
+  useMessengerBridgeToasts();
   usePwaInstallPrompt();
 
   useWindowTitle();

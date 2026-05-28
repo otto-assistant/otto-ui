@@ -809,6 +809,40 @@ export function createMessengerSyncRouter({
    * Powers the in-chat dialogue ("clone <url>" etc.) AND can be used by the
    * Settings UI directly.
    */
+  /**
+   * Per-project bridge defaults (model + agent). The same layer the
+   * `/model default <p/m>` and `/agent default <name>` commands write to
+   * from Discord/Telegram — exposed here so the OpenChamber UI's project
+   * settings can read/write the same values.
+   *
+   * POST body: { projectPath, projectLabel?, modelDefault?, agentDefault? }
+   *   Omit a field to leave it unchanged. Pass null to clear it.
+   * Returns: { ok, project: { projectPath, projectLabel, modelDefault, agentDefault } }
+   */
+  router.post('/bridge/project-defaults', (req, res) => {
+    if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
+    const { projectPath, projectLabel, modelDefault, agentDefault } = req.body ?? {};
+    if (!projectPath) {
+      return res.status(400).json({ ok: false, error: 'projectPath required' });
+    }
+    if (modelDefault != null && modelDefault !== '' && !/^[^/]+\/[^/]+$/.test(String(modelDefault))) {
+      return res.status(400).json({ ok: false, error: 'modelDefault must be in "provider/model" form' });
+    }
+    bridge.store.setProjectDefaults({ projectPath, projectLabel, modelDefault, agentDefault });
+    const updated = bridge.store.getProjectDefaults(projectPath);
+    res.json({ ok: true, project: updated });
+  });
+
+  router.get('/bridge/project-defaults', (req, res) => {
+    if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
+    const projectPath = typeof req.query?.projectPath === 'string' ? req.query.projectPath : '';
+    if (projectPath) {
+      const single = bridge.store.getProjectDefaults(projectPath);
+      return res.json({ ok: true, project: single ?? null });
+    }
+    res.json({ ok: true, projects: bridge.store.listProjectDefaults() });
+  });
+
   router.post('/bridge/bootstrap-project', async (req, res) => {
     if (!projectBootstrap) {
       return res

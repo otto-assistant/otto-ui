@@ -73,6 +73,73 @@ export class MessengerBridgeStore {
         // ignore — column already exists
       }
     }
+    // Per-project defaults. Resolution order at prompt time:
+    //   surface override (channel/thread)  >  parent-channel fallback  >
+    //   project default  >  OpenCode default.
+    // Settable from Discord/Telegram via `/model default <p/m>` and from
+    // the OpenChamber UI via POST /api/otto/messenger/bridge/project-defaults.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS messenger_project_defaults (
+        project_path TEXT PRIMARY KEY,
+        project_label TEXT,
+        model_default TEXT,
+        agent_default TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  /** Read the project-wide defaults for a working directory. */
+  getProjectDefaults(projectPath) {
+    if (!projectPath) return null;
+    const row = this.db
+      .prepare(
+        `SELECT project_path AS projectPath, project_label AS projectLabel,
+                model_default AS modelDefault, agent_default AS agentDefault,
+                updated_at AS updatedAt
+           FROM messenger_project_defaults
+          WHERE project_path = ?`,
+      )
+      .get(projectPath);
+    return row ?? null;
+  }
+
+  /**
+   * Upsert project defaults. Pass `modelDefault: null` / `agentDefault: null`
+   * to clear that field; pass `undefined` to leave it untouched.
+   */
+  setProjectDefaults({ projectPath, projectLabel, modelDefault, agentDefault }) {
+    if (!projectPath) return;
+    const now = new Date().toISOString();
+    const existing = this.getProjectDefaults(projectPath);
+    const nextModel = modelDefault === undefined ? existing?.modelDefault ?? null : modelDefault;
+    const nextAgent = agentDefault === undefined ? existing?.agentDefault ?? null : agentDefault;
+    const nextLabel = projectLabel ?? existing?.projectLabel ?? null;
+    this.db
+      .prepare(
+        `INSERT INTO messenger_project_defaults
+            (project_path, project_label, model_default, agent_default, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(project_path)
+         DO UPDATE SET project_label = excluded.project_label,
+                       model_default = excluded.model_default,
+                       agent_default = excluded.agent_default,
+                       updated_at    = excluded.updated_at`,
+      )
+      .run(projectPath, nextLabel, nextModel, nextAgent, now);
+  }
+
+  /** List every project that has bridge defaults configured. */
+  listProjectDefaults() {
+    return this.db
+      .prepare(
+        `SELECT project_path AS projectPath, project_label AS projectLabel,
+                model_default AS modelDefault, agent_default AS agentDefault,
+                updated_at AS updatedAt
+           FROM messenger_project_defaults
+          ORDER BY updated_at DESC`,
+      )
+      .all();
   }
 
   /**

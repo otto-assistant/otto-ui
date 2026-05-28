@@ -831,6 +831,9 @@ export function createMessengerOpencodeBridge({
       const hash = tokenHash(token);
       const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
       const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      const projectDefaults = stored?.projectPath
+        ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
+        : null;
       const surface = { type, token, channelId, threadId: threadId ?? null };
       const result = await executeMessengerCommand({
         command: parsedCmd,
@@ -843,6 +846,7 @@ export function createMessengerOpencodeBridge({
               projectLabel: stored.projectLabel,
               modelOverride: stored.modelOverride,
               agentOverride: stored.agentOverride,
+              projectDefaults,
             }
           : null,
         surfaceMutators: {
@@ -856,6 +860,14 @@ export function createMessengerOpencodeBridge({
           },
           async unbindSession() {
             bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
+          },
+          async setProjectDefaults(changes) {
+            if (!stored?.projectPath) return;
+            bridgeStore.setProjectDefaults({
+              projectPath: stored.projectPath,
+              projectLabel: stored.projectLabel,
+              ...changes,
+            });
           },
         },
       });
@@ -1043,25 +1055,48 @@ export function createMessengerOpencodeBridge({
     startTypingPulse(ctx);
 
     // Pull per-surface model/agent overrides (set via /model and /agent).
-    // Lookup order: thread-keyed binding (where the bot answers) first;
-    // then the parent channel id as a fallback so an override set BEFORE a
-    // thread was spawned still applies to the conversation it kicked off.
+    //
+    // Resolution order:
+    //   1. thread-keyed binding (where the bot answers)
+    //   2. parent channel id  — so an override set in the channel BEFORE a
+    //      thread was spawned still applies to the conversation that
+    //      thread hosts
+    //   3. project default    — settable from `/model default <X>` or the
+    //      OpenChamber UI; applies to every Discord/Telegram surface
+    //      that lands in this project
+    //   4. OpenCode default   — nothing set, server picks
     let modelOverride = null;
     let agentOverride = null;
     try {
       const hash = tokenHash(token);
       const stableKey = targetKey({ type, channelId, threadId: effectiveThreadId });
-      let stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
-      if ((!stored?.modelOverride && !stored?.agentOverride) && stableKey !== String(channelId)) {
+      const surfaceRow = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      modelOverride = surfaceRow?.modelOverride ?? null;
+      agentOverride = surfaceRow?.agentOverride ?? null;
+
+      // Parent channel fallback (Discord follow-ups in a thread carry a
+      // different surface key than the channel where /model was first set).
+      if ((!modelOverride || !agentOverride) && stableKey !== String(channelId)) {
         const parent = bridgeStore.lookup({
           type,
           botTokenHash: hash,
           targetKey: String(channelId),
         });
-        if (parent) stored = { ...(stored ?? {}), modelOverride: parent.modelOverride, agentOverride: parent.agentOverride };
+        if (parent) {
+          modelOverride = modelOverride ?? parent.modelOverride ?? null;
+          agentOverride = agentOverride ?? parent.agentOverride ?? null;
+        }
       }
-      modelOverride = stored?.modelOverride ?? null;
-      agentOverride = stored?.agentOverride ?? null;
+
+      // Project default fallback — the layer the user can set once and
+      // have it apply everywhere a session lands in this project.
+      if ((!modelOverride || !agentOverride) && effectiveProjectPath) {
+        const pd = bridgeStore.getProjectDefaults?.(effectiveProjectPath);
+        if (pd) {
+          modelOverride = modelOverride ?? pd.modelDefault ?? null;
+          agentOverride = agentOverride ?? pd.agentDefault ?? null;
+        }
+      }
     } catch {
       // ignore — overrides are optional
     }
