@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { MessengerBridgeStore } from './messenger-bridge-store.js';
+import { executeMessengerCommand, parseLeadingCommand } from './messenger-commands.js';
 
 /**
  * Bidirectional bridge between Discord/Telegram and OpenCode chat sessions.
@@ -462,11 +463,17 @@ export function createMessengerOpencodeBridge({
     return data?.id ?? data?.sessionID ?? data?.session_id ?? data;
   }
 
-  async function sendOpencodePrompt({ sessionId, projectPath, text }) {
+  async function sendOpencodePrompt({ sessionId, projectPath, text, modelOverride, agentOverride }) {
     const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
+    const body = { parts: [{ type: 'text', text }] };
+    if (modelOverride && /^[^/]+\/[^/]+$/.test(modelOverride)) {
+      const [providerID, ...rest] = modelOverride.split('/');
+      body.model = { providerID, modelID: rest.join('/') };
+    }
+    if (agentOverride) body.agent = agentOverride;
     const r = await opencodeFetch(
       `/session/${encodeURIComponent(sessionId)}/prompt_async${params}`,
-      { method: 'POST', body: JSON.stringify({ parts: [{ type: 'text', text }] }) },
+      { method: 'POST', body: JSON.stringify(body) },
     );
     if (!r.ok) {
       const errText = await r.text();
@@ -474,6 +481,123 @@ export function createMessengerOpencodeBridge({
     }
     return true;
   }
+
+  /**
+   * Small adapter exposed to the messenger-command handlers so they can
+   * talk to OpenCode without re-implementing the auth/url plumbing.
+   */
+  const opencodeAdapter = {
+    async listProviders() {
+      const r = await opencodeFetch('/provider');
+      if (!r.ok) return [];
+      const d = await r.json().catch(() => null);
+      // The endpoint returns { providers: [...], default: ... } on modern
+      // OpenCode and an array on older versions — be defensive.
+      const list = Array.isArray(d) ? d : Array.isArray(d?.providers) ? d.providers : [];
+      return list.map((p) => ({
+        id: p.id ?? p.name,
+        name: p.name ?? p.id,
+        models: Array.isArray(p.models)
+          ? p.models.map((m) => ({ id: m.id ?? m.name, name: m.name ?? m.id }))
+          : [],
+      }));
+    },
+    async listAgents() {
+      const r = await opencodeFetch('/agent');
+      if (!r.ok) return [];
+      const d = await r.json().catch(() => null);
+      const list = Array.isArray(d) ? d : Array.isArray(d?.agents) ? d.agents : [];
+      return list.map((a) => ({
+        name: a.name,
+        description: a.description,
+        model: a.model,
+        hidden: Boolean(a.hidden),
+        mode: a.mode,
+      }));
+    },
+    async listSessions(directory) {
+      const params = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+      const r = await opencodeFetch(`/session${params}`);
+      if (!r.ok) return [];
+      const d = await r.json().catch(() => null);
+      return Array.isArray(d) ? d : Array.isArray(d?.sessions) ? d.sessions : [];
+    },
+    async abortSession(sessionId) {
+      try {
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/abort`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'abort failed' };
+      }
+    },
+    async revertSession(sessionId, messageId) {
+      try {
+        const body = messageId ? { messageID: messageId } : {};
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/revert`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'revert failed' };
+      }
+    },
+    async unrevertSession(sessionId) {
+      try {
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/unrevert`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'unrevert failed' };
+      }
+    },
+    async summarizeSession(sessionId, modelRef) {
+      try {
+        const body = {};
+        if (modelRef && /^[^/]+\/[^/]+$/.test(modelRef)) {
+          const [providerID, ...rest] = modelRef.split('/');
+          body.providerID = providerID;
+          body.modelID = rest.join('/');
+        }
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/summarize`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'summarize failed' };
+      }
+    },
+    async sendOpencodeCommand(sessionId, name, argsText) {
+      try {
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/command`, {
+          method: 'POST',
+          body: JSON.stringify({ command: name, arguments: argsText ?? '' }),
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'command failed' };
+      }
+    },
+    async sendPrompt(sessionId, projectPath, text) {
+      try {
+        await sendOpencodePrompt({ sessionId, projectPath, text });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'prompt failed' };
+      }
+    },
+  };
 
   // --- Session resolution -------------------------------------------------
   async function resolveOrCreateSession({ type, token, channelId, threadId, projectPath, projectLabel }) {
@@ -691,6 +815,64 @@ export function createMessengerOpencodeBridge({
     ensureSubscribed();
 
     // -----------------------------------------------------------------
+    // Step 0 — Slash command interceptor
+    //
+    // /help, /status, /abort, /new, /undo, /redo, /compact, /summary,
+    // /init, /review, /model, /agent, /sessions — these are handled
+    // BEFORE bootstrap dialogue and BEFORE thread creation. They never
+    // reach OpenCode as a prompt; the bot replies inline.
+    //
+    // Unknown /commands fall through to the normal pipeline (so
+    // OpenCode-registered user commands like /changelog still work via
+    // the existing session.command machinery).
+    // -----------------------------------------------------------------
+    const parsedCmd = parseLeadingCommand(text);
+    if (parsedCmd) {
+      const hash = tokenHash(token);
+      const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
+      const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      const surface = { type, token, channelId, threadId: threadId ?? null };
+      const result = await executeMessengerCommand({
+        command: parsedCmd,
+        ctx: { ...surface, sourceMessageId },
+        opencode: opencodeAdapter,
+        binding: stored
+          ? {
+              sessionId: stored.sessionId || null,
+              projectPath: stored.projectPath,
+              projectLabel: stored.projectLabel,
+              modelOverride: stored.modelOverride,
+              agentOverride: stored.agentOverride,
+            }
+          : null,
+        surfaceMutators: {
+          async setOverrides(changes) {
+            bridgeStore.setOverrides({
+              type,
+              botTokenHash: hash,
+              targetKey: stableKey,
+              ...changes,
+            });
+          },
+          async unbindSession() {
+            bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
+          },
+        },
+      });
+      if (result) {
+        await postMessengerSurface(surface, result.reply);
+        broadcastEvent?.('messenger.bridge.command_handled', {
+          type,
+          channelId,
+          threadId,
+          command: parsedCmd.name,
+        });
+        return { ok: true, handledCommand: parsedCmd.name };
+      }
+      // null → unknown command; fall through.
+    }
+
+    // -----------------------------------------------------------------
     // Step 1 — Bootstrap dialogue
     //
     // Done BEFORE any thread creation, so the dialogue is conducted in
@@ -860,8 +1042,38 @@ export function createMessengerOpencodeBridge({
     const ctx = sessionContexts.get(sessionId);
     startTypingPulse(ctx);
 
+    // Pull per-surface model/agent overrides (set via /model and /agent).
+    // Lookup order: thread-keyed binding (where the bot answers) first;
+    // then the parent channel id as a fallback so an override set BEFORE a
+    // thread was spawned still applies to the conversation it kicked off.
+    let modelOverride = null;
+    let agentOverride = null;
     try {
-      await sendOpencodePrompt({ sessionId, projectPath: effectiveProjectPath, text });
+      const hash = tokenHash(token);
+      const stableKey = targetKey({ type, channelId, threadId: effectiveThreadId });
+      let stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      if ((!stored?.modelOverride && !stored?.agentOverride) && stableKey !== String(channelId)) {
+        const parent = bridgeStore.lookup({
+          type,
+          botTokenHash: hash,
+          targetKey: String(channelId),
+        });
+        if (parent) stored = { ...(stored ?? {}), modelOverride: parent.modelOverride, agentOverride: parent.agentOverride };
+      }
+      modelOverride = stored?.modelOverride ?? null;
+      agentOverride = stored?.agentOverride ?? null;
+    } catch {
+      // ignore — overrides are optional
+    }
+
+    try {
+      await sendOpencodePrompt({
+        sessionId,
+        projectPath: effectiveProjectPath,
+        text,
+        modelOverride,
+        agentOverride,
+      });
     } catch (err) {
       const errMsg = err?.message ?? 'prompt failed';
       stopTypingPulse(ctx);
