@@ -207,9 +207,15 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
     ottoFetch("/api/otto/mempalace/fact", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subject: relation.subject, predicate: relation.predicate, object: relation.object }),
+      body: JSON.stringify({
+        subject: relation.subject,
+        predicate: relation.predicate,
+        object: relation.object,
+        validFrom: relation.validFrom,
+        validTo: relation.validTo,
+      }),
     }).catch(() => {
-      ottoFetch("/api/otto/memory/relations", {
+      ottoFetch("/api/otto/memory/facts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(newRelation),
@@ -218,7 +224,17 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
   },
 
   deleteRelation: (id) => {
+    const target = get().relations.find((r) => r.id === id);
     set((s) => ({ relations: s.relations.filter((r) => r.id !== id) }));
-    ottoFetch(`/api/otto/memory/relations/${id}`, { method: "DELETE" }).catch(() => { /* removed locally */ });
+    if (target) {
+      const params = new URLSearchParams({
+        subject: target.subject,
+        predicate: target.predicate,
+        object: target.object,
+      });
+      ottoFetch(`/api/otto/mempalace/fact?${params.toString()}`, {
+        method: "DELETE",
+      }).catch(() => { /* removed locally */ });
+    }
   },
 }));
