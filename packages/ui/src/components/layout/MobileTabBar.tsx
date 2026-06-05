@@ -1,9 +1,9 @@
 import React from 'react';
 import {
-  RiBrainLine,
   RiChat3Line,
   RiDashboardLine,
   RiMoreLine,
+  RiSettings3Line,
   RiTaskLine,
 } from '@remixicon/react';
 import { cn } from '@/lib/utils';
@@ -21,7 +21,7 @@ const TAB_ITEMS: TabItem[] = [
   { id: 'dashboard', label: 'Home', icon: RiDashboardLine },
   { id: 'tasks', label: 'Tasks', icon: RiTaskLine },
   { id: 'chat', label: 'Chat', icon: RiChat3Line },
-  { id: 'memory', label: 'Memory', icon: RiBrainLine },
+  { id: 'settings', label: 'Settings', icon: RiSettings3Line },
   { id: 'more', label: 'More', icon: RiMoreLine },
 ];
 

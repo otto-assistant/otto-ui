@@ -39,6 +39,7 @@ export const settingsDict = {
   'settings.page.skills.title': '스킬',
   'settings.page.skillsCatalog.title': '스킬 카탈로그',
   'settings.page.git.title': 'Git',
+  'settings.page.memory.title': '메모리',
   'settings.page.appearance.title': '외관',
   'settings.page.chat.title': '채팅',
   'settings.page.shortcuts.title': '단축키',

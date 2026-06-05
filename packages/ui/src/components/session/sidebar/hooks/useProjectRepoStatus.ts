@@ -82,8 +82,10 @@ export const useProjectRepoStatus = (args: Args): void => {
   // any single project's branch settles (the old N² cascade).
   const resolvedInputKeyByProjectId = React.useRef<Map<string, string>>(new Map());
 
+  const hasVisibleProjects = visibleProjects.length > 0;
+
   React.useEffect(() => {
-    if (visibleProjects.length === 0) return;
+    if (!hasVisibleProjects) return;
     let cancelled = false;
 
     // Debounce so the initial burst of per-project `ensureStatus` updates
@@ -155,5 +157,5 @@ export const useProjectRepoStatus = (args: Args): void => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [normalizedProjects, projectGitBranchesKey, gitRepoStatus, setProjectRootBranches]);
+  }, [hasVisibleProjects, normalizedProjects, projectGitBranchesKey, gitRepoStatus, setProjectRootBranches]);
 };

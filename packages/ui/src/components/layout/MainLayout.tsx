@@ -22,7 +22,6 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useUpdateStore } from '@/stores/useUpdateStore';
 import { useDeviceInfo } from '@/lib/device';
-import { isDesktopShell } from '@/lib/desktop';
 import { cn } from '@/lib/utils';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { useRoute } from '@/hooks/useHashRoute';
@@ -42,14 +41,12 @@ const MultiRunWindow = lazyWithChunkRecovery(() => import('@/components/views/Mu
 const DashboardView = lazyWithChunkRecovery(() =>
   import('@/components/views/dashboard/DashboardView').then((m) => ({ default: m.DashboardView })),
 );
-const MemoryView = lazyWithChunkRecovery(() => import('@/components/views/MemoryView').then(m => ({ default: m.MemoryView })));
 const TasksView = lazyWithChunkRecovery(() => import('@/components/views/TasksView').then(m => ({ default: m.TasksView })));
 const SettingsLandingView = lazyWithChunkRecovery(() => import('@/components/views/SettingsLandingView').then(m => ({ default: m.SettingsLandingView })));
 
 // Preload all view chunks on idle so navigation is instant
 const VIEW_CHUNK_PRELOADERS = [
     () => import('@/components/views/dashboard/DashboardView'),
-    () => import('@/components/views/MemoryView'),
     () => import('@/components/views/TasksView'),
     () => import('@/components/views/SettingsLandingView'),
 ];
@@ -92,7 +89,6 @@ export const MainLayout: React.FC = () => {
     const multiRunLauncherPrefillPrompt = useUIStore((state) => state.multiRunLauncherPrefillPrompt);
 
     const { isMobile, isTablet } = useDeviceInfo();
-    const isDesktopShellRuntime = React.useMemo(() => isDesktopShell(), []);
 
     // Initialize hash-based routing (syncs URL ↔ activeView)
     useRoute();
@@ -467,8 +463,6 @@ export const MainLayout: React.FC = () => {
         switch (activeView) {
             case 'dashboard':
                 return <React.Suspense fallback={null}><DashboardView /></React.Suspense>;
-            case 'memory':
-                return <React.Suspense fallback={null}><MemoryView /></React.Suspense>;
             case 'tasks':
                 return <React.Suspense fallback={null}><TasksView /></React.Suspense>;
             case 'settings':

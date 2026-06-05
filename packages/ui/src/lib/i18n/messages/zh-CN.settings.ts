@@ -39,6 +39,7 @@ export const settingsDict = {
   'settings.page.skills.title': '技能',
   'settings.page.skillsCatalog.title': '技能目录',
   'settings.page.git.title': 'Git',
+  'settings.page.memory.title': '记忆',
   'settings.page.appearance.title': '外观',
   'settings.page.chat.title': '聊天',
   'settings.page.shortcuts.title': '快捷键',

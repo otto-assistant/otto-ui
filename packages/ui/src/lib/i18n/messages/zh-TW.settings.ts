@@ -36,6 +36,7 @@
   'settings.page.skills.title': 'Skills',
   'settings.page.skillsCatalog.title': 'Skills 目錄',
   'settings.page.git.title': 'Git',
+  'settings.page.memory.title': '記憶',
   'settings.page.appearance.title': '外觀',
   'settings.page.chat.title': '聊天',
   'settings.page.shortcuts.title': '快速鍵',
