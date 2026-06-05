@@ -1,15 +1,59 @@
+import { formatDateTimeForPreference, formatTimeForPreference } from '@/lib/timeFormat';
+import type { TimeFormatPreference } from '@/stores/useUIStore';
+
 export const clampPercent = (value: number | null): number | null => {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
     return null;
   }
   return Math.max(0, Math.min(100, Math.round(value)));
 };
 
 export const formatPercent = (value: number | null): string => {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
     return '-';
   }
   return `${Math.round(value)}%`;
+};
+
+export const formatQuotaValueLabel = (
+  valueLabel: string | null | undefined,
+  percent: number | null,
+): string => {
+  return valueLabel ?? formatPercent(percent);
+};
+
+export const formatQuotaResetLabel = (
+  resetAt: number | null,
+  fallback?: string | null,
+  timeFormatPreference: TimeFormatPreference = 'auto',
+): string => {
+  if (!resetAt) {
+    return fallback ?? '';
+  }
+
+  try {
+    const resetDate = new Date(resetAt);
+    if (!Number.isFinite(resetDate.getTime())) {
+      return fallback ?? '';
+    }
+
+    const now = new Date();
+    const isToday = resetDate.toDateString() === now.toDateString();
+
+    if (isToday) {
+      return formatTimeForPreference(resetDate, timeFormatPreference, { fallback: fallback ?? '' });
+    }
+
+    return formatDateTimeForPreference(resetDate, timeFormatPreference, {
+      month: 'short',
+      day: 'numeric',
+      weekday: 'short',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return fallback ?? '';
+  }
 };
 
 export const resolveUsageTone = (percent: number | null): 'safe' | 'warn' | 'critical' => {

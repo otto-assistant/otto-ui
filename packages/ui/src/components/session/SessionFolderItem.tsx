@@ -1,19 +1,8 @@
 import React from 'react';
-import {
-  RiFolderLine,
-  RiFolderOpenLine,
-  RiArrowRightSLine,
-  RiArrowDownSLine,
-  RiPencilAiLine,
-  RiDeleteBinLine,
-  RiCheckLine,
-  RiCloseLine,
-  RiAddLine,
-  RiFolderAddLine,
-} from '@remixicon/react';
 import { cn } from '@/lib/utils';
 import type { SessionFolder } from '@/stores/useSessionFoldersStore';
 import { useI18n } from '@/lib/i18n';
+import { Icon } from "@/components/icon/Icon";
 
 interface SessionFolderItemProps<TSessionNode> {
   folder: SessionFolder;
@@ -34,6 +23,7 @@ interface SessionFolderItemProps<TSessionNode> {
   groupDirectory?: string | null;
   projectId?: string | null;
   mobileVariant?: boolean;
+  alwaysShowActions?: boolean;
   isRenaming?: boolean;
   renameDraft?: string;
   onRenameDraftChange?: (value: string) => void;
@@ -67,6 +57,7 @@ const SessionFolderItemBase = <TSessionNode,>({
   groupDirectory,
   projectId,
   mobileVariant = false,
+  alwaysShowActions = mobileVariant,
   isRenaming = false,
   renameDraft = '',
   onRenameDraftChange,
@@ -141,7 +132,7 @@ const SessionFolderItemBase = <TSessionNode,>({
     };
   }, [isRenaming]);
 
-  const FolderIcon = isCollapsed ? RiFolderLine : RiFolderOpenLine;
+  const folderIconName = isCollapsed ? 'folder' : 'folder-open';
   const isSubFolder = depth > 0;
 
   return (
@@ -174,10 +165,10 @@ const SessionFolderItemBase = <TSessionNode,>({
         <div className={cn(
           'min-w-0 flex items-center gap-1.5 pl-1.5 flex-1 transition-[padding]',
           archivedBucket
-            ? (mobileVariant ? 'pr-7' : 'group-hover/folder:pr-7 group-focus-within/folder:pr-7')
+            ? (alwaysShowActions ? 'pr-7' : 'group-hover/folder:pr-7 group-focus-within/folder:pr-7')
             : '',
         )}>
-          <FolderIcon className={cn('h-3.5 w-3.5 flex-shrink-0', isDropTarget ? 'text-primary' : 'text-muted-foreground')} />
+          <Icon name={folderIconName} className={cn('h-3.5 w-3.5 flex-shrink-0', isDropTarget ? 'text-primary' : 'text-muted-foreground')} />
 
           {renaming ? (
             <form
@@ -218,7 +209,7 @@ const SessionFolderItemBase = <TSessionNode,>({
                 onPointerDown={(event) => event.stopPropagation()}
                 onMouseDown={(event) => event.stopPropagation()}
               >
-                <RiCheckLine className="size-4" />
+                <Icon name="check" className="size-4" />
               </button>
               <button
                 type="button"
@@ -230,7 +221,7 @@ const SessionFolderItemBase = <TSessionNode,>({
                 onMouseDown={(event) => event.stopPropagation()}
                 className="shrink-0 text-muted-foreground hover:text-foreground"
               >
-                <RiCloseLine className="size-4" />
+                <Icon name="close" className="size-4" />
               </button>
             </form>
           ) : (
@@ -242,9 +233,9 @@ const SessionFolderItemBase = <TSessionNode,>({
                 • {sessions.length}
               </span>
               {isCollapsed ? (
-                <RiArrowRightSLine className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+                <Icon name="arrow-right-s" className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
               ) : (
-                <RiArrowDownSLine className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+                <Icon name="arrow-down-s" className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
               )}
             </div>
           )}
@@ -257,7 +248,7 @@ const SessionFolderItemBase = <TSessionNode,>({
             <div
               className={cn(
                 'flex items-center gap-0.5 transition-opacity',
-                mobileVariant ? 'opacity-100' : 'opacity-0 group-hover/folder:opacity-100 group-focus-within/folder:opacity-100',
+                alwaysShowActions ? 'opacity-100' : 'opacity-0 group-hover/folder:opacity-100 group-focus-within/folder:opacity-100',
                 archivedBucket && 'absolute right-0.5 top-1/2 z-10 -translate-y-1/2 px-0',
               )}
             >
@@ -272,7 +263,7 @@ const SessionFolderItemBase = <TSessionNode,>({
                   aria-label={t('sessions.sidebar.folderItem.newSessionAria', { folderName: folder.name })}
                   title={t('sessions.sidebar.project.actions.newSession')}
                 >
-                  <RiAddLine className="h-3.5 w-3.5" />
+                  <Icon name="add" className="h-3.5 w-3.5" />
                 </button>
               ) : null}
               {/* Only allow sub-folders at depth 0 (one level deep max) */}
@@ -287,7 +278,7 @@ const SessionFolderItemBase = <TSessionNode,>({
                   aria-label={t('sessions.sidebar.folderItem.newSubfolderAria', { folderName: folder.name })}
                   title={t('sessions.sidebar.folderItem.newSubfolder')}
                 >
-                  <RiFolderAddLine className="h-3.5 w-3.5" />
+                  <Icon name="folder-add" className="h-3.5 w-3.5" />
                 </button>
               ) : null}
               {!archivedBucket ? (
@@ -300,7 +291,7 @@ const SessionFolderItemBase = <TSessionNode,>({
                   className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                   aria-label={t('sessions.sidebar.folderItem.renameAria', { folderName: folder.name })}
                 >
-                  <RiPencilAiLine className="h-3.5 w-3.5" />
+                  <Icon name="pencil-ai" className="h-3.5 w-3.5" />
                 </button>
               ) : null}
               <button
@@ -314,7 +305,7 @@ const SessionFolderItemBase = <TSessionNode,>({
                   ? t('sessions.sidebar.folderItem.deleteArchivedInFolderAria', { folderName: folder.name })
                   : t('sessions.sidebar.folderItem.deleteFolderAria', { folderName: folder.name })}
               >
-                <RiDeleteBinLine className="h-3.5 w-3.5" />
+                <Icon name="delete-bin" className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>

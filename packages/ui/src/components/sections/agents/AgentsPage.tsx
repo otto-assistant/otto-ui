@@ -10,7 +10,6 @@ import { useDirectorySync } from '@/sync/sync-context';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useDeviceInfo } from '@/lib/device';
 import { opencodeClient } from '@/lib/opencode/client';
-import { RiCloseLine, RiInformationLine, RiRobot2Line, RiSubtractLine, RiUser3Line, RiFolderLine } from '@remixicon/react';
 import { cn } from '@/lib/utils';
 import { ModelSelector } from './ModelSelector';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -18,6 +17,7 @@ import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { useI18n } from '@/lib/i18n';
 import { PersonaSection } from '@/components/views/persona/PersonaSection';
 import { usePersonaStore } from '@/stores/usePersonaStore';
+import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import {
   Select,
   SelectContent,
@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Icon } from "@/components/icon/Icon";
 
 type PermissionAction = 'allow' | 'ask' | 'deny';
 type PermissionRule = { permission: string; pattern: string; action: PermissionAction };
@@ -183,7 +184,6 @@ const buildPermissionConfigWithGlobal = (
   return result as AgentConfig['permission'];
 };
 
-
 export const AgentsPage: React.FC = () => {
   const { t } = useI18n();
   const { isMobile } = useDeviceInfo();
@@ -306,7 +306,6 @@ export const AgentsPage: React.FC = () => {
     currentRuleMap.get(buildRuleKey(permissionName, '*'))?.action
   ), [currentRuleMap]);
 
-
   const getPatternRules = React.useCallback((permissionName: string): PermissionRule[] => (
     permissionRules
       .filter((rule) => rule.permission === permissionName && rule.pattern !== '*')
@@ -323,7 +322,6 @@ export const AgentsPage: React.FC = () => {
     }
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   }, [knownPermissionNames]);
-
 
   const getPermissionSummary = React.useCallback((permissionName: string) => {
     const defaultAction = permissionName === '*'
@@ -616,12 +614,11 @@ export const AgentsPage: React.FC = () => {
     }
   };
 
-
   if (!selectedAgentName) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center text-muted-foreground">
-          <RiRobot2Line className="mx-auto mb-3 h-12 w-12 opacity-50" />
+          <Icon name="robot-2" className="mx-auto mb-3 h-12 w-12 opacity-50" />
           <p className="typography-body">{t('settings.agents.page.empty.title')}</p>
           <p className="typography-meta mt-1 opacity-75">{t('settings.agents.page.empty.description')}</p>
         </div>
@@ -677,13 +674,13 @@ export const AgentsPage: React.FC = () => {
                     <SelectContent align="end">
                       <SelectItem value="user">
                         <div className="flex items-center gap-2">
-                          <RiUser3Line className="h-3.5 w-3.5" />
+                          <Icon name="user-3" className="h-3.5 w-3.5" />
                           <span>{t('settings.common.scope.global')}</span>
                         </div>
                       </SelectItem>
                       <SelectItem value="project">
                         <div className="flex items-center gap-2">
-                          <RiFolderLine className="h-3.5 w-3.5" />
+                          <Icon name="folder" className="h-3.5 w-3.5" />
                           <span>{t('settings.common.scope.project')}</span>
                         </div>
                       </SelectItem>
@@ -710,9 +707,9 @@ export const AgentsPage: React.FC = () => {
               <div className="flex min-w-0 flex-col gap-1.5">
                 <div className="flex items-center gap-1.5">
                   <span className="typography-ui-label text-foreground">{t('settings.agents.page.field.mode')}</span>
-                  <Tooltip delayDuration={1000}>
+                  <Tooltip>
                     <TooltipTrigger asChild>
-                      <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                      <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                     </TooltipTrigger>
                     <TooltipContent sideOffset={8} className="max-w-xs">
                       {t('settings.agents.page.field.modeTooltip')}
@@ -770,8 +767,8 @@ export const AgentsPage: React.FC = () => {
               </div>
               <div className="flex min-w-0 flex-1 items-center gap-2 sm:w-fit sm:flex-initial">
                 <ModelSelector
-                  providerId={model ? model.split('/')[0] : ''}
-                  modelId={model ? model.split('/')[1] : ''}
+                  providerId={parseModelIdentifier(model)?.providerId ?? ''}
+                  modelId={parseModelIdentifier(model)?.modelId ?? ''}
                   onChange={(providerId: string, modelId: string) => {
                     if (providerId && modelId) {
                       setModel(`${providerId}/${modelId}`);
@@ -787,9 +784,9 @@ export const AgentsPage: React.FC = () => {
               <div className={cn("flex min-w-0 flex-col", isMobile ? "w-full" : "sm:w-56 shrink-0")}>
                 <div className="flex items-center gap-1.5">
                   <span className="typography-ui-label text-foreground">{t('settings.agents.page.field.temperature')}</span>
-                  <Tooltip delayDuration={1000}>
+                  <Tooltip>
                     <TooltipTrigger asChild>
-                      <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                      <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                     </TooltipTrigger>
                     <TooltipContent sideOffset={8} className="max-w-xs">
                       {t('settings.agents.page.field.temperatureTooltip')}
@@ -821,7 +818,7 @@ export const AgentsPage: React.FC = () => {
                     aria-label={t('settings.agents.page.field.clearTemperatureAria')}
                     title={t('settings.common.actions.clear')}
                   >
-                    <RiCloseLine className="h-3.5 w-3.5" />
+                    <Icon name="close" className="h-3.5 w-3.5" />
                   </Button>
                 )}
               </div>
@@ -831,9 +828,9 @@ export const AgentsPage: React.FC = () => {
               <div className={cn("flex min-w-0 flex-col", isMobile ? "w-full" : "sm:w-56 shrink-0")}>
                 <div className="flex items-center gap-1.5">
                   <span className="typography-ui-label text-foreground">{t('settings.agents.page.field.topP')}</span>
-                  <Tooltip delayDuration={1000}>
+                  <Tooltip>
                     <TooltipTrigger asChild>
-                      <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                      <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                     </TooltipTrigger>
                     <TooltipContent sideOffset={8} className="max-w-xs">
                       {t('settings.agents.page.field.topPTooltip')}
@@ -865,7 +862,7 @@ export const AgentsPage: React.FC = () => {
                     aria-label={t('settings.agents.page.field.clearTopPAria')}
                     title={t('settings.common.actions.clear')}
                   >
-                    <RiCloseLine className="h-3.5 w-3.5" />
+                    <Icon name="close" className="h-3.5 w-3.5" />
                   </Button>
                 )}
               </div>
@@ -989,7 +986,7 @@ export const AgentsPage: React.FC = () => {
                                 onClick={() => revertRule(permissionName, '*')}
                                 className="px-1.5 py-0 h-5"
                               >
-                                <RiSubtractLine className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+                                <Icon name="subtract" className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
                               </Button>
                             )}
                           </div>
@@ -1036,7 +1033,7 @@ export const AgentsPage: React.FC = () => {
                                     onClick={() => isAdded ? removeRule(rule.permission, rule.pattern) : revertRule(rule.permission, rule.pattern)}
                                     className="px-1.5 py-0 h-5"
                                   >
-                                    <RiSubtractLine className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+                                    <Icon name="subtract" className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
                                   </Button>
                                 )}
                               </div>

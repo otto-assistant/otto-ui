@@ -3,20 +3,15 @@ import { summarizeText as summarizeSharedText } from '../text/summarization.js';
 export const createNotificationTemplateRuntime = (deps) => {
   const {
     readSettingsFromDisk,
-    persistSettings,
     buildOpenCodeUrl,
     getOpenCodeAuthHeaders,
     resolveGitBinaryForSpawn,
   } = deps;
 
   const NOTIFICATION_BODY_MAX_CHARS = 1000;
-  const ZEN_DEFAULT_MODEL = 'gpt-5-nano';
-  const ZEN_MODELS_CACHE_TTL = 5 * 60 * 1000;
   const SESSION_INFO_CACHE_TTL_MS = 60 * 1000;
 
-  let validatedZenFallback = null;
-  let cachedZenModels = null;
-  let cachedZenModelsTimestamp = 0;
+  const cachedZenModels = { models: [] };
 
   const sessionTitleCache = new Map();
   const sessionInfoCache = new Map();
@@ -62,79 +57,18 @@ export const createNotificationTemplateRuntime = (deps) => {
     return true;
   };
 
-  const fetchFreeZenModels = async () => {
-    const now = Date.now();
-    if (cachedZenModels && now - cachedZenModelsTimestamp < ZEN_MODELS_CACHE_TTL) {
-      return cachedZenModels.models;
-    }
-
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeout = controller ? setTimeout(() => controller.abort(), 8000) : null;
-    try {
-      const response = await fetch('https://opencode.ai/zen/v1/models', {
-        signal: controller?.signal,
-        headers: { Accept: 'application/json' },
-      });
-      if (!response.ok) {
-        throw new Error(`zen/v1/models responded with status ${response.status}`);
-      }
-      const data = await response.json();
-      const allModels = Array.isArray(data?.data) ? data.data : [];
-      const freeModels = allModels
-        .filter((model) => typeof model?.id === 'string' && model.id.endsWith('-free'))
-        .map((model) => ({ id: model.id, owned_by: model.owned_by }));
-
-      cachedZenModels = { models: freeModels };
-      cachedZenModelsTimestamp = Date.now();
-      return freeModels;
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-  };
+  const fetchFreeZenModels = async () => [];
 
   const resolveZenModel = async (override) => {
-    if (typeof override === 'string' && override.trim().length > 0) {
-      return override.trim();
-    }
-    try {
-      const settings = await readSettingsFromDisk();
-      if (typeof settings?.zenModel === 'string' && settings.zenModel.trim().length > 0) {
-        return settings.zenModel.trim();
-      }
-    } catch {
-    }
-    return validatedZenFallback || ZEN_DEFAULT_MODEL;
+    const overrideModel = typeof override === 'string' ? override.trim() : '';
+    if (overrideModel) return overrideModel;
+    const settings = await readSettingsFromDisk().catch(() => ({}));
+    return typeof settings?.zenModel === 'string' && settings.zenModel.trim().length > 0
+      ? settings.zenModel.trim()
+      : '';
   };
 
-  const validateZenModelAtStartup = async () => {
-    try {
-      const freeModels = await fetchFreeZenModels();
-      const freeModelIds = freeModels.map((model) => model.id);
-
-      if (freeModelIds.length > 0) {
-        validatedZenFallback = freeModelIds[0];
-
-        const settings = await readSettingsFromDisk();
-        const storedModel = typeof settings?.zenModel === 'string' ? settings.zenModel.trim() : '';
-
-        if (!storedModel || !freeModelIds.includes(storedModel)) {
-          const fallback = freeModelIds[0];
-          console.log(
-            storedModel
-              ? `[zen] Stored model "${storedModel}" not found in free models, falling back to "${fallback}"`
-              : `[zen] No model configured, setting default to "${fallback}"`
-          );
-          await persistSettings({ zenModel: fallback });
-        } else {
-          console.log(`[zen] Stored model "${storedModel}" verified as available`);
-        }
-      } else {
-        console.warn('[zen] No free models returned from API, skipping validation');
-      }
-    } catch (error) {
-      console.warn('[zen] Startup model validation failed (non-blocking):', error?.message || error);
-    }
-  };
+  const validateZenModelAtStartup = async () => {};
 
   const summarizeText = async (text, targetLength, zenModel) => {
     if (!text || typeof text !== 'string' || text.trim().length === 0) return text;
@@ -142,7 +76,7 @@ export const createNotificationTemplateRuntime = (deps) => {
       text,
       threshold: 0,
       maxLength: targetLength,
-      zenModel: zenModel || ZEN_DEFAULT_MODEL,
+        zenModel,
       mode: 'notification',
     });
     return typeof result?.summary === 'string' && result.summary.trim().length > 0

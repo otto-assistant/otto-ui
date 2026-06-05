@@ -9,15 +9,15 @@ import { useUIStore } from '@/stores/useUIStore';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
+import { parseModelIdentifier } from '@/lib/modelIdentifier';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 const getDisplayModel = (
   storedModel: string | undefined
 ): { providerId: string; modelId: string } => {
-  if (storedModel) {
-    const parts = storedModel.split('/');
-    if (parts.length === 2 && parts[0] && parts[1]) {
-      return { providerId: parts[0], modelId: parts[1] };
-    }
+  const parsed = parseModelIdentifier(storedModel);
+  if (parsed) {
+    return parsed;
   }
 
   return { providerId: '', modelId: '' };
@@ -32,8 +32,6 @@ export const DefaultsSettings: React.FC = () => {
   const setSettingsDefaultModel = useConfigStore((state) => state.setSettingsDefaultModel);
   const setSettingsDefaultVariant = useConfigStore((state) => state.setSettingsDefaultVariant);
   const setSettingsDefaultAgent = useConfigStore((state) => state.setSettingsDefaultAgent);
-  const setSettingsDefaultFileViewerPreview = useConfigStore((state) => state.setSettingsDefaultFileViewerPreview);
-  const settingsDefaultFileViewerPreview = useConfigStore((state) => state.settingsDefaultFileViewerPreview);
   const showDeletionDialog = useUIStore((state) => state.showDeletionDialog);
   const setShowDeletionDialog = useUIStore((state) => state.setShowDeletionDialog);
   const providers = useConfigStore((state) => state.providers);
@@ -77,7 +75,7 @@ export const DefaultsSettings: React.FC = () => {
         }
 
         if (!data) {
-          const response = await fetch('/api/config/settings', {
+          const response = await runtimeFetch('/api/config/settings', {
             method: 'GET',
             headers: { Accept: 'application/json' },
           });
@@ -132,7 +130,7 @@ export const DefaultsSettings: React.FC = () => {
 
       try {
         await updateDesktopSettings({ defaultModel: newValue ?? '', defaultVariant: '' });
-        const response = await fetch('/api/config/settings', {
+        const response = await runtimeFetch('/api/config/settings', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ defaultModel: newValue }),
@@ -190,12 +188,6 @@ export const DefaultsSettings: React.FC = () => {
     },
     [setAgent, setSettingsDefaultAgent]
   );
-
-  const handleToggleFileViewerPreview = React.useCallback(() => {
-    const next = !settingsDefaultFileViewerPreview;
-    setSettingsDefaultFileViewerPreview(next);
-    updateDesktopSettings({ defaultFileViewerPreview: next }).catch(console.warn);
-  }, [settingsDefaultFileViewerPreview, setSettingsDefaultFileViewerPreview]);
 
   const availableVariants = React.useMemo(() => {
     if (!parsedModel.providerId || !parsedModel.modelId) return [];
@@ -309,23 +301,6 @@ export const DefaultsSettings: React.FC = () => {
         >
           <Checkbox checked={showDeletionDialog} onChange={setShowDeletionDialog} ariaLabel={t('settings.openchamber.defaults.field.showDeletionDialogAria')} />
           <span className="typography-ui-label text-foreground">{t('settings.openchamber.defaults.field.showDeletionDialog')}</span>
-        </div>
-
-        <div
-          className="group flex cursor-pointer items-center gap-2 py-1"
-          role="button"
-          tabIndex={0}
-          aria-pressed={settingsDefaultFileViewerPreview}
-          onClick={handleToggleFileViewerPreview}
-          onKeyDown={(event) => {
-            if (event.key === ' ' || event.key === 'Enter') {
-              event.preventDefault();
-              handleToggleFileViewerPreview();
-            }
-          }}
-        >
-          <Checkbox checked={settingsDefaultFileViewerPreview} onChange={setSettingsDefaultFileViewerPreview} ariaLabel={t('settings.openchamber.defaults.field.openFilesPreviewAria')} />
-          <span className="typography-ui-label text-foreground">{t('settings.openchamber.defaults.field.openFilesPreview')}</span>
         </div>
 
       </section>

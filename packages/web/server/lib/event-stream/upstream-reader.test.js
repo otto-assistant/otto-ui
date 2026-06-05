@@ -37,6 +37,28 @@ function createSseResponse({ blocks = [], signal, holdOpen = false }) {
   };
 }
 
+function createTrackedSignal() {
+  const listeners = new Set();
+  return {
+    signal: {
+      aborted: false,
+      addEventListener(type, listener) {
+        if (type === 'abort') {
+          listeners.add(listener);
+        }
+      },
+      removeEventListener(type, listener) {
+        if (type === 'abort') {
+          listeners.delete(listener);
+        }
+      },
+    },
+    getListenerCount() {
+      return listeners.size;
+    },
+  };
+}
+
 describe('createUpstreamSseReader', () => {
   it('emits parsed events and tracks the latest event id', async () => {
     const events = [];
@@ -117,9 +139,55 @@ describe('createUpstreamSseReader', () => {
     expect(reader.getLastEventId()).toBe('evt-2');
   });
 
+  it('resolves the stall timeout for each upstream read window', async () => {
+    const events = [];
+    let attempt = 0;
+    let currentTimeout = 10;
+    let reader;
+
+    reader = createUpstreamSseReader({
+      buildUrl: () => 'http://127.0.0.1:4096/global/event',
+      stallTimeoutMs: () => currentTimeout,
+      reconnectDelayMs: 0,
+      fetchImpl: async (_url, options) => {
+        attempt += 1;
+
+        if (attempt === 1) {
+          currentTimeout = 60;
+          return createSseResponse({
+            signal: options.signal,
+            holdOpen: true,
+            blocks: [
+              'id: evt-1\ndata: {"type":"server.connected","properties":{}}\n\n',
+            ],
+          });
+        }
+
+        return createSseResponse({
+          signal: options.signal,
+          blocks: [
+            'id: evt-2\ndata: {"type":"session.updated","properties":{}}\n\n',
+          ],
+        });
+      },
+      onEvent(event) {
+        events.push(event.eventId);
+        if (event.eventId === 'evt-2') {
+          reader.stop();
+        }
+      },
+    });
+
+    await reader.start();
+
+    expect(events).toEqual(['evt-1', 'evt-2']);
+    expect(attempt).toBe(2);
+  });
+
   it('reports unavailable upstream responses and continues reconnecting until stopped', async () => {
     const errors = [];
     let attempt = 0;
+    let unavailableBodyCanceled = false;
     let reader;
 
     reader = createUpstreamSseReader({
@@ -128,7 +196,15 @@ describe('createUpstreamSseReader', () => {
       fetchImpl: async (_url, options) => {
         attempt += 1;
         if (attempt === 1) {
-          return { ok: false, status: 503, body: null };
+          return {
+            ok: false,
+            status: 503,
+            body: {
+              cancel: async () => {
+                unavailableBodyCanceled = true;
+              },
+            },
+          };
         }
 
         return createSseResponse({
@@ -154,6 +230,46 @@ describe('createUpstreamSseReader', () => {
         status: 503,
       }),
     ]);
+    expect(unavailableBodyCanceled).toBe(true);
     expect(attempt).toBe(2);
+  });
+
+  it('removes abort listeners after stop', async () => {
+    const tracked = createTrackedSignal();
+    let attempt = 0;
+    let reader;
+
+    reader = createUpstreamSseReader({
+      buildUrl: () => 'http://127.0.0.1:4096/global/event',
+      reconnectDelayMs: 1,
+      signal: tracked.signal,
+      fetchImpl: async (_url, options) => {
+        attempt += 1;
+        if (attempt === 1) {
+          return {
+            ok: false,
+            status: 503,
+            body: {
+              cancel: async () => {},
+            },
+          };
+        }
+
+        return createSseResponse({
+          signal: options.signal,
+          blocks: [
+            'id: evt-1\ndata: {"type":"server.connected","properties":{}}\n\n',
+          ],
+        });
+      },
+      onEvent() {
+        reader.stop();
+      },
+    });
+
+    await reader.start();
+
+    expect(attempt).toBe(2);
+    expect(tracked.getListenerCount()).toBe(0);
   });
 });

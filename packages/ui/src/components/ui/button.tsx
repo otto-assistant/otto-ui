@@ -34,7 +34,7 @@ const TINT_DESTRUCTIVE = [
 
 const buttonVariants = cva(
   [
-    "group relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[10px] [corner-shape:squircle] supports-[corner-shape:squircle]:rounded-[50px] typography-ui-label font-medium lowercase tracking-[0.01em] shrink-0",
+    "group relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[10px] [corner-shape:squircle] supports-[corner-shape:squircle]:rounded-[50px] typography-ui-label font-medium lowercase tracking-[0.01em] shrink-0 select-none",
     "transition-[background-color,border-color,color,opacity] duration-150 ease-out outline-none",
     "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
     "aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
@@ -93,17 +93,22 @@ function Button({
   variant,
   size,
   asChild = false,
+  type,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
     asChild?: boolean
   }) {
   const Comp = asChild ? Slot : "button"
+  const typeProps = asChild
+    ? (type === undefined ? {} : { type })
+    : { type: type ?? "button" }
 
   return (
     <Comp
       data-slot="button"
       className={cn(buttonVariants({ variant, size, className }))}
+      {...typeProps}
       {...props}
     />
   )

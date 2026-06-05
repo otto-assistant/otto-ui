@@ -1,9 +1,9 @@
 import React from 'react';
-import { RiBookletLine, RiFolder3Line, RiGitBranchLine } from '@remixicon/react';
 
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
 import { ProjectNotesTodoPanel } from '@/components/session/ProjectNotesTodoPanel';
 import { GitView } from '@/components/views/GitView';
+import { Icon } from "@/components/icon/Icon";
 import { useGitStore } from '@/stores/useGitStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
@@ -40,7 +40,7 @@ function useRightSidebarGitSync(directory: string | undefined, isSidebarOpen: bo
   }, [directory, git, isSidebarOpen, ensureStatus]);
 }
 
-const ContextSidebarPanel: React.FC = () => {
+export const ProjectContextPanel: React.FC = () => {
   const activeProjectId = useProjectsStore((state) => state.activeProjectId);
   const projects = useProjectsStore((state) => state.projects);
   const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
@@ -103,17 +103,17 @@ export const RightSidebarTabs: React.FC = () => {
     {
       id: 'git',
       label: t('layout.rightSidebar.git'),
-      icon: <RiGitBranchLine className="h-3.5 w-3.5" />,
+      icon: <Icon name="git-branch" className="h-3.5 w-3.5" />,
     },
     {
       id: 'files',
       label: t('layout.rightSidebar.files'),
-      icon: <RiFolder3Line className="h-3.5 w-3.5" />,
+      icon: <Icon name="folder-3" className="h-3.5 w-3.5" />,
     },
     {
       id: 'context',
       label: t('layout.rightSidebar.context'),
-      icon: <RiBookletLine className="h-3.5 w-3.5" />,
+      icon: <Icon name="file-list-2" className="h-3.5 w-3.5" />,
     },
   ], [t]);
 
@@ -133,7 +133,7 @@ export const RightSidebarTabs: React.FC = () => {
       <div className="min-h-0 flex-1 overflow-hidden">
         {rightSidebarTab === 'git' && <GitView />}
         {rightSidebarTab === 'files' && <SidebarFilesTree />}
-        {rightSidebarTab === 'context' && <ContextSidebarPanel />}
+        {rightSidebarTab === 'context' && <ProjectContextPanel />}
       </div>
     </div>
   );

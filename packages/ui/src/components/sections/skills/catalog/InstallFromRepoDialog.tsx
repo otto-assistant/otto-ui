@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { RiFolderLine, RiGitRepositoryLine, RiRobot2Line, RiUser3Line } from '@remixicon/react';
+import { Icon } from "@/components/icon/Icon";
 
 import { isVSCodeRuntime } from '@/lib/desktop';
 import type { SkillsCatalogItem } from '@/lib/api/types';
@@ -69,6 +69,17 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
 
   const [identities, setIdentities] = React.useState<IdentityOption[]>([]);
   const [gitIdentityId, setGitIdentityId] = React.useState<string | null>(null);
+  const scanRequestIdRef = React.useRef(0);
+
+  const invalidateScan = React.useCallback((options?: { clearIdentities?: boolean }) => {
+    scanRequestIdRef.current += 1;
+    setItems([]);
+    setSelected({});
+    if (options?.clearIdentities) {
+      setIdentities([]);
+      setGitIdentityId(null);
+    }
+  }, []);
 
   const [conflictsOpen, setConflictsOpen] = React.useState(false);
   const [conflicts, setConflicts] = React.useState<SkillConflict[]>([]);
@@ -83,6 +94,7 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
   } | null>(null);
 
   React.useEffect(() => {
+    scanRequestIdRef.current += 1;
     if (!open) return;
     setSource('');
     setSubpath('');
@@ -190,11 +202,20 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
       return;
     }
 
+    setItems([]);
+    setSelected({});
+    const requestId = scanRequestIdRef.current + 1;
+    scanRequestIdRef.current = requestId;
+
     const result = await scanRepo({
       source: trimmed,
       subpath: subpath.trim() || undefined,
       gitIdentityId: gitIdentityId || undefined,
     });
+
+    if (scanRequestIdRef.current !== requestId) {
+      return;
+    }
 
     if (!result.ok) {
       if (result.error?.kind === 'authRequired') {
@@ -329,7 +350,10 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
               <div className="flex items-center gap-2">
                 <Input
                   value={source}
-                  onChange={(e) => setSource(e.target.value)}
+                  onChange={(e) => {
+                    setSource(e.target.value);
+                    invalidateScan({ clearIdentities: true });
+                  }}
                   placeholder={t('settings.skills.catalog.shared.field.repositoryPlaceholder')}
                   className="text-foreground placeholder:text-muted-foreground"
                 />
@@ -340,7 +364,7 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
                   disabled={isScanning || !source.trim()}
                   className="gap-2"
                 >
-                  <RiGitRepositoryLine className="h-4 w-4" />
+                  <Icon name="git-repository" className="h-4 w-4" />
                   {isScanning ? t('settings.skills.catalog.shared.actions.scanning') : t('settings.skills.catalog.shared.actions.scan')}
                 </Button>
               </div>
@@ -357,7 +381,10 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
                 <label className="typography-ui-label font-medium text-foreground">{t('settings.skills.catalog.shared.field.optionalSubpath')}</label>
                 <Input
                   value={subpath}
-                  onChange={(e) => setSubpath(e.target.value)}
+                  onChange={(e) => {
+                    setSubpath(e.target.value);
+                    invalidateScan({ clearIdentities: true });
+                  }}
                   placeholder={t('settings.skills.catalog.shared.field.subpathPlaceholder')}
                   className="text-foreground placeholder:text-muted-foreground"
                 />
@@ -374,8 +401,8 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
                   }}
                 >
                   <SelectTrigger size="lg" className="w-full gap-1.5">
-                    {scope === 'user' ? <RiUser3Line className="h-4 w-4" /> : <RiFolderLine className="h-4 w-4" />}
-                    {targetSource === 'agents' ? <RiRobot2Line className="h-4 w-4" /> : null}
+                    {scope === 'user' ? <Icon name="user-3" className="h-4 w-4" /> : <Icon name="folder" className="h-4 w-4" />}
+                    {targetSource === 'agents' ? <Icon name="robot-2" className="h-4 w-4" /> : null}
                     <span>{locationLabelText(locationValueFrom(scope, targetSource))}</span>
                   </SelectTrigger>
                   <SelectContent align="start">
@@ -383,8 +410,8 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
                       <SelectItem key={option.value} value={option.value} className="pr-2 [&>span:first-child]:hidden">
                         <div className="flex flex-col gap-0.5">
                           <div className="flex items-center gap-2">
-                            {option.scope === 'user' ? <RiUser3Line className="h-4 w-4" /> : <RiFolderLine className="h-4 w-4" />}
-                            {option.source === 'agents' ? <RiRobot2Line className="h-4 w-4" /> : null}
+                            {option.scope === 'user' ? <Icon name="user-3" className="h-4 w-4" /> : <Icon name="folder" className="h-4 w-4" />}
+                            {option.source === 'agents' ? <Icon name="robot-2" className="h-4 w-4" /> : null}
                             <span>{locationLabelText(option.value)}</span>
                           </div>
                           <span className="typography-micro text-muted-foreground ml-6">{locationDescriptionText(option.value)}</span>
@@ -429,7 +456,13 @@ export const InstallFromRepoDialog: React.FC<InstallFromRepoDialogProps> = ({ op
                   {t('settings.skills.catalog.installFromRepo.authDescription')}
                 </div>
                 <div className="mt-2">
-                  <Select value={gitIdentityId || ''} onValueChange={(v) => setGitIdentityId(v)}>
+                  <Select
+                    value={gitIdentityId || ''}
+                    onValueChange={(v) => {
+                      setGitIdentityId(v);
+                      invalidateScan();
+                    }}
+                  >
                     <SelectTrigger size="lg" className="w-full justify-between">
                       <span>{identities.find((i) => i.id === gitIdentityId)?.name || t('settings.skills.catalog.shared.auth.chooseIdentity')}</span>
                     </SelectTrigger>

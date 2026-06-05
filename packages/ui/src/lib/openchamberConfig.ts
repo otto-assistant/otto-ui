@@ -4,10 +4,13 @@
  * Migrates from legacy <project>/.openchamber/openchamber.json.
  */
 
-import type { FilesAPI, RuntimeAPIs } from './api/types';
+import type { FilesAPI } from './api/types';
+import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { getDesktopHomeDirectory } from './desktop';
 import { isVSCodeRuntime } from './desktop';
+import { sanitizeStarterRefs, type DraftStarterRef } from './draftStarters';
 import { createProjectIdFromPath } from './projectId';
+import { runtimeFetch } from './runtime-fetch';
 
 type ProjectRef = { id: string; path: string };
 
@@ -20,8 +23,7 @@ const USER_PROJECTS_DIR_SEGMENTS = ['.config', 'openchamber', 'projects'];
  * Get the runtime Files API if available (Desktop/VSCode).
  */
 function getRuntimeFilesAPI(): FilesAPI | null {
-  if (typeof window === 'undefined') return null;
-  const apis = (window as typeof window & { __OPENCHAMBER_RUNTIME_APIS__?: RuntimeAPIs }).__OPENCHAMBER_RUNTIME_APIS__;
+  const apis = getRegisteredRuntimeAPIs();
   if (apis?.files) {
     return apis.files;
   }
@@ -36,6 +38,7 @@ export interface OpenChamberConfig {
   projectPlanFiles?: OpenChamberProjectPlanFileLink[];
   projectActions?: OpenChamberProjectAction[];
   projectActionsPrimaryId?: string;
+  draftStarters?: DraftStarterRef[];
 }
 
 export type OpenChamberProjectActionPlatform = 'macos' | 'linux' | 'windows';
@@ -85,7 +88,7 @@ export interface OpenChamberProjectContextData extends OpenChamberProjectNotesTo
   plans: OpenChamberProjectPlanFileLink[];
 }
 
-export const OPENCHAMBER_PROJECT_NOTES_MAX_LENGTH = 1000;
+export const OPENCHAMBER_PROJECT_NOTES_MAX_LENGTH = 3000;
 export const OPENCHAMBER_PROJECT_TODO_TEXT_MAX_LENGTH = 120;
 export const OPENCHAMBER_PROJECT_ACTION_NAME_MAX_LENGTH = 80;
 export const OPENCHAMBER_PROJECT_ACTION_COMMAND_MAX_LENGTH = 4000;
@@ -124,7 +127,7 @@ const getBaseUrl = (): string => {
 
 const postJson = async <T>(url: string, body: unknown): Promise<{ ok: boolean; data: T | null }> => {
   try {
-    const response = await fetch(url, {
+    const response = await runtimeFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -176,10 +179,13 @@ const readTextFile = async (path: string): Promise<string | null> => {
   }
 
   try {
-    const response = await fetch(
-      `${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}&optional=1`,
+    const response = await runtimeFetch(`${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}`,
+      {
+        // Avoid conditional requests (304 + empty body).
+        cache: 'no-store',
+      }
     );
-    if (!response.ok || response.status === 204) {
+    if (!response.ok) {
       return null;
     }
     return await response.text();
@@ -210,7 +216,10 @@ const resolveHomeDirectory = async (): Promise<string | null> => {
   // In some runtimes, window.__OPENCHAMBER_HOME__ can be workspace/project-root
   // scoped, which would incorrectly route writes into the project directory.
   try {
-    const response = await fetch(`${getBaseUrl()}/fs/home`);
+    const response = await runtimeFetch(`${getBaseUrl()}/fs/home`, {
+      // Avoid conditional requests (304 + empty body).
+      cache: 'no-store',
+    });
     if (!response.ok) {
       throw new Error('Failed to resolve home directory from API');
     }
@@ -695,6 +704,18 @@ export async function getWorktreeSetupCommands(project: ProjectRef): Promise<str
 export async function saveWorktreeSetupCommands(project: ProjectRef, commands: string[]): Promise<boolean> {
   const filtered = commands.filter((cmd) => cmd.trim().length > 0);
   return updateOpenChamberConfig(project, { 'setup-worktree': filtered });
+}
+
+/**
+ * Get this project's pinned draft welcome starters.
+ */
+export async function getProjectDraftStarters(project: ProjectRef): Promise<DraftStarterRef[]> {
+  const config = await readOpenChamberConfig(project);
+  return sanitizeStarterRefs(config?.draftStarters);
+}
+
+export async function saveProjectDraftStarters(project: ProjectRef, starters: DraftStarterRef[]): Promise<boolean> {
+  return updateOpenChamberConfig(project, { draftStarters: sanitizeStarterRefs(starters) });
 }
 
 export async function getProjectNotesAndTodos(project: ProjectRef): Promise<OpenChamberProjectNotesTodos> {

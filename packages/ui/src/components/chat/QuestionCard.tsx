@@ -1,14 +1,19 @@
 import React from 'react';
-import { RiArrowRightSLine, RiCheckLine, RiCloseLine, RiEditLine, RiListCheck3, RiQuestionLine } from '@remixicon/react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Radio } from '@/components/ui/radio';
+import { Icon } from "@/components/icon/Icon";
 
 import { cn } from '@/lib/utils';
+import { isIMECompositionEvent } from '@/lib/ime';
+import { copyTextToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui';
 import type { QuestionRequest } from '@/types/question';
+import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessions } from '@/sync/sync-context';
 import * as sessionActions from '@/sync/session-actions';
 import { useI18n } from '@/lib/i18n';
+import { serializeQuestionAsJson, serializeQuestionAsMarkdown } from './questionSerializers';
 
 interface QuestionCardProps {
   question: QuestionRequest;
@@ -20,7 +25,8 @@ const SUMMARY_TAB = 'summary';
 export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
   const { t } = useI18n();
   const respondToQuestion = sessionActions.respondToQuestion;
-    const rejectQuestion = sessionActions.rejectQuestion;;
+  const rejectQuestion = sessionActions.rejectQuestion;
+  const isMobile = useUIStore((state) => state.isMobile);
   const sessions = useSessions();
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const isFromSubagent = React.useMemo(() => {
@@ -168,24 +174,74 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
       const answers = buildAnswersPayload();
       await respondToQuestion(question.sessionID, question.id, answers);
       setHasResponded(true);
-    } catch {
-      // ignored
+    } catch (error) {
+      if (sessionActions.isQuestionRequestNotFoundError(error)) {
+        toast.info(t('chat.questionCard.noLongerPending'));
+        setHasResponded(true);
+      } else {
+        toast.error(t('chat.questionCard.submitFailed'), {
+          description: t('chat.questionCard.tryAgain'),
+        });
+      }
     } finally {
       setIsResponding(false);
     }
-  }, [buildAnswersPayload, question.id, question.sessionID, requiredSatisfied, respondToQuestion]);
+  }, [buildAnswersPayload, question.id, question.sessionID, requiredSatisfied, respondToQuestion, t]);
+
+  const handleKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (isIMECompositionEvent(e)) return;
+
+      if (e.key === 'Enter' && !e.shiftKey && (!isMobile || e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (requiredSatisfied) {
+          handleConfirm();
+        } else {
+          handleNextUnanswered();
+        }
+      }
+    },
+    [handleConfirm, handleNextUnanswered, isMobile, requiredSatisfied]
+  );
 
   const handleDismiss = React.useCallback(async () => {
     setIsResponding(true);
     try {
       await rejectQuestion(question.sessionID, question.id);
       setHasResponded(true);
-    } catch {
-      // ignored
+    } catch (error) {
+      if (sessionActions.isQuestionRequestNotFoundError(error)) {
+        toast.info(t('chat.questionCard.noLongerPending'));
+        setHasResponded(true);
+      } else {
+        toast.error(t('chat.questionCard.dismissFailed'), {
+          description: t('chat.questionCard.tryAgain'),
+        });
+      }
     } finally {
       setIsResponding(false);
     }
-  }, [question.id, question.sessionID, rejectQuestion]);
+  }, [question.id, question.sessionID, rejectQuestion, t]);
+
+  const handleCopyMarkdown = React.useCallback(async () => {
+    const text = serializeQuestionAsMarkdown(question);
+    const result = await copyTextToClipboard(text);
+    if (result.ok) {
+      toast.success(t('chat.questionCard.copiedMarkdown'));
+      return;
+    }
+    toast.error(t('chat.questionCard.copyFailed'));
+  }, [question, t]);
+
+  const handleCopyJson = React.useCallback(async () => {
+    const text = serializeQuestionAsJson(question);
+    const result = await copyTextToClipboard(text);
+    if (result.ok) {
+      toast.success(t('chat.questionCard.copiedJson'));
+      return;
+    }
+    toast.error(t('chat.questionCard.copyFailed'));
+  }, [question, t]);
 
   if (hasResponded || questions.length === 0) {
     return null;
@@ -198,7 +254,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
           {/* Header */}
           <div className="px-2 py-1.5 border-b border-border/20">
             <div className="flex items-center gap-2">
-              <RiQuestionLine className="h-3.5 w-3.5 text-primary" />
+              <Icon name="question" className="h-3.5 w-3.5 text-primary" />
               <span className="typography-meta font-medium text-muted-foreground">{t('chat.questionCard.inputNeeded')}</span>
               {isFromSubagent ? (
                 <span className="typography-micro text-muted-foreground px-1.5 py-0.5 rounded bg-foreground/5">
@@ -210,6 +266,26 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
                   {activeHeader}
                 </span>
               ) : null}
+              <div className={cn('flex items-center gap-0.5', activeHeader ? null : 'ml-auto')}>
+                <button
+                  type="button"
+                  onClick={handleCopyMarkdown}
+                  title={t('chat.questionCard.copyMarkdown')}
+                  aria-label={t('chat.questionCard.copyMarkdown')}
+                  className="flex items-center justify-center h-5 w-5 rounded text-muted-foreground hover:text-foreground hover:bg-interactive-hover/30 transition-colors"
+                >
+                  <Icon name="file-text" className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyJson}
+                  title={t('chat.questionCard.copyJson')}
+                  aria-label={t('chat.questionCard.copyJson')}
+                  className="flex items-center justify-center h-5 w-5 rounded text-muted-foreground hover:text-foreground hover:bg-interactive-hover/30 transition-colors"
+                >
+                  <Icon name="code-box" className="h-3 w-3" />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -238,7 +314,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
                               : 'text-foreground/85 hover:text-foreground hover:bg-interactive-hover/20'
                       )}
                     >
-                      {isSummary ? <RiListCheck3 className="h-3 w-3" /> : null}
+                      {isSummary ? <Icon name="list-check-3" className="h-3 w-3" /> : null}
                       {tab.label}
                     </button>
                   );
@@ -347,7 +423,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
                     )}
                   >
                     <div className="flex items-center gap-2">
-                      <RiEditLine className={cn(
+                      <Icon name="edit" className={cn(
                         'h-3.5 w-3.5',
                         isCustomActive ? 'text-primary' : 'text-muted-foreground/50'
                       )} />
@@ -385,6 +461,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
                         placeholder={t('chat.questionCard.yourAnswer')}
                         disabled={isResponding}
                         rows={2}
+                        onKeyDown={handleKeyDown}
                         className="w-full bg-transparent border border-border/30 focus:border-primary rounded px-2 py-1 outline-none typography-meta text-foreground placeholder:text-muted-foreground/50 transition-colors resize-none overflow-hidden"
                         autoFocus
                       />
@@ -407,7 +484,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
                 'disabled:opacity-50 disabled:cursor-not-allowed'
               )}
             >
-              {requiredSatisfied ? <RiCheckLine className="h-3 w-3" /> : <RiArrowRightSLine className="h-3 w-3" />}
+              {requiredSatisfied ? <Icon name="check" className="h-3 w-3" /> : <Icon name="arrow-right-s" className="h-3 w-3" />}
               {requiredSatisfied ? t('chat.questionCard.submit') : t('chat.questionCard.next')}
             </button>
 
@@ -421,7 +498,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question }) => {
                 'disabled:opacity-50 disabled:cursor-not-allowed'
               )}
             >
-              <RiCloseLine className="h-3 w-3" />
+              <Icon name="close" className="h-3 w-3" />
               {t('chat.questionCard.dismiss')}
             </button>
 

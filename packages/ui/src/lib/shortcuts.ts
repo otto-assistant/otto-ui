@@ -1,5 +1,5 @@
 import { isMacOS } from '@/lib/utils';
-import { isTauriShell } from '@/lib/desktop';
+import { isDesktopShell } from '@/lib/desktop';
 
 export type ShortcutModifier = 'mod' | 'shift' | 'alt' | 'option' | 'ctrl';
 export type ShortcutKey = string;
@@ -32,7 +32,7 @@ const MODIFIER_KEY_MAP: Record<string, ShortcutModifier> = {
 };
 
 const DISPLAY_LABEL_MAP: Record<ShortcutModifier, string> = {
-  'mod': isMacOS() && isTauriShell() ? '⌘' : 'Ctrl',
+  'mod': isMacOS() && isDesktopShell() ? '⌘' : 'Ctrl',
   'shift': '⇧',
   'alt': '⌥',
   'option': '⌥',
@@ -105,13 +105,6 @@ export function keyToShortcutToken(key: string): string {
 
 const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
   {
-    id: 'open_quick_open',
-    defaultCombo: 'mod+p',
-    label: 'Open quick open',
-    description: 'Open the quick open dialog',
-    customizable: true,
-  },
-  {
     id: 'open_go_to_line',
     defaultCombo: 'alt+g',
     label: 'Go to line (files editor)',
@@ -120,7 +113,7 @@ const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
   },
   {
     id: 'open_command_palette',
-    defaultCombo: 'mod+k',
+    defaultCombo: 'mod+p',
     label: 'Open command palette',
     description: 'Open the command palette',
     customizable: true,
@@ -173,6 +166,13 @@ const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
     customizable: true,
   },
   {
+    id: 'open_timeline_dialog',
+    defaultCombo: 'mod+t',
+    label: 'Open conversation timeline',
+    description: 'Search and navigate within current conversation',
+    customizable: true,
+  },
+  {
     id: 'toggle_right_sidebar',
     defaultCombo: 'mod+b',
     label: 'Toggle right sidebar',
@@ -213,6 +213,12 @@ const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
     label: 'New worktree draft',
     description: 'Create a new worktree and open a draft in it',
     customizable: true,
+  },
+  {
+    id: 'new_mini_chat',
+    defaultCombo: 'mod+alt+n',
+    label: 'New Mini Chat window',
+    description: 'Open a new Mini Chat draft window',
   },
   {
     id: 'submit_message',
@@ -290,6 +296,13 @@ const SHORTCUT_ACTIONS: ReadonlyArray<ShortcutAction> = [
     defaultCombo: 'mod+shift+t',
     label: 'Cycle thinking variant',
     description: 'Cycle thinking variant while in chat',
+  },
+  {
+    id: 'cycle_agent',
+    defaultCombo: 'tab',
+    label: 'Cycle agent',
+    description: 'Cycle agent while the model selector is open',
+    customizable: true,
   },
   {
     id: 'cycle_favorite_model_forward',
@@ -542,7 +555,7 @@ export function eventMatchesShortcut(
   const expectedShift = parsed.modifiers.has('shift');
   const expectedAlt = parsed.modifiers.has('alt');
   const expectedCtrl = parsed.modifiers.has('ctrl');
-  const isDesktopMac = isMacOS() && isTauriShell();
+  const isDesktopMac = isMacOS() && isDesktopShell();
   const isMac = isMacOS();
 
   const modMatches = isDesktopMac
@@ -602,5 +615,5 @@ export function getShortcutLabel(id: string): string {
 }
 
 export function getModifierLabel(): string {
-  return isMacOS() && isTauriShell() ? '⌘' : 'Ctrl';
+  return isMacOS() && isDesktopShell() ? '⌘' : 'Ctrl';
 }

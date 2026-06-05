@@ -1,2 +1,2 @@
-/** Entry-level views only — avoid barrel re-exports that force heavy modules into `main`. */
+/** Entry-level views only. Avoid barrel re-exports that pull heavy modules into the main chunk. */
 export { ChatView } from './ChatView';

@@ -1,12 +1,13 @@
 import React from 'react';
-import { RiFileCopyLine, RiCheckLine, RiExternalLinkLine } from '@remixicon/react';
-import { isDesktopShell, isTauriShell } from '@/lib/desktop';
+import { isDesktopShell, requestFileAccess, startDesktopWindowDrag } from '@/lib/desktop';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Icon } from "@/components/icon/Icon";
 import { updateDesktopSettings } from '@/lib/persistence';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { restartDesktopApp } from '@/lib/desktop';
 import { useI18n } from '@/lib/i18n';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 const INSTALL_COMMAND = 'curl -fsSL https://opencode.ai/install | bash';
 const DOCS_URL = 'https://opencode.ai/docs';
@@ -40,7 +41,7 @@ function BashCommand({ onCopy, copyTitle }: { onCopy: () => void; copyTitle: str
         className="inline-flex items-center text-muted-foreground hover:text-foreground transition-colors"
         title={copyTitle}
       >
-        <RiFileCopyLine className="h-4 w-4" />
+        <Icon name="file-copy" className="h-4 w-4" />
       </button>
     </div>
   );
@@ -99,7 +100,7 @@ export function LocalSetupScreen({
     let cancelled = false;
     void (async () => {
       try {
-        const response = await fetch('/api/config/settings', { method: 'GET', headers: { Accept: 'application/json' } });
+        const response = await runtimeFetch('/api/config/settings', { method: 'GET', headers: { Accept: 'application/json' } });
         if (!response.ok) return;
         const data = (await response.json().catch(() => null)) as null | { opencodeBinary?: unknown };
         if (!data || cancelled) return;
@@ -121,20 +122,14 @@ export function LocalSetupScreen({
       return;
     }
     if (e.button !== 0) return;
-    if (isDesktopApp && isTauriShell()) {
-      try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        const window = getCurrentWindow();
-        await window.startDragging();
-      } catch (error) {
-        console.error('Failed to start window dragging:', error);
-      }
+    if (isDesktopApp) {
+      await startDesktopWindowDrag();
     }
   }, [isDesktopApp]);
 
   const checkCliAvailability = React.useCallback(async (): Promise<boolean> => {
     try {
-      const response = await fetch('/health');
+      const response = await runtimeFetch('/health');
       if (!response.ok) return false;
       const data = await response.json();
       return data.openCodeRunning === true || data.isOpenCodeReady === true;
@@ -147,46 +142,37 @@ export function LocalSetupScreen({
     if (typeof window === 'undefined') {
       return;
     }
-    if (!isDesktopApp || !isTauriShell()) {
-      return;
-    }
-
-    const tauri = (window as unknown as { __TAURI__?: { dialog?: { open?: (opts: Record<string, unknown>) => Promise<unknown> } } }).__TAURI__;
-    if (!tauri?.dialog?.open) {
+    if (!isDesktopApp) {
       return;
     }
 
     try {
-      const selected = await tauri.dialog.open({
-        title: t('onboarding.localSetup.dialog.selectOpencodeBinary'),
-        multiple: false,
-        directory: false,
-      });
-      if (typeof selected === 'string' && selected.trim().length > 0) {
-        setOpencodeBinary(selected.trim());
+      const selected = await requestFileAccess();
+      if (selected.success && selected.path && selected.path.trim().length > 0) {
+        setOpencodeBinary(selected.path.trim());
       }
     } catch {
       // ignore
     }
-  }, [isDesktopApp, t]);
+  }, [isDesktopApp]);
 
   const handleApplyPath = React.useCallback(async () => {
     setIsRetrying(true);
     try {
       await updateDesktopSettings({ opencodeBinary: opencodeBinary.trim() });
 
-      // In desktop boot flow, always restart the entire Tauri app so Rust
-      // can re-evaluate the boot outcome with the updated binary path.
-      if (isTauriShell()) {
+      // In desktop boot flow, restart the app so the native host can
+      // re-evaluate the boot outcome with the updated binary path.
+      if (isDesktopApp) {
         await restartDesktopApp();
         return;
       }
 
-      await fetch('/api/config/reload', { method: 'POST' });
+      await runtimeFetch('/api/config/reload', { method: 'POST' });
     } finally {
       setTimeout(() => setIsRetrying(false), 1000);
     }
-  }, [opencodeBinary]);
+  }, [isDesktopApp, opencodeBinary]);
 
   const handleCopy = React.useCallback(async () => {
     const result = await copyTextToClipboard(INSTALL_COMMAND);
@@ -264,7 +250,7 @@ export function LocalSetupScreen({
           <div className="bg-background/60 backdrop-blur-sm border border-border rounded-lg px-5 py-3 font-mono text-sm w-fit">
             {copied ? (
               <div className="flex items-center justify-center gap-2" style={{ color: 'var(--status-success)' }}>
-                <RiCheckLine className="h-4 w-4" />
+                <Icon name="check" className="h-4 w-4" />
                 {t('onboarding.common.status.copiedToClipboard')}
               </div>
             ) : (
@@ -280,7 +266,7 @@ export function LocalSetupScreen({
           className="text-sm text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1 justify-center"
         >
           {platform === 'windows' ? t('onboarding.localSetup.docs.windows') : t('onboarding.localSetup.docs.default')}
-          <RiExternalLinkLine className="h-3 w-3" />
+          <Icon name="external-link" className="h-3 w-3" />
         </a>
 
         {checkError && (
@@ -320,7 +306,7 @@ export function LocalSetupScreen({
                 type="button"
                 variant="secondary"
                 onClick={handleBrowse}
-                disabled={isRetrying || !isDesktopApp || !isTauriShell()}
+                disabled={isRetrying || !isDesktopApp}
               >
                 {t('onboarding.localSetup.actions.browse')}
               </Button>

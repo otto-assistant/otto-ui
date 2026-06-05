@@ -4,8 +4,14 @@ import type {
   FileSearchResult,
   FilesAPI,
 } from '@openchamber/ui/lib/api/types';
+import { runtimeFetch } from '@openchamber/ui/lib/runtime-fetch';
+import type { RuntimeUrlResolver } from '@openchamber/ui/lib/runtime-url';
 
 const normalizePath = (path: string): string => path.replace(/\\/g, '/');
+
+interface WebFilesAPIOptions {
+  urls: RuntimeUrlResolver;
+}
 
 type WebDirectoryEntry = {
   name?: string;
@@ -39,15 +45,18 @@ const toDirectoryListResult = (fallbackDirectory: string, payload: WebDirectoryL
   };
 };
 
-export const createWebFilesAPI = (): FilesAPI => ({
-  async listDirectory(path: string): Promise<DirectoryListResult> {
+export const createWebFilesAPI = ({ urls }: WebFilesAPIOptions): FilesAPI => ({
+  async listDirectory(path: string, options): Promise<DirectoryListResult> {
     const target = normalizePath(path);
     const params = new URLSearchParams();
     if (target) {
       params.set('path', target);
     }
+    if (options?.respectGitignore) {
+      params.set('respectGitignore', 'true');
+    }
 
-    const response = await fetch(`/api/fs/list${params.toString() ? `?${params.toString()}` : ''}`);
+    const response = await runtimeFetch(urls.api('/api/fs/list', params));
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -74,7 +83,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
       params.set('limit', String(payload.maxResults));
     }
 
-    const response = await fetch(`/api/find/file?${params.toString()}`);
+    const response = await runtimeFetch(urls.api('/api/find/file', params));
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -92,7 +101,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
 
   async createDirectory(path: string): Promise<{ success: boolean; path: string }> {
     const target = normalizePath(path);
-    const response = await fetch('/api/fs/mkdir', {
+    const response = await runtimeFetch(urls.api('/api/fs/mkdir'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: target }),
@@ -110,9 +119,13 @@ export const createWebFilesAPI = (): FilesAPI => ({
     };
   },
 
-  async statFile(path: string): Promise<{ path: string; isFile: boolean; size: number; mtimeMs?: number }> {
+  async statFile(path: string, options): Promise<{ path: string; isFile: boolean; size: number; mtimeMs?: number }> {
     const target = normalizePath(path);
-    const response = await fetch(`/api/fs/stat?path=${encodeURIComponent(target)}`);
+    const params = new URLSearchParams({ path: target });
+    if (options?.allowOutsideWorkspace) {
+      params.set('allowOutsideWorkspace', 'true');
+    }
+    const response = await runtimeFetch(urls.api('/api/fs/stat', params));
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -128,19 +141,18 @@ export const createWebFilesAPI = (): FilesAPI => ({
     };
   },
 
-  async readFile(path: string, options?: { optional?: boolean }): Promise<{ content: string; path: string } | null> {
+  async readFile(path: string, options): Promise<{ content: string; path: string }> {
     const target = normalizePath(path);
     const params = new URLSearchParams({ path: target });
+    if (options?.allowOutsideWorkspace) {
+      params.set('allowOutsideWorkspace', 'true');
+    }
     if (options?.optional) {
-      // optional=1 — server returns 204 No Content (instead of 404) when the
-      // file is absent so the browser console stays clean for benign probes.
-      params.set('optional', '1');
+      params.set('optional', 'true');
     }
-    const response = await fetch(`/api/fs/read?${params.toString()}`);
-
-    if (response.status === 204) {
-      return null;
-    }
+    const response = await runtimeFetch(urls.api('/api/fs/read', params), {
+      cache: options?.optional ? 'no-store' : 'default',
+    });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -153,7 +165,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
 
   async writeFile(path: string, content: string): Promise<{ success: boolean; path: string }> {
     const target = normalizePath(path);
-    const response = await fetch('/api/fs/write', {
+    const response = await runtimeFetch(urls.api('/api/fs/write'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: target, content }),
@@ -173,7 +185,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
 
   async delete(path: string): Promise<{ success: boolean }> {
     const target = normalizePath(path);
-    const response = await fetch('/api/fs/delete', {
+    const response = await runtimeFetch(urls.api('/api/fs/delete'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: target }),
@@ -189,7 +201,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
   },
 
   async rename(oldPath: string, newPath: string): Promise<{ success: boolean; path: string }> {
-    const response = await fetch('/api/fs/rename', {
+    const response = await runtimeFetch(urls.api('/api/fs/rename'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ oldPath, newPath }),
@@ -208,7 +220,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
   },
 
   async revealPath(targetPath: string): Promise<{ success: boolean }> {
-    const response = await fetch('/api/fs/reveal', {
+    const response = await runtimeFetch(urls.api('/api/fs/reveal'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: normalizePath(targetPath) }),
@@ -225,7 +237,7 @@ export const createWebFilesAPI = (): FilesAPI => ({
 
   async downloadFile(path: string): Promise<void> {
     const target = normalizePath(path);
-    const url = `/api/fs/raw?path=${encodeURIComponent(target)}&download=true`;
+    const url = urls.rawFile(target, { download: true });
     const a = document.createElement('a');
     a.href = url;
     a.download = target.split('/').pop() || 'file';

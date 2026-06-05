@@ -14,6 +14,7 @@ import { createTunnelAuth } from './lib/opencode/tunnel-auth.js';
 import { createManagedTunnelConfigRuntime } from './lib/tunnels/managed-config.js';
 import { createTunnelProviderRegistry } from './lib/tunnels/registry.js';
 import { createCloudflareTunnelProvider } from './lib/tunnels/providers/cloudflare.js';
+import { createNgrokTunnelProvider } from './lib/tunnels/providers/ngrok.js';
 import { createRequestSecurityRuntime } from './lib/security/request-security.js';
 import {
   TUNNEL_MODE_MANAGED_LOCAL,
@@ -35,6 +36,8 @@ import {
   createGlobalUiEventBroadcaster,
   createGlobalMessageStreamHub,
   createMessageStreamWsRuntime,
+  DEFAULT_UPSTREAM_STALL_TIMEOUT_MS,
+  UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS,
 } from './lib/event-stream/index.js';
 import { createOttoEventsWebSocketRuntime } from './lib/otto-api/websocket.js';
 import { createFsSearchRuntime as createFsSearchRuntimeFactory } from './lib/fs/search.js';
@@ -81,6 +84,9 @@ import { createDiscordSyncRouter } from './lib/otto-api/discord-sync.js';
 import { createMessengerSyncRouter } from './lib/otto-api/messenger-sync.js';
 import { createMempalaceBridgeRouter } from './lib/otto-api/mempalace-bridge.js';
 import { broadcast as ottoEventsBroadcast } from './lib/otto-api/websocket.js';
+import { createRemoteClientAuthRuntime } from './lib/client-auth/remote-clients.js';
+import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
+import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -139,6 +145,10 @@ function shouldSkipCompression(req, res) {
   }
 
   const pathname = req.path || req.url || '';
+  if ((pathname === '/api' || pathname.startsWith('/api/')) && shouldSkipApiCompression()) {
+    return true;
+  }
+
   if (pathname.startsWith('/api/terminal/') && pathname.endsWith('/stream')) {
     return true;
   }
@@ -171,6 +181,22 @@ const isEnvFlagEnabled = (value) => {
   return normalized === '1' || normalized === 'true';
 };
 
+const isEnvFlagDisabled = (value) => {
+  if (value === false || value === 0) return true;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '0' || normalized === 'false';
+};
+
+const shouldSkipApiCompression = () => {
+  if (isEnvFlagEnabled(process.env.OPENCHAMBER_SKIP_API_COMPRESSION)) return true;
+  if (isEnvFlagEnabled(process.env.OPENCHAMBER_COMPRESS_API)) return false;
+  if (isEnvFlagDisabled(process.env.OPENCHAMBER_COMPRESS_API)) return true;
+  return process.env.OPENCHAMBER_RUNTIME === 'desktop';
+};
+
+const OPENCHAMBER_VERBOSE_REQUEST_LOGS = isEnvFlagEnabled(process.env.OPENCHAMBER_VERBOSE_REQUEST_LOGS);
+
 const PLAN_MODE_EXPERIMENT_ENABLED =
   isEnvFlagEnabled(process.env.OPENCODE_EXPERIMENTAL_PLAN_MODE)
   || isEnvFlagEnabled(process.env.OPENCODE_EXPERIMENTAL);
@@ -181,6 +207,7 @@ const settingsNormalizationRuntime = createSettingsNormalizationRuntime({
   os,
   path,
   processLike: process,
+  realpathSync: fs.realpathSync,
   tunnelBootstrapTtlDefaultMs: TUNNEL_BOOTSTRAP_TTL_DEFAULT_MS,
   tunnelBootstrapTtlMinMs: TUNNEL_BOOTSTRAP_TTL_MIN_MS,
   tunnelBootstrapTtlMaxMs: TUNNEL_BOOTSTRAP_TTL_MAX_MS,
@@ -232,9 +259,6 @@ const formatProjectLabel = (...args) => notificationTemplateRuntime.formatProjec
 const resolveNotificationTemplate = (...args) => notificationTemplateRuntime.resolveNotificationTemplate(...args);
 const shouldApplyResolvedTemplateMessage = (...args) => notificationTemplateRuntime.shouldApplyResolvedTemplateMessage(...args);
 const fetchFreeZenModels = (...args) => notificationTemplateRuntime.fetchFreeZenModels(...args);
-const resolveZenModel = (...args) => notificationTemplateRuntime.resolveZenModel(...args);
-const validateZenModelAtStartup = (...args) => notificationTemplateRuntime.validateZenModelAtStartup(...args);
-const summarizeText = (...args) => notificationTemplateRuntime.summarizeText(...args);
 const extractTextFromParts = (...args) => notificationTemplateRuntime.extractTextFromParts(...args);
 const extractLastMessageText = (...args) => notificationTemplateRuntime.extractLastMessageText(...args);
 const fetchLastAssistantMessageText = (...args) => notificationTemplateRuntime.fetchLastAssistantMessageText(...args);
@@ -247,6 +271,7 @@ const OPENCHAMBER_DATA_DIR = process.env.OPENCHAMBER_DATA_DIR
   : path.join(os.homedir(), '.config', 'openchamber');
 const SETTINGS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'settings.json');
 const PUSH_SUBSCRIPTIONS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'push-subscriptions.json');
+const REMOTE_CLIENTS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'remote-clients.json');
 const CLOUDFLARE_MANAGED_REMOTE_TUNNELS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'cloudflare-managed-remote-tunnels.json');
 const CLOUDFLARE_LEGACY_NAMED_TUNNELS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'cloudflare-named-tunnels.json');
 const CLOUDFLARE_MANAGED_REMOTE_TUNNELS_VERSION = 1;
@@ -386,6 +411,17 @@ const sessionRuntime = createSessionRuntime({
   broadcastEvent: broadcastGlobalUiEvent,
 });
 
+const getActiveSessionCount = () => {
+  const snapshot = sessionRuntime.getSessionActivitySnapshot();
+  return Object.values(snapshot).filter((entry) => entry.type === 'busy').length;
+};
+
+const getUpstreamStallTimeoutMs = () => (
+  getActiveSessionCount() > 1
+    ? UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS
+    : DEFAULT_UPSTREAM_STALL_TIMEOUT_MS
+);
+
 const projectConfigRuntime = createProjectConfigRuntime({
   fsPromises,
   path,
@@ -413,6 +449,7 @@ let openCodeApiPrefix = '';
 let openCodeApiPrefixDetected = true;
 let openCodeApiDetectionTimer = null;
 let lastOpenCodeError = null;
+let lastOpenCodeLaunchDiagnostics = null;
 let isOpenCodeReady = false;
 let openCodeNotReadySince = 0;
 let isExternalOpenCode = false;
@@ -422,6 +459,7 @@ let activeTunnelController = null;
 let globalWatcherStartPromise = null;
 const tunnelProviderRegistry = createTunnelProviderRegistry([
   createCloudflareTunnelProvider(),
+  createNgrokTunnelProvider(),
 ]);
 tunnelProviderRegistry.seal();
 const tunnelAuthController = createTunnelAuth();
@@ -640,8 +678,6 @@ notificationTemplateRuntime = createNotificationTemplateRuntime({
 const notificationTriggerRuntime = createNotificationTriggerRuntime({
   readSettingsFromDisk,
   prepareNotificationLastMessage,
-  summarizeText,
-  resolveZenModel,
   buildTemplateVariables,
   extractLastMessageText,
   fetchLastAssistantMessageText,
@@ -660,6 +696,7 @@ const setAutoAcceptSession = (...args) => notificationTriggerRuntime.setAutoAcce
 const globalMessageStreamHub = createGlobalMessageStreamHub({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
+  upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
 });
 
 const openCodeWatcherRuntime = createOpenCodeWatcherRuntime({
@@ -687,9 +724,12 @@ const processForwardedEventPayload = (payload, emitSyntheticEvent) => {
   }
 
   const properties = payload.properties && typeof payload.properties === 'object' ? payload.properties : {};
+  const statusInfo = properties.status && typeof properties.status === 'object' ? properties.status : {};
   const info = properties.info && typeof properties.info === 'object' ? properties.info : {};
   const sessionId = typeof properties.sessionID === 'string' ? properties.sessionID.trim() : '';
-  const status = typeof info.type === 'string' ? info.type.trim() : '';
+  const status = typeof statusInfo.type === 'string'
+    ? statusInfo.type.trim()
+    : (typeof info.type === 'string' ? info.type.trim() : '');
 
   if (!sessionId || !status) {
     return;
@@ -698,13 +738,19 @@ const processForwardedEventPayload = (payload, emitSyntheticEvent) => {
   emitSyntheticEvent({
     type: 'openchamber:session-status',
     properties: {
-      sessionId,
+      sessionID: sessionId,
       status,
       timestamp: Date.now(),
       metadata: {
-        attempt: typeof info.attempt === 'number' ? info.attempt : undefined,
-        message: typeof info.message === 'string' ? info.message : undefined,
-        next: typeof info.next === 'number' ? info.next : undefined,
+        attempt: typeof statusInfo.attempt === 'number'
+          ? statusInfo.attempt
+          : (typeof info.attempt === 'number' ? info.attempt : undefined),
+        message: typeof statusInfo.message === 'string'
+          ? statusInfo.message
+          : (typeof info.message === 'string' ? info.message : undefined),
+        next: typeof statusInfo.next === 'number'
+          ? statusInfo.next
+          : (typeof info.next === 'number' ? info.next : undefined),
       },
       needsAttention: false,
     },
@@ -779,6 +825,12 @@ const staticRoutesRuntime = createStaticRoutesRuntime({
   normalizePwaAppName,
   normalizePwaOrientation,
 });
+const remoteClientAuthRuntime = createRemoteClientAuthRuntime({
+  fsPromises,
+  path,
+  crypto,
+  storePath: REMOTE_CLIENTS_FILE_PATH,
+});
 const featureRoutesRuntime = createFeatureRoutesRuntime({
   clientReloadDelayMs: CLIENT_RELOAD_DELAY_MS,
 });
@@ -845,6 +897,7 @@ Object.defineProperties(openCodeLifecycleState, {
   openCodeApiPrefixDetected: { get: () => openCodeApiPrefixDetected, set: (value) => { openCodeApiPrefixDetected = value; } },
   openCodeApiDetectionTimer: { get: () => openCodeApiDetectionTimer, set: (value) => { openCodeApiDetectionTimer = value; } },
   lastOpenCodeError: { get: () => lastOpenCodeError, set: (value) => { lastOpenCodeError = value; } },
+  lastOpenCodeLaunchDiagnostics: { get: () => lastOpenCodeLaunchDiagnostics, set: (value) => { lastOpenCodeLaunchDiagnostics = value; } },
   isOpenCodeReady: { get: () => isOpenCodeReady, set: (value) => { isOpenCodeReady = value; } },
   openCodeNotReadySince: { get: () => openCodeNotReadySince, set: (value) => { openCodeNotReadySince = value; } },
   isExternalOpenCode: { get: () => isExternalOpenCode, set: (value) => { isExternalOpenCode = value; } },
@@ -885,6 +938,8 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   clearResolvedOpenCodeBinary,
   buildAugmentedPath,
   buildManagedOpenCodePath,
+  getManagedOpenCodeShellEnvSnapshot: getLoginShellEnvSnapshot,
+  getActiveSessionCount,
 });
 
 const restartOpenCode = (...args) => openCodeLifecycleRuntime.restartOpenCode(...args);
@@ -1006,6 +1061,7 @@ async function main(options = {}) {
   const port = Number.isFinite(options.port) && options.port >= 0 ? Math.trunc(options.port) : DEFAULT_PORT;
   const host = typeof options.host === 'string' && options.host.length > 0 ? options.host : undefined;
   const tryCfTunnel = options.tryCfTunnel === true;
+  const apiOnly = options.apiOnly === true || isEnvFlagEnabled(process.env.OPENCHAMBER_API_ONLY);
   const shouldUseCanonicalTunnelConfig = typeof options.tunnelMode === 'string'
     || typeof options.tunnelProvider === 'string'
     || options.tunnelConfigPath === null
@@ -1037,17 +1093,34 @@ async function main(options = {}) {
   if (typeof options.onDesktopNotification === 'function') {
     notificationEmitterRuntime.setOnDesktopNotification(options.onDesktopNotification);
   }
+  if (typeof options.getIsWindowFocused === 'function') {
+    notificationTriggerRuntime.setGetIsWindowFocused(options.getIsWindowFocused);
+  }
 
   console.log(`Starting OpenChamber on port ${port === 0 ? 'auto' : port}`);
 
   const sayTTSCapability = await detectSayTtsCapability(process);
 
-  // Startup model validation is best-effort and runs in background.
-  void validateZenModelAtStartup();
-
   const app = express();
   const serverStartedAt = new Date().toISOString();
+  const packagedClientOrigins = new Set(['openchamber-ui://app']);
   app.set('trust proxy', true);
+  app.use((req, res, next) => {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (packagedClientOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,X-Requested-With,Cache-Control,X-OpenCode-Directory');
+      res.setHeader('Access-Control-Expose-Headers', 'x-next-cursor');
+      res.setHeader('Vary', 'Origin');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  });
   app.use(compression({
     filter: (req, res) => {
       if (shouldSkipCompression(req, res)) return false;
@@ -1078,6 +1151,7 @@ async function main(options = {}) {
         openCodeApiPrefixDetected: true,
         isOpenCodeReady,
         lastOpenCodeError,
+        lastOpenCodeLaunchDiagnostics,
         opencodeBinaryResolved: resolvedOpencodeBinary || null,
         opencodeBinarySource: resolvedOpencodeBinarySource || null,
         opencodeLaunchBinary: launchSpec?.binary || null,
@@ -1091,13 +1165,15 @@ async function main(options = {}) {
         bunBinaryResolved: resolvedBunBinary || null,
         desktopNotifyEnabled: ENV_DESKTOP_NOTIFY,
         planModeExperimentalEnabled: PLAN_MODE_EXPERIMENT_ENABLED,
+        apiOnly,
       };
     },
+    verboseRequestLogs: OPENCHAMBER_VERBOSE_REQUEST_LOGS,
     uiPassword,
     tunnelAuthController,
+    remoteClientAuthRuntime,
     readSettingsFromDiskMigrated,
     normalizeTunnelSessionTtlMs,
-    resolveZenModel,
     sayTTSCapability,
     ensurePushInitialized,
     ensureGlobalWatcherStarted,
@@ -1164,16 +1240,12 @@ async function main(options = {}) {
     writeSseEvent,
   });
 
-  // Discord ↔ Web UI sync routes
   // MemPalace memory bridge
   app.use('/api/otto/mempalace', createMempalaceBridgeRouter());
 
   // Messenger sync routes (Discord + Telegram). The bridge plumbing lets
   // listeners forward inbound messages to OpenCode and mirror streamed
-  // responses back into the originating channel/thread. listProjects is the
-  // user's saved project list — the bridge uses it to auto-resolve which
-  // project a channel/topic belongs to by slug-matching its name, so the
-  // user doesn't need to wire up Channel/Topic Mapping by hand.
+  // responses back into the originating channel/thread.
   app.use('/api/otto/messenger', createMessengerSyncRouter({
     broadcastEvent: (type, data) => ottoEventsBroadcast(type, data),
     globalEventHub: globalMessageStreamHub,
@@ -1183,9 +1255,6 @@ async function main(options = {}) {
       const settings = await readSettingsFromDiskMigrated();
       return sanitizeProjects(settings?.projects || []);
     },
-    // Bootstrap flow ("clone <url>" / "path <abs>" / "new <name>") — the
-    // helper writes the new project into settings the same way the web
-    // UI does via PUT /api/config/settings.
     readSettings: readSettingsFromDiskMigrated,
     persistSettings,
     sanitizeProjects,
@@ -1211,6 +1280,20 @@ async function main(options = {}) {
     }),
   });
 
+  const previewProxyRuntime = createPreviewProxyRuntime({
+    crypto,
+    URL,
+    createProxyMiddleware,
+    responseInterceptor,
+  });
+  previewProxyRuntime.attach(app, {
+    server,
+    express,
+    uiAuthController,
+    isRequestOriginAllowed,
+    rejectWebSocketUpgrade,
+  });
+
   const startupPipelineResult = await startupPipelineRuntime.run({
     app,
     server,
@@ -1228,6 +1311,7 @@ async function main(options = {}) {
     globalEventHub: globalMessageStreamHub,
     processForwardedEventPayload,
     messageStreamWsClients: uiNotificationWsClients,
+    upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
     terminalHeartbeatIntervalMs: TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS,
     terminalRebindWindowMs: TERMINAL_INPUT_WS_REBIND_WINDOW_MS,
     terminalMaxRebindsPerWindow: TERMINAL_INPUT_WS_MAX_REBINDS_PER_WINDOW,
@@ -1257,6 +1341,7 @@ async function main(options = {}) {
     onTunnelReady,
     tunnelRuntimeContext,
     attachSignals,
+    apiOnly,
   });
   terminalRuntime = startupPipelineResult.terminalRuntime;
   messageStreamRuntime = startupPipelineResult.messageStreamRuntime;
@@ -1274,8 +1359,19 @@ async function main(options = {}) {
     getPort: () => tunnelRuntimeContext.getActivePort(),
     getOpenCodePort: () => openCodePort,
     getTunnelUrl: () => tunnelService.getPublicUrl(),
+    getQuitRiskStatus: () => ({
+      tunnel: {
+        active: Boolean(tunnelService.getPublicUrl()),
+      },
+      scheduledTasks: scheduledTasksRuntime.getStatus(),
+    }),
     isReady: () => isOpenCodeReady,
     restartOpenCode: () => restartOpenCode(),
+    getOpenCodeProcessInfo: () => ({
+      managed: Boolean((openCodeProcess || openCodePort) && !ENV_SKIP_OPENCODE_START && !isExternalOpenCode),
+      pid: typeof openCodeProcess?.pid === 'number' ? openCodeProcess.pid : null,
+      port: openCodePort,
+    }),
     stop: (shutdownOptions = {}) =>
       gracefulShutdown({ exitProcess: shutdownOptions.exitProcess ?? false })
   };

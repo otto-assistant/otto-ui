@@ -2,7 +2,7 @@ import express from 'express';
 import { normalizeCustomOpenAIBaseURL } from './base-url.js';
 import { summarizeText, sanitizeForTTS, sanitizeForNote } from '../text/summarization.js';
 
-export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
+export function registerTtsRoutes(app, { sayTTSCapability }) {
   let ttsModulePromise = null;
   const getTtsModule = async () => {
     if (!ttsModulePromise) {
@@ -44,7 +44,7 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
   // Server-side TTS endpoint - streams audio from OpenAI TTS API
   app.post('/api/tts/speak', async (req, res) => {
     try {
-      const { text, voice = 'nova', model = 'gpt-4o-mini-tts', speed = 0.9, instructions, summarize = false, providerId, modelId, threshold = 200, maxLength = 500, apiKey, baseURL } = req.body || {};
+      const { text, voice = 'nova', model = 'gpt-4o-mini-tts', speed = 0.9, instructions, providerId, modelId, apiKey, baseURL } = req.body || {};
 
       const normalizedBaseURLResult = normalizeCustomOpenAIBaseURL(baseURL);
       if (normalizedBaseURLResult.error) {
@@ -74,20 +74,8 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
 
       let textToSpeak = text.trim();
 
-      // Optionally summarize long text before speaking using zen API
-      if (summarize && textToSpeak.length > threshold) {
-        try {
-          const speakZenModel = await resolveZenModel(typeof req.body?.zenModel === 'string' ? req.body.zenModel : undefined);
-          const result = await summarizeText({ text: textToSpeak, threshold, maxLength, zenModel: speakZenModel, mode: 'tts' });
-          
-          if (result.summarized && result.summary) {
-            textToSpeak = result.summary;
-          }
-        } catch (summarizeError) {
-          console.error('[TTS/speak] Summarization failed:', summarizeError);
-          // Continue with original text if summarization fails
-        }
-      }
+      // Historical summarize request fields are intentionally ignored. The
+      // model-backed summarization provider is retired.
 
       const result = await ttsService.generateSpeechStream({
         text: textToSpeak,
@@ -123,12 +111,10 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
         return res.status(400).json({ error: 'Text is required' });
       }
 
-      const sumZenModel = await resolveZenModel(typeof req.body?.zenModel === 'string' ? req.body.zenModel : undefined);
       const result = await summarizeText({
         text,
         threshold,
         maxLength,
-        zenModel: sumZenModel,
         mode: typeof mode === 'string' ? mode : 'tts',
       });
 
@@ -235,6 +221,8 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
         const language = typeof req.headers['x-language'] === 'string' && req.headers['x-language'].trim().length > 0
           ? req.headers['x-language'].trim()
           : undefined;
+        const authHeader = typeof req.headers['authorization'] === 'string' ? req.headers['authorization'].trim() : '';
+        const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined;
 
         if (!req.body || !Buffer.isBuffer(req.body) || req.body.length === 0) {
           return res.status(400).json({ error: 'Audio data is required' });
@@ -250,6 +238,7 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
           model,
           baseURL,
           language,
+          hasApiKey: !!apiKey,
         });
 
         const transcript = await transcribeAudio({
@@ -257,6 +246,7 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
           mimeType,
           model,
           baseURL,
+          apiKey,
           language,
         });
 

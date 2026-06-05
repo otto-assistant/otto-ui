@@ -11,18 +11,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Icon } from "@/components/icon/Icon";
+import type { IconName } from "@/components/icon/icons";
 import { useGitIdentitiesStore, type GitIdentityProfile, type GitIdentityAuthType } from '@/stores/useGitIdentitiesStore';
-import {
-  RiDeleteBinLine,
-  RiGitBranchLine,
-  RiBriefcaseLine,
-  RiHomeLine,
-  RiGraduationCapLine,
-  RiCodeLine,
-  RiInformationLine,
-  RiKeyLine,
-  RiLock2Line,
-} from '@remixicon/react';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
 
@@ -34,12 +25,12 @@ const PROFILE_COLORS = [
   { key: 'type', label: 'Yellow', cssVar: 'var(--syntax-type)' },
 ];
 
-const PROFILE_ICONS = [
-  { key: 'branch', Icon: RiGitBranchLine, label: 'Branch' },
-  { key: 'briefcase', Icon: RiBriefcaseLine, label: 'Work' },
-  { key: 'house', Icon: RiHomeLine, label: 'Personal' },
-  { key: 'graduation', Icon: RiGraduationCapLine, label: 'School' },
-  { key: 'code', Icon: RiCodeLine, label: 'Code' },
+const PROFILE_ICONS: Array<{ key: string; Icon: IconName; label: string }> = [
+  { key: 'branch', Icon: 'git-branch', label: 'Branch' },
+  { key: 'briefcase', Icon: 'briefcase', label: 'Work' },
+  { key: 'house', Icon: 'home', label: 'Personal' },
+  { key: 'graduation', Icon: 'graduation-cap', label: 'School' },
+  { key: 'code', Icon: 'code', label: 'Code' },
 ];
 
 interface GitIdentityEditorDialogProps {
@@ -261,7 +252,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                   <span className="typography-ui-label text-foreground">{t('settings.gitIdentities.editor.field.icon')}</span>
                   <div className="flex gap-1.5">
                     {PROFILE_ICONS.map((i) => {
-                      const IconComponent = i.Icon;
+                      const iconName = i.Icon;
                       return (
                         <button
                           key={i.key}
@@ -275,7 +266,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                           )}
                           title={i.label}
                         >
-                          <IconComponent
+                          <Icon name={iconName}
                             className="w-3.5 h-3.5"
                             style={{ color: icon === i.key ? currentColorValue : 'var(--surface-muted-foreground)' }}
                           />
@@ -296,9 +287,9 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                 <div className="flex items-center gap-1.5 mb-1.5">
                   <label className="typography-ui-label text-foreground">{t('settings.gitIdentities.editor.field.userName')}</label>
                   {!isGlobalProfile && <span className="text-[var(--status-error)] text-xs">*</span>}
-                  <Tooltip delayDuration={1000}>
+                  <Tooltip>
                     <TooltipTrigger asChild>
-                      <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                      <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                     </TooltipTrigger>
                     <TooltipContent sideOffset={8} className="max-w-xs">
                       {t('settings.gitIdentities.editor.field.userNameTooltip')}
@@ -320,9 +311,9 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                 <div className="flex items-center gap-1.5 mb-1.5">
                   <label className="typography-ui-label text-foreground">{t('settings.gitIdentities.editor.field.emailAddress')}</label>
                   {!isGlobalProfile && <span className="text-[var(--status-error)] text-xs">*</span>}
-                  <Tooltip delayDuration={1000}>
+                  <Tooltip>
                     <TooltipTrigger asChild>
-                      <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                      <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                     </TooltipTrigger>
                     <TooltipContent sideOffset={8} className="max-w-xs">
                       {t('settings.gitIdentities.editor.field.emailAddressTooltip')}
@@ -356,7 +347,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                         aria-pressed={authType === 'ssh'}
                         onClick={() => setAuthType('ssh')}
                       >
-                        <RiLock2Line className="w-3.5 h-3.5 mr-1" /> SSH
+                        <Icon name="lock-2" className="w-3.5 h-3.5 mr-1" /> SSH
                       </Button>
                       <Button size="sm"
                         type="button"
@@ -364,7 +355,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                         aria-pressed={authType === 'token'}
                         onClick={() => setAuthType('token')}
                       >
-                        <RiKeyLine className="w-3.5 h-3.5 mr-1" /> {t('settings.gitIdentities.editor.field.authToken')}
+                        <Icon name="key" className="w-3.5 h-3.5 mr-1" /> {t('settings.gitIdentities.editor.field.authToken')}
                       </Button>
                     </div>
                   </div>
@@ -373,9 +364,9 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                     <div>
                       <div className="flex items-center gap-1.5 mb-1.5">
                         <label className="typography-ui-label text-foreground">{t('settings.gitIdentities.editor.field.sshKeyPath')}</label>
-                        <Tooltip delayDuration={1000}>
+                        <Tooltip>
                           <TooltipTrigger asChild>
-                            <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                            <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                           </TooltipTrigger>
                           <TooltipContent sideOffset={8} className="max-w-xs">
                             {t('settings.gitIdentities.editor.field.sshKeyPathTooltip')}
@@ -396,9 +387,9 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                       <div className="flex items-center gap-1.5 mb-1.5">
                         <label className="typography-ui-label text-foreground">{t('settings.gitIdentities.editor.field.host')}</label>
                         <span className="text-[var(--status-error)] text-xs">*</span>
-                        <Tooltip delayDuration={1000}>
+                        <Tooltip>
                           <TooltipTrigger asChild>
-                            <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                            <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                           </TooltipTrigger>
                           <TooltipContent sideOffset={8} className="max-w-xs">
                             {t('settings.gitIdentities.editor.field.hostTooltip')}
@@ -427,7 +418,7 @@ export const GitIdentityEditorDialog: React.FC<GitIdentityEditorDialogProps> = (
                 onClick={() => setIsDeleteDialogOpen(true)}
                 className="text-[var(--status-error)] hover:text-[var(--status-error)] border-[var(--status-error)]/30 hover:bg-[var(--status-error)]/10 mr-auto"
               >
-                <RiDeleteBinLine className="w-3.5 h-3.5 mr-1" /> {t('settings.common.actions.delete')}
+                <Icon name="delete-bin" className="w-3.5 h-3.5 mr-1" /> {t('settings.common.actions.delete')}
               </Button>
             )}
             <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-foreground hover:bg-interactive-hover hover:text-foreground">
