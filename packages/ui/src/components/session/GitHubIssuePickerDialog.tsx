@@ -10,14 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { toast } from '@/components/ui';
-import {
-  RiCheckboxBlankLine,
-  RiCheckboxLine,
-  RiExternalLinkLine,
-  RiGithubLine,
-  RiLoader4Line,
-  RiSearchLine,
-} from '@remixicon/react';
+import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -31,9 +24,11 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
+import { parseModelIdentifier } from '@/lib/modelIdentifier';
+import { useDeviceInfo } from '@/lib/device';
 import { createWorktreeSessionForNewBranch } from '@/lib/worktreeSessionCreator';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
-import type { GitHubIssue, GitHubIssueComment, GitHubIssuesListResult, GitHubIssueSummary } from '@/lib/api/types';
+import type { GitHubIssue, GitHubIssueComment, GitHubIssuesListResult, GitHubIssueSummary, GitHubRepoSelector } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
 
 const parseIssueNumber = (value: string): number | null => {
@@ -86,17 +81,13 @@ export function GitHubIssuePickerDialog({
   const setSettingsDialogOpen = useUIStore((state) => state.setSettingsDialogOpen);
   const setSettingsPage = useUIStore((state) => state.setSettingsPage);
   const isMobile = useUIStore((state) => state.isMobile);
+  const { isTablet } = useDeviceInfo();
+  const alwaysShowActions = isMobile || isTablet;
   const activeProject = useProjectsStore((state) => state.getActiveProject());
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
 
   const projectDirectory = React.useMemo(() => {
-    const fromDirectoryStore = currentDirectory?.trim();
-    if (fromDirectoryStore) {
-      return fromDirectoryStore;
-    }
-
-    const fromActiveProject = activeProject?.path?.trim();
-    return fromActiveProject || null;
+    return activeProject?.path?.trim() || currentDirectory?.trim() || null;
   }, [activeProject?.path, currentDirectory]);
 
   const [query, setQuery] = React.useState('');
@@ -240,14 +231,11 @@ export function GitHubIssuePickerDialog({
       return null;
     }
 
-    const parts = settingsDefaultModel.split('/');
-    if (parts.length !== 2) {
+    const parsed = parseModelIdentifier(settingsDefaultModel);
+    if (!parsed) {
       return null;
     }
-    const [providerID, modelID] = parts;
-    if (!providerID || !modelID) {
-      return null;
-    }
+    const { providerId: providerID, modelId: modelID } = parsed;
 
     const modelMetadata = configState.getModelMetadata(providerID, modelID);
     if (!modelMetadata) {
@@ -278,7 +266,7 @@ export function GitHubIssuePickerDialog({
     return settingsDefaultVariant;
   }, []);
 
-  const startSession = React.useCallback(async (issueNumber: number) => {
+  const startSession = React.useCallback(async (issueNumber: number, sourceRepo?: GitHubRepoSelector | null) => {
     if (mode === 'select') {
       // In select mode, fetch full issue details and return via onSelect
       if (!projectDirectory) {
@@ -292,7 +280,7 @@ export function GitHubIssuePickerDialog({
       if (startingIssueNumber) return;
       setStartingIssueNumber(issueNumber);
       try {
-        const issueRes = await github.issueGet(projectDirectory, issueNumber);
+        const issueRes = await github.issueGet(projectDirectory, issueNumber, { sourceRepo });
         if (issueRes.connected === false) {
           toast.error(t('session.githubIssuePicker.error.notConnected'));
           return;
@@ -309,7 +297,7 @@ export function GitHubIssuePickerDialog({
           return;
         }
 
-        const commentsRes = await github.issueComments(projectDirectory, issueNumber);
+        const commentsRes = await github.issueComments(projectDirectory, issueNumber, { sourceRepo });
         if (commentsRes.connected === false) {
           toast.error(t('session.githubIssuePicker.error.notConnected'));
           return;
@@ -352,7 +340,7 @@ export function GitHubIssuePickerDialog({
     if (startingIssueNumber) return;
     setStartingIssueNumber(issueNumber);
     try {
-      const issueRes = await github.issueGet(projectDirectory, issueNumber);
+      const issueRes = await github.issueGet(projectDirectory, issueNumber, { sourceRepo });
       if (issueRes.connected === false) {
         toast.error(t('session.githubIssuePicker.error.notConnected'));
         return;
@@ -369,7 +357,7 @@ export function GitHubIssuePickerDialog({
         return;
       }
 
-      const commentsRes = await github.issueComments(projectDirectory, issueNumber);
+      const commentsRes = await github.issueComments(projectDirectory, issueNumber, { sourceRepo });
       if (commentsRes.connected === false) {
         toast.error(t('session.githubIssuePicker.error.notConnected'));
         return;
@@ -378,7 +366,7 @@ export function GitHubIssuePickerDialog({
 
       const sessionTitle = `#${issue.number} ${issue.title}`.trim();
 
-      const sessionId = await (async () => {
+      const { sessionId, sessionDirectory } = await (async () => {
         if (createInWorktree) {
           const preferred = `issue-${issue.number}-${generateBranchSlug()}`;
           const created = await createWorktreeSessionForNewBranch(
@@ -388,14 +376,14 @@ export function GitHubIssuePickerDialog({
           if (!created?.id) {
             throw new Error('Failed to create worktree session');
           }
-          return created.id;
+          return { sessionId: created.id, sessionDirectory: created.path };
         }
 
         const session = await sessionActions.createSession(sessionTitle, projectDirectory, null);
         if (!session?.id) {
           throw new Error('Failed to create session');
         }
-        return session.id;
+        return { sessionId: session.id, sessionDirectory: session.directory ?? projectDirectory };
       })();
 
       // Ensure worktree-based sessions also get the issue title.
@@ -480,6 +468,7 @@ export function GitHubIssuePickerDialog({
           { text: instructionsText, synthetic: true },
           { text: contextText, synthetic: true },
         ],
+        directory: sessionDirectory,
       }).catch((e) => {
         const message = e instanceof Error ? e.message : String(e);
         toast.error(t('session.githubIssuePicker.toast.sendContextFailed'), {
@@ -504,7 +493,7 @@ export function GitHubIssuePickerDialog({
   const content = (
     <>
       <div className="relative mt-2">
-        <RiSearchLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           placeholder={t('session.githubIssuePicker.searchPlaceholder')}
           value={query}
@@ -524,7 +513,7 @@ export function GitHubIssuePickerDialog({
 
           {isLoading ? (
             <div className="text-center text-muted-foreground py-8 flex items-center justify-center gap-2">
-              <RiLoader4Line className="h-4 w-4 animate-spin" />
+              <Icon name="loader-4" className="h-4 w-4 animate-spin" />
               {t('session.githubIssuePicker.loading.issues')}
             </div>
           ) : null}
@@ -558,7 +547,7 @@ export function GitHubIssuePickerDialog({
               </p>
               <div className="flex-shrink-0 h-5 flex items-center mr-2">
                 {startingIssueNumber === directNumber ? (
-                  <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <Icon name="loader-4" className="h-4 w-4 animate-spin text-muted-foreground" />
                 ) : null}
               </div>
             </div>
@@ -570,33 +559,43 @@ export function GitHubIssuePickerDialog({
 
           {filtered.map((issue) => (
             <div
-              key={issue.number}
+              key={`${issue.sourceRepo?.owner ?? ''}-${issue.sourceRepo?.repo ?? ''}-${issue.number}`}
               className={cn(
                 'group flex items-center gap-2 py-1.5 hover:bg-interactive-hover/30 rounded transition-colors cursor-pointer',
                 startingIssueNumber === issue.number && 'bg-interactive-selection/30'
               )}
-              onClick={() => void startSession(issue.number)}
+              onClick={() => void startSession(issue.number, issue.sourceRepo)}
             >
               <span className="typography-meta text-muted-foreground w-12 text-right flex-shrink-0">
                 #{issue.number}
               </span>
-              <p className="flex-1 min-w-0 typography-small text-foreground truncate ml-0.5">
-                {issue.title}
-              </p>
+              <div className="flex-1 min-w-0 ml-0.5">
+                <p className="typography-small text-foreground truncate">
+                  {issue.title}
+                </p>
+                {issue.sourceRepo?.source === 'upstream' ? (
+                  <span className="typography-micro px-1 py-0.5 rounded bg-status-info/10 text-status-info mt-0.5 inline-block">
+                    {issue.sourceRepo.owner}/{issue.sourceRepo.repo}
+                  </span>
+                ) : null}
+              </div>
 
               <div className="flex-shrink-0 h-5 flex items-center mr-2">
                 {startingIssueNumber === issue.number ? (
-                  <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <Icon name="loader-4" className="h-4 w-4 animate-spin text-muted-foreground" />
                 ) : (
                   <a
                     href={issue.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="hidden group-hover:flex h-5 w-5 items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn(
+                      "h-5 w-5 items-center justify-center text-muted-foreground hover:text-foreground transition-colors",
+                      alwaysShowActions ? "flex" : "hidden group-hover:flex"
+                    )}
                     onClick={(e) => e.stopPropagation()}
                     aria-label={t('session.githubIssuePicker.actions.openInGitHubAria')}
                   >
-                    <RiExternalLinkLine className="h-4 w-4" />
+                    <Icon name="external-link" className="h-4 w-4" />
                   </a>
                 )}
               </div>
@@ -616,7 +615,7 @@ export function GitHubIssuePickerDialog({
               >
                 {isLoadingMore ? (
                   <span className="inline-flex items-center gap-2">
-                    <RiLoader4Line className="h-4 w-4 animate-spin" />
+                    <Icon name="loader-4" className="h-4 w-4 animate-spin" />
                     {t('session.githubIssuePicker.loading.more')}
                   </span>
                 ) : (
@@ -655,9 +654,9 @@ export function GitHubIssuePickerDialog({
                 className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
               >
                 {createInWorktree ? (
-                  <RiCheckboxLine className="h-4 w-4 text-primary" />
+                  <Icon name="checkbox" className="h-4 w-4 text-primary" />
                 ) : (
-                  <RiCheckboxBlankLine className="h-4 w-4" />
+                  <Icon name="checkbox-blank" className="h-4 w-4" />
                 )}
               </button>
               <span className="typography-meta text-muted-foreground">{t('session.githubIssuePicker.actions.createInWorktree')}</span>
@@ -668,7 +667,7 @@ export function GitHubIssuePickerDialog({
               {repoUrl ? (
                 <Button variant="outline" size="sm" asChild>
                   <a href={repoUrl} target="_blank" rel="noopener noreferrer">
-                    <RiExternalLinkLine className="size-4" />
+                    <Icon name="external-link" className="size-4" />
                     {t('session.githubIssuePicker.actions.openRepo')}
                   </a>
                 </Button>
@@ -709,7 +708,7 @@ export function GitHubIssuePickerDialog({
       <DialogContent className="max-w-2xl max-h-[70vh] flex flex-col">
         <DialogHeader className="flex-shrink-0">
           <DialogTitle className="flex items-center gap-2">
-            <RiGithubLine className="h-5 w-5" />
+            <Icon name="github" className="h-5 w-5" />
             {title}
           </DialogTitle>
           <DialogDescription>

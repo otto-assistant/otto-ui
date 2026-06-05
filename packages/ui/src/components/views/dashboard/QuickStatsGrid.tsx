@@ -4,42 +4,52 @@ import { RiBarChart2Line, RiBrainLine, RiCheckboxCircleLine, RiChat3Line } from 
 import type { DashboardStats } from "@/stores/useDashboardStore";
 import type { AppActiveView } from "@/constants/agentNav";
 import { useUIStore } from "@/stores/useUIStore";
+import { openMemorySettings } from "@/lib/navigation/openMemorySettings";
 
 export interface QuickStatsGridProps {
   stats: DashboardStats;
 }
 
+type Tile = {
+  icon: typeof RiChat3Line;
+  label: string;
+  value: number;
+  testId: string;
+  onClick: () => void;
+};
+
 export const QuickStatsGrid: React.FC<QuickStatsGridProps> = ({ stats }) => {
   const setActiveView = useUIStore((s) => s.setActiveView);
+  const goTo = (view: AppActiveView) => () => setActiveView(view);
 
-  const tiles: { icon: typeof RiChat3Line; label: string; value: number; testId: string; target: AppActiveView }[] = [
+  const tiles: Tile[] = [
     {
       icon: RiChat3Line,
       label: "Messages today",
       value: stats.messagesToday,
       testId: "dashboard-stat-messages",
-      target: "chat",
+      onClick: goTo("chat"),
     },
     {
       icon: RiCheckboxCircleLine,
       label: "Tasks completed",
       value: stats.tasksCompleted,
       testId: "dashboard-stat-tasks",
-      target: "tasks",
+      onClick: goTo("tasks"),
     },
     {
       icon: RiBarChart2Line,
       label: "Active sessions",
       value: stats.activeSessions,
       testId: "dashboard-stat-sessions",
-      target: "chat",
+      onClick: goTo("chat"),
     },
     {
       icon: RiBrainLine,
       label: "Memory facts",
       value: stats.memoryFacts,
       testId: "dashboard-stat-memory",
-      target: "memory",
+      onClick: openMemorySettings,
     },
   ];
 
@@ -54,7 +64,7 @@ export const QuickStatsGrid: React.FC<QuickStatsGridProps> = ({ stats }) => {
               key={tile.label}
               type="button"
               data-testid={tile.testId}
-              onClick={() => setActiveView(tile.target)}
+              onClick={tile.onClick}
               className="rounded-lg border border-border bg-[var(--surface-elevated)] p-3 text-left transition-colors hover:bg-[var(--surface-elevated-hover,var(--surface-elevated))] hover:border-primary/30"
             >
               <div className="flex items-center justify-between gap-2">

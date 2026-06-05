@@ -1,5 +1,4 @@
 import React from 'react';
-import { RiAddLine, RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine, RiCloseLine, RiCommandLine } from '@remixicon/react';
 
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useTerminalStore } from '@/stores/useTerminalStore';
@@ -13,10 +12,14 @@ import { TerminalViewport, type TerminalController } from '@/components/terminal
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 import { Button } from '@/components/ui/button';
+import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
+import { Icon } from "@/components/icon/Icon";
 import { useDeviceInfo } from '@/lib/device';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { primeTerminalInputTransport } from '@/lib/terminalApi';
+import { extractTerminalPreviewUrl, isTerminalPreviewUrlAvailable } from '@/lib/terminalPreview';
 import { useI18n } from '@/lib/i18n';
+import { PROJECT_ACTION_ICON_MAP, type ProjectActionIconKey } from '@/lib/projectActions';
 
 type Modifier = 'ctrl' | 'cmd';
 type MobileKey =
@@ -42,7 +45,6 @@ const MODIFIER_ARROW_SUFFIX: Record<Modifier, string> = {
     ctrl: '5',
     cmd: '3',
 };
-
 
 const STREAM_OPTIONS = {
     retry: {
@@ -89,11 +91,13 @@ export const TerminalView: React.FC = () => {
     const terminalFontSize = useUIStore(state => state.terminalFontSize);
     const bottomTerminalHeight = useUIStore((state) => state.bottomTerminalHeight);
     const isBottomTerminalExpanded = useUIStore((state) => state.isBottomTerminalExpanded);
-    const { isMobile, hasTouchInput } = useDeviceInfo();
+    const { isMobile, isTablet, hasTouchOnlyPointer } = useDeviceInfo();
+    const isTouchTerminal = isMobile || isTablet;
+    const useTouchTerminalInput = (isTouchTerminal || hasTouchOnlyPointer) && runtime.platform === 'web';
     // Tabs are supported for web + desktop runtimes, including mobile (not VSCode).
     const enableTabs = runtime.platform !== 'vscode';
     const showTerminalQuickKeysOnDesktop = useUIStore((state) => state.showTerminalQuickKeysOnDesktop);
-    const showQuickKeys = isMobile || showTerminalQuickKeysOnDesktop;
+    const showQuickKeys = isTouchTerminal || showTerminalQuickKeysOnDesktop;
 
     const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
     const newSessionDraft = useSessionUIStore((s) => s.newSessionDraft);
@@ -110,6 +114,10 @@ export const TerminalView: React.FC = () => {
     const setTabLifecycle = useTerminalStore((s) => s.setTabLifecycle);
     const setConnecting = useTerminalStore((s) => s.setConnecting);
     const appendToBuffer = useTerminalStore((s) => s.appendToBuffer);
+    const setTabPreviewUrl = useTerminalStore((s) => s.setTabPreviewUrl);
+    const clearBuffer = useTerminalStore((s) => s.clearBuffer);
+
+    const openContextPreview = useUIStore((state) => state.openContextPreview);
 
     const directoryTerminalState = React.useMemo(() => {
         if (!effectiveDirectory) return undefined;
@@ -133,17 +141,31 @@ export const TerminalView: React.FC = () => {
         );
     }, [directoryTerminalState, activeTabId]);
 
+    const terminalTabItems = React.useMemo(() => {
+        return (directoryTerminalState?.tabs ?? []).map((tab) => ({
+            icon: (() => {
+                const tabIconName = tab.iconKey ? PROJECT_ACTION_ICON_MAP[tab.iconKey as ProjectActionIconKey] ?? 'terminal' : 'terminal';
+                return <Icon name={tabIconName} className="h-4 w-4" />;
+            })(),
+            id: tab.id,
+            label: tab.label,
+            title: tab.label,
+            closeLabel: t('terminalView.tabs.closeTabTitle'),
+        }));
+    }, [directoryTerminalState?.tabs, t]);
+
     const terminalSessionId = activeTab?.terminalSessionId ?? null;
     const terminalLifecycle = activeTab?.lifecycle ?? 'idle';
     const bufferChunks = activeTab?.bufferChunks ?? [];
     const isConnecting = activeTab?.isConnecting ?? false;
+    const previewUrl = activeTab?.previewUrl ?? null;
 
     const [connectionError, setConnectionError] = React.useState<string | null>(null);
     const [isFatalError, setIsFatalError] = React.useState(false);
     const [isReconnectPending, setIsReconnectPending] = React.useState(false);
     const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
     const [isRestarting, setIsRestarting] = React.useState(false);
-    const [viewportLayoutVersion, setViewportLayoutVersion] = React.useState(0);
+    const [viewportSizeVersion, setViewportSizeVersion] = React.useState(0);
 
     const streamCleanupRef = React.useRef<(() => void) | null>(null);
     const activeTerminalIdRef = React.useRef<string | null>(null);
@@ -156,13 +178,32 @@ export const TerminalView: React.FC = () => {
     const nudgeOnConnectTerminalIdRef = React.useRef<string | null>(null);
     const rehydratedTerminalIdsRef = React.useRef<Set<string>>(new Set());
     const rehydratedSnapshotTakenRef = React.useRef(false);
+    const previewScanTailRef = React.useRef('');
+    const pendingPreviewProbeUrlsRef = React.useRef<Set<string>>(new Set());
+    const previewProbeGenerationRef = React.useRef(0);
+
+    const resetTerminalPreviewScan = React.useCallback(() => {
+        previewScanTailRef.current = '';
+        pendingPreviewProbeUrlsRef.current.clear();
+        previewProbeGenerationRef.current += 1;
+    }, []);
 
     const focusTerminalWhenWindowActive = React.useCallback(() => {
+        if (useTouchTerminalInput) {
+            return;
+        }
         if (typeof document !== 'undefined' && !document.hasFocus()) {
             return;
         }
         terminalControllerRef.current?.focus();
-    }, []);
+    }, [useTouchTerminalInput]);
+
+    const focusTerminalController = React.useCallback(() => {
+        if (useTouchTerminalInput) {
+            return;
+        }
+        terminalControllerRef.current?.focus();
+    }, [useTouchTerminalInput]);
 
     React.useEffect(() => {
         if (!terminalHydrated) {
@@ -187,6 +228,8 @@ export const TerminalView: React.FC = () => {
 
     const activeMainTab = useUIStore((state) => state.activeMainTab);
     const isBottomTerminalOpen = useUIStore((state) => state.isBottomTerminalOpen);
+    const setBottomTerminalOpen = useUIStore((state) => state.setBottomTerminalOpen);
+    const setBottomTerminalExpanded = useUIStore((state) => state.setBottomTerminalExpanded);
     const isTerminalActive = activeMainTab === 'terminal';
     const isTerminalVisible = isTerminalActive || isBottomTerminalOpen;
     const [hasOpenedTerminalViewport, setHasOpenedTerminalViewport] = React.useState(isTerminalVisible);
@@ -215,7 +258,8 @@ export const TerminalView: React.FC = () => {
 
     React.useEffect(() => {
         activeTabIdRef.current = activeTabId;
-    }, [activeTabId]);
+        resetTerminalPreviewScan();
+    }, [activeTabId, resetTerminalPreviewScan]);
 
     React.useEffect(() => {
         directoryRef.current = effectiveDirectory;
@@ -246,6 +290,47 @@ export const TerminalView: React.FC = () => {
             terminalIdRef.current = null;
         },
         [disconnectStream]
+    );
+
+    const scanTerminalPreviewOutput = React.useCallback(
+        (directory: string, tabId: string, data: string) => {
+            if (!data) {
+                return;
+            }
+
+            const combined = `${previewScanTailRef.current}${data}`.replace(/\r\n|\r/g, '\n');
+            const lines = combined.split('\n');
+            const completeText = combined.endsWith('\n')
+                ? lines.join('\n')
+                : lines.slice(0, -1).join('\n');
+            previewScanTailRef.current = combined.endsWith('\n') ? '' : (lines[lines.length - 1] ?? '').slice(-1024);
+
+            if (!completeText) {
+                return;
+            }
+
+            const candidate = extractTerminalPreviewUrl(completeText);
+            if (!candidate || pendingPreviewProbeUrlsRef.current.has(candidate)) {
+                return;
+            }
+
+            const probeGeneration = previewProbeGenerationRef.current;
+            pendingPreviewProbeUrlsRef.current.add(candidate);
+            void isTerminalPreviewUrlAvailable(candidate).then((available) => {
+                pendingPreviewProbeUrlsRef.current.delete(candidate);
+                if (!available || previewProbeGenerationRef.current !== probeGeneration) {
+                    return;
+                }
+
+                const currentTab = useTerminalStore.getState().getDirectoryState(directory)?.tabs.find((tab) => tab.id === tabId);
+                if (!currentTab || currentTab.previewUrlLocked || currentTab.previewUrl === candidate) {
+                    return;
+                }
+
+                setTabPreviewUrl(directory, tabId, candidate, { locked: false, autoOpened: false });
+            });
+        },
+        [setTabPreviewUrl]
     );
 
     const startStream = React.useCallback(
@@ -300,6 +385,7 @@ export const TerminalView: React.FC = () => {
                             case 'data': {
                                 if (event.data) {
                                     appendToBuffer(directory, tabId, event.data);
+                                    scanTerminalPreviewOutput(directory, tabId, event.data);
                                 }
                                 break;
                             }
@@ -353,6 +439,7 @@ export const TerminalView: React.FC = () => {
                         );
                         setIsFatalError(true);
                         setConnecting(directory, tabId, false);
+                        clearBuffer(directory, tabId);
                         setTabLifecycle(directory, tabId, 'exited');
                         setTabSessionId(directory, tabId, null);
                         disconnectStream();
@@ -368,8 +455,10 @@ export const TerminalView: React.FC = () => {
         },
         [
             appendToBuffer,
+            clearBuffer,
             disconnectStream,
             focusTerminalWhenWindowActive,
+            scanTerminalPreviewOutput,
             setConnecting,
             setTabLifecycle,
             setTabSessionId,
@@ -439,12 +528,16 @@ export const TerminalView: React.FC = () => {
                     return;
                 }
 
+                const size = lastViewportSizeRef.current;
+                if (!size && isTerminalVisibleRef.current) {
+                    return;
+                }
+
                 setConnectionError(null);
                 setIsFatalError(false);
                 setIsReconnectPending(false);
                 setConnecting(directory, tabId, true);
                 try {
-                    const size = lastViewportSizeRef.current;
                     const session = await terminal.createSession({
                         cwd: directory,
                         cols: size?.cols,
@@ -513,6 +606,7 @@ export const TerminalView: React.FC = () => {
         terminalLifecycle,
         activeTabId,
         hasOpenedTerminalViewport,
+        viewportSizeVersion,
         enableTabs,
         terminalHydrated,
         ensureDirectory,
@@ -526,7 +620,7 @@ export const TerminalView: React.FC = () => {
     ]);
 
     React.useEffect(() => {
-        if (!isTerminalVisible) {
+        if (!isTerminalVisible || useTouchTerminalInput) {
             return;
         }
 
@@ -542,7 +636,7 @@ export const TerminalView: React.FC = () => {
         return () => {
             window.cancelAnimationFrame(rafId);
         };
-    }, [activeTabId, focusTerminalWhenWindowActive, isTerminalVisible]);
+    }, [activeTabId, focusTerminalWhenWindowActive, isTerminalVisible, useTouchTerminalInput]);
 
     const handleRestart = React.useCallback(async () => {
         if (!effectiveDirectory) return;
@@ -560,6 +654,8 @@ export const TerminalView: React.FC = () => {
         setIsReconnectPending(false);
 
         disconnectStream();
+        clearBuffer(effectiveDirectory, tabId);
+        resetTerminalPreviewScan();
 
         try {
             await closeTab(effectiveDirectory, tabId);
@@ -572,7 +668,7 @@ export const TerminalView: React.FC = () => {
         } finally {
             setIsRestarting(false);
         }
-    }, [activeTabId, closeTab, disconnectStream, effectiveDirectory, enableTabs, isRestarting, t]);
+    }, [activeTabId, clearBuffer, closeTab, disconnectStream, effectiveDirectory, enableTabs, isRestarting, resetTerminalPreviewScan, t]);
 
     const handleHardRestart = React.useCallback(async () => {
         // Keep semantics: “close tab -> new clean tab”.
@@ -617,7 +713,6 @@ export const TerminalView: React.FC = () => {
         [activeTabId, closeTab, disconnectStream, effectiveDirectory]
     );
 
-
     const handleViewportInput = React.useCallback(
         (data: string) => {
             if (!data || isReconnectPending) {
@@ -655,15 +750,19 @@ export const TerminalView: React.FC = () => {
 
             if (modifierConsumed) {
                 setActiveModifier(null);
-                terminalControllerRef.current?.focus();
+                focusTerminalController();
             }
         },
-        [activeModifier, isReconnectPending, setActiveModifier, t, terminal]
+        [activeModifier, focusTerminalController, isReconnectPending, setActiveModifier, t, terminal]
     );
 
     const handleViewportResize = React.useCallback(
         (cols: number, rows: number) => {
-            lastViewportSizeRef.current = { cols, rows };
+            const previous = lastViewportSizeRef.current;
+            if (!previous || previous.cols !== cols || previous.rows !== rows) {
+                lastViewportSizeRef.current = { cols, rows };
+                setViewportSizeVersion((version) => version + 1);
+            }
             if (!isTerminalVisibleRef.current) {
                 return;
             }
@@ -679,9 +778,9 @@ export const TerminalView: React.FC = () => {
     const handleModifierToggle = React.useCallback(
         (modifier: Modifier) => {
             setActiveModifier((current) => (current === modifier ? null : modifier));
-            terminalControllerRef.current?.focus();
+            focusTerminalController();
         },
-        [setActiveModifier]
+        [focusTerminalController, setActiveModifier]
     );
 
     const handleMobileKeyPress = React.useCallback(
@@ -692,9 +791,9 @@ export const TerminalView: React.FC = () => {
             }
             handleViewportInput(sequence);
             setActiveModifier(null);
-            terminalControllerRef.current?.focus();
+            focusTerminalController();
         },
-        [activeModifier, handleViewportInput, setActiveModifier]
+        [activeModifier, focusTerminalController, handleViewportInput, setActiveModifier]
     );
 
     React.useEffect(() => {
@@ -758,7 +857,7 @@ export const TerminalView: React.FC = () => {
                     event.stopPropagation();
                     handleViewportInput(controlCode);
                     setActiveModifier(null);
-                    terminalControllerRef.current?.focus();
+                    focusTerminalController();
                 }
             }
         };
@@ -771,6 +870,7 @@ export const TerminalView: React.FC = () => {
         activeModifier,
         handleMobileKeyPress,
         handleViewportInput,
+        focusTerminalController,
         showQuickKeys,
         setActiveModifier,
         terminalSessionId,
@@ -797,39 +897,15 @@ export const TerminalView: React.FC = () => {
 
     const xtermTheme = React.useMemo(() => convertThemeToXterm(currentTheme), [currentTheme]);
 
-    const terminalSessionKey = React.useMemo(() => {
+    const terminalViewportKey = React.useMemo(() => {
         const directoryPart = effectiveDirectory ?? 'no-dir';
         const tabPart = activeTabId ?? 'no-tab';
-        const terminalPart = terminalSessionId ?? `pending-${tabPart}`;
+        const terminalPart = terminalSessionId ?? 'no-terminal';
         return `${directoryPart}::${tabPart}::${terminalPart}`;
     }, [effectiveDirectory, activeTabId, terminalSessionId]);
 
-    const viewportSessionKey = React.useMemo(() => {
-        const base = terminalSessionId ?? terminalSessionKey;
-        return `${base}::layout-${viewportLayoutVersion}`;
-    }, [terminalSessionId, terminalSessionKey, viewportLayoutVersion]);
-
     React.useEffect(() => {
-        if (isMobile || !isBottomTerminalOpen || !isTerminalVisible) {
-            return;
-        }
-
-        if (typeof window === 'undefined') {
-            setViewportLayoutVersion((value) => value + 1);
-            return;
-        }
-
-        const timeoutId = window.setTimeout(() => {
-            setViewportLayoutVersion((value) => value + 1);
-        }, 140);
-
-        return () => {
-            window.clearTimeout(timeoutId);
-        };
-    }, [bottomTerminalHeight, isBottomTerminalExpanded, isBottomTerminalOpen, isMobile, isTerminalVisible]);
-
-    React.useEffect(() => {
-        if (!isTerminalVisible) {
+        if (!isTerminalVisible || useTouchTerminalInput) {
             return;
         }
         const controller = terminalControllerRef.current;
@@ -851,10 +927,10 @@ export const TerminalView: React.FC = () => {
             };
         }
         fitOnce();
-    }, [focusTerminalWhenWindowActive, isTerminalVisible, terminalSessionKey, terminalSessionId]);
+    }, [focusTerminalWhenWindowActive, isTerminalVisible, useTouchTerminalInput, terminalViewportKey, terminalSessionId]);
 
     React.useEffect(() => {
-        if (isMobile || !isTerminalVisible || !isBottomTerminalOpen) {
+        if (useTouchTerminalInput || !isTerminalVisible || !isBottomTerminalOpen) {
             return;
         }
 
@@ -879,7 +955,7 @@ export const TerminalView: React.FC = () => {
         }
 
         fitOnce();
-    }, [bottomTerminalHeight, isBottomTerminalExpanded, isBottomTerminalOpen, isMobile, isTerminalVisible]);
+    }, [bottomTerminalHeight, isBottomTerminalExpanded, isBottomTerminalOpen, isTerminalVisible, useTouchTerminalInput]);
 
     if (!hasActiveContext) {
         return (
@@ -904,7 +980,8 @@ export const TerminalView: React.FC = () => {
     }
 
     const quickKeysDisabled = !terminalSessionId || isConnecting || isRestarting || isReconnectPending;
-    const shouldRenderViewport = isMobile ? isTerminalVisible : hasOpenedTerminalViewport;
+    const shouldRenderViewport = hasOpenedTerminalViewport;
+    const showBottomDockControls = !isTouchTerminal && isBottomTerminalOpen && !isTerminalActive;
     const quickKeysControls = (
         <>
             <Button
@@ -925,7 +1002,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleMobileKeyPress('tab')}
                 disabled={quickKeysDisabled}
             >
-                <RiArrowRightLine size={16} />
+                <Icon name="arrow-right" className="h-4 w-4" />
                 <span className="sr-only">{t('terminalView.quickKeys.tabAria')}</span>
             </Button>
             <Button
@@ -949,7 +1026,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleModifierToggle('cmd')}
                 disabled={quickKeysDisabled}
             >
-                <RiCommandLine size={16} />
+                <Icon name="command"/>
                 <span className="sr-only">{t('terminalView.quickKeys.commandModifierAria')}</span>
             </Button>
             <Button
@@ -960,7 +1037,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleMobileKeyPress('arrow-up')}
                 disabled={quickKeysDisabled}
             >
-                <RiArrowUpLine size={16} />
+                <Icon name="arrow-up"/>
                 <span className="sr-only">{t('terminalView.quickKeys.arrowUpAria')}</span>
             </Button>
             <Button
@@ -971,7 +1048,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleMobileKeyPress('arrow-left')}
                 disabled={quickKeysDisabled}
             >
-                <RiArrowLeftLine size={16} />
+                <Icon name="arrow-left"/>
                 <span className="sr-only">{t('terminalView.quickKeys.arrowLeftAria')}</span>
             </Button>
             <Button
@@ -982,7 +1059,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleMobileKeyPress('arrow-down')}
                 disabled={quickKeysDisabled}
             >
-                <RiArrowDownLine size={16} />
+                <Icon name="arrow-down"/>
                 <span className="sr-only">{t('terminalView.quickKeys.arrowDownAria')}</span>
             </Button>
             <Button
@@ -993,7 +1070,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleMobileKeyPress('arrow-right')}
                 disabled={quickKeysDisabled}
             >
-                <RiArrowRightLine size={16} />
+                <Icon name="arrow-right"/>
                 <span className="sr-only">{t('terminalView.quickKeys.arrowRightAria')}</span>
             </Button>
             <Button
@@ -1004,7 +1081,7 @@ export const TerminalView: React.FC = () => {
                 onClick={() => handleMobileKeyPress('enter')}
                 disabled={quickKeysDisabled}
             >
-                <RiArrowGoBackLine size={16} />
+                <Icon name="arrow-go-back"/>
                 <span className="sr-only">{t('terminalView.quickKeys.enterAria')}</span>
             </Button>
         </>
@@ -1012,73 +1089,82 @@ export const TerminalView: React.FC = () => {
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--surface-background)]">
-            <div className={cn('sticky top-0 z-20 shrink-0 bg-[var(--surface-background)] text-xs', isMobile ? 'px-4 py-1.5' : 'px-5 py-2')}>
+            <div className={cn('app-region-no-drag sticky top-0 z-20 shrink-0 bg-[var(--surface-background)] text-xs', isTouchTerminal ? 'px-3 py-1.5' : 'pl-3 pr-1.5 py-1')}>
                 {enableTabs && directoryTerminalState ? (
-                    <div className={cn('pl-1 pr-1 flex items-center gap-2', isMobile ? 'mt-1' : 'mt-2')}>
-                        <div className={cn('min-w-0 flex-1 overflow-x-auto', isMobile ? 'pb-0.5' : 'pb-1')}>
-                            <div className={cn('flex w-max items-center pr-1', isMobile ? 'gap-1' : 'gap-1')}>
-                                {directoryTerminalState.tabs.map((tab) => {
-                                    const isActive = tab.id === activeTabId;
-                                    return (
-                                        <div
-                                            key={tab.id}
-                                            className={cn(
-                                                'group flex items-center rounded-md border whitespace-nowrap',
-                                                isMobile ? 'h-8 gap-0.5 pl-2 pr-1.5 text-sm leading-none' : 'gap-1 pl-2 pr-1 py-1 text-xs',
-                                                isActive
-                                                    ? 'bg-[var(--interactive-selection)] border-[var(--primary-muted)] text-[var(--interactive-selection-foreground)]'
-                                                    : 'bg-transparent border-[var(--interactive-border)] text-[var(--surface-muted-foreground)] hover:bg-[var(--interactive-hover)] hover:text-[var(--surface-foreground)]'
-                                            )}
-                                        >
-                                            <button
-                                                type="button"
-                                                onClick={() => handleSelectTab(tab.id)}
-                                                className={cn(
-                                                    'truncate text-left',
-                                                    isMobile ? '!min-h-0 !min-w-0 max-w-[9.5rem]' : 'max-w-[10rem]'
-                                                )}
-                                                title={tab.label}
-                                            >
-                                                {tab.label}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className={cn(
-                                                    'flex items-center justify-center rounded-sm text-[var(--surface-muted-foreground)] hover:text-[var(--surface-foreground)]',
-                                                    isMobile ? '!min-h-0 !min-w-0 h-3.5 w-3.5 p-0 leading-none' : 'h-4 w-4 p-0 leading-none',
-                                                    !isMobile && !isActive && 'opacity-0 group-hover:opacity-100'
-                                                )}
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    handleCloseTab(tab.id);
-                                                }}
-                                                title={t('terminalView.tabs.closeTabTitle')}
-                                            >
-                                                {isMobile ? <span aria-hidden>×</span> : <RiCloseLine size={12} />}
-                                            </button>
-                                        </div>
-                                    );
-                                })}
-
-                                <button
-                                    type="button"
-                                    onClick={handleCreateTab}
-                                    className={cn(
-                                        'ml-1 flex items-center justify-center rounded-md border border-[var(--interactive-border)] bg-transparent text-[var(--surface-muted-foreground)] hover:bg-[var(--interactive-hover)] hover:text-[var(--surface-foreground)]',
-                                        isMobile ? '!min-h-0 !min-w-0 h-8 w-8' : 'h-6.5 w-6.5'
-                                    )}
-                                    title={t('terminalView.tabs.newTabTitle')}
-                                >
-                                    <RiAddLine size={isMobile ? 18 : 16} />
-                                </button>
-                            </div>
+                    <div className="flex items-center gap-2 pl-1 pr-1">
+                        <div className={cn('min-w-0 flex-1', isTouchTerminal ? 'h-8' : 'h-7')}>
+                            <SortableTabsStrip
+                                items={terminalTabItems}
+                                activeId={activeTabId}
+                                onSelect={handleSelectTab}
+                                onClose={handleCloseTab}
+                                layoutMode="scrollable"
+                                variant="default"
+                                className="h-full bg-transparent"
+                            />
                         </div>
 
-                        {!isMobile && showQuickKeys ? (
-                            <div className="flex shrink-0 items-center gap-1 overflow-x-auto pb-1">
-                                {quickKeysControls}
-                            </div>
-                        ) : null}
+                        <Button
+                            type="button"
+                            size="xs"
+                            variant="ghost"
+                            className={cn('shrink-0', isTouchTerminal ? 'h-8 w-8 p-0' : 'h-7 w-7 p-0')}
+                            onClick={handleCreateTab}
+                            title={t('terminalView.tabs.newTabTitle')}
+                        >
+                            <Icon name="add" className={`${isTouchTerminal ? 'h-[18px] w-[18px]' : 'h-4 w-4'}`}/>
+                        </Button>
+
+                        <div className="flex shrink-0 items-center gap-1 overflow-visible">
+                            {previewUrl ? (
+                                <Button
+                                    type="button"
+                                    size="xs"
+                                    variant="outline"
+                                    className="h-6 shrink-0 gap-1 px-2"
+                                    onClick={() => {
+                                        if (!effectiveDirectory) return;
+                                        openContextPreview(effectiveDirectory, previewUrl);
+                                    }}
+                                    title={t('terminalView.preview.openTitle')}
+                                >
+                                    <Icon name="global" className="h-3.5 w-3.5 shrink-0" />
+                                    <span className="whitespace-nowrap">{t('terminalView.preview.open')}</span>
+                                </Button>
+                            ) : null}
+                            {showBottomDockControls ? (
+                                <>
+                                    <Button
+                                        type="button"
+                                        size="xs"
+                                        variant="ghost"
+                                        onClick={() => setBottomTerminalExpanded(!isBottomTerminalExpanded)}
+                                        className={cn('shrink-0 p-0', isMobile ? 'h-8 w-8' : 'h-7 w-7')}
+                                        title={isBottomTerminalExpanded ? t('terminalView.bottomDock.restoreTitle') : t('terminalView.bottomDock.expandTitle')}
+                                        aria-label={isBottomTerminalExpanded ? t('terminalView.bottomDock.restoreAria') : t('terminalView.bottomDock.expandAria')}
+                                    >
+                                        {isBottomTerminalExpanded ? <Icon name="fullscreen-exit" className="h-4 w-4" /> : <Icon name="fullscreen" className="h-4 w-4" />}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        size="xs"
+                                        variant="ghost"
+                                        onClick={() => setBottomTerminalOpen(false)}
+                                        className={cn('shrink-0 p-0', isMobile ? 'h-8 w-8' : 'h-7 w-7')}
+                                        title={t('terminalView.bottomDock.closeTitle')}
+                                        aria-label={t('terminalView.bottomDock.closeAria')}
+                                    >
+                                        <Icon name="close" className="h-4 w-4" />
+                                    </Button>
+                                </>
+                            ) : null}
+                        </div>
+                    </div>
+                ) : null}
+
+                {!isMobile && showQuickKeys && enableTabs && directoryTerminalState ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-1 pl-1 pr-1">
+                        {quickKeysControls}
                     </div>
                 ) : null}
 
@@ -1093,22 +1179,23 @@ export const TerminalView: React.FC = () => {
                 className="relative flex-1 overflow-hidden"
                 style={{ backgroundColor: xtermTheme.background }}
             >
-                <div className="h-full w-full box-border pl-7 pr-5 pt-3 pb-4">
+                <div className="h-full w-full box-border pl-4 pr-1.5 pt-3 pb-4">
                     {shouldRenderViewport ? (
                         <TerminalViewport
-                            key={viewportSessionKey}
+                            key={terminalViewportKey}
                             ref={(controller) => {
                                 terminalControllerRef.current = controller;
                             }}
-                            sessionKey={viewportSessionKey}
+                            sessionKey={terminalViewportKey}
                             chunks={bufferChunks}
                             onInput={handleViewportInput}
                             onResize={handleViewportResize}
                             theme={xtermTheme}
                             fontFamily={resolvedFontStack}
                             fontSize={terminalFontSize}
-                            enableTouchScroll={hasTouchInput}
-                            autoFocus={isTerminalVisible}
+                            enableTouchScroll={useTouchTerminalInput}
+                            autoFocus={!useTouchTerminalInput && isTerminalVisible}
+                            isVisible={isTerminalVisible}
                         />
                     ) : null}
                 </div>

@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  RiBrainLine,
   RiChat3Line,
   RiDashboardLine,
   RiSettings3Line,
@@ -24,12 +23,6 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { id: 'dashboard', label: 'Dashboard', icon: RiDashboardLine },
       { id: 'chat', label: 'Chat + Code', icon: RiChat3Line },
       { id: 'tasks', label: 'Tasks', icon: RiTaskLine },
-    ],
-  },
-  {
-    title: 'Tools',
-    items: [
-      { id: 'memory', label: 'Memory', icon: RiBrainLine },
     ],
   },
   {

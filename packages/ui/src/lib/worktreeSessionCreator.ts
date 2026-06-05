@@ -12,6 +12,7 @@ import { useContextStore } from '@/stores/contextStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { checkIsGitRepository, previewGitWorktree } from '@/lib/gitApi';
 import { generateBranchName } from '@/lib/git/branchNameGenerator';
+import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { getWorktreeSetupCommands } from '@/lib/openchamberConfig';
 import {
@@ -87,12 +88,12 @@ const applyDefaultAgentAndModelSelection = (sessionId: string, configState = use
       return;
     }
 
-    const parts = settingsDefaultModel.split('/');
-    if (parts.length !== 2) {
+    const parsed = parseModelIdentifier(settingsDefaultModel);
+    if (!parsed) {
       return;
     }
 
-    const [providerId, modelId] = parts;
+    const { providerId, modelId } = parsed;
     const modelMetadata = configState.getModelMetadata(providerId, modelId);
     if (!modelMetadata) {
       return;
@@ -456,7 +457,7 @@ export async function createWorktreeSessionForNewBranch(
     ensureRemoteUrl?: string;
     createdFromBranch?: string;
   }
-): Promise<{ id: string; branch: string } | null> {
+): Promise<{ id: string; branch: string; path: string } | null> {
   if (isCreatingWorktreeSession) {
     return null;
   }
@@ -522,7 +523,7 @@ export async function createWorktreeSessionForNewBranch(
 
       initializeSessionForWorktree(session.id, createdMetadata);
 
-      return { id: session.id, branch: metadata.branch || base };
+      return { id: session.id, branch: metadata.branch || base, path: metadata.path };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create worktree session';
       toast.error('Failed to create worktree', { description: message });
@@ -551,7 +552,7 @@ export async function createWorktreeSessionForNewBranchExact(
     ensureRemoteUrl?: string;
     createdFromBranch?: string;
   }
-): Promise<{ id: string; branch: string } | null> {
+): Promise<{ id: string; branch: string; path: string } | null> {
   return createWorktreeSessionForNewBranch(projectDirectory, branchName, startPoint, {
     kind: options?.kind,
     worktreeName: options?.worktreeName,

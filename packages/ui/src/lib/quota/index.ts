@@ -3,6 +3,8 @@ export type { QuotaProviderMeta } from './providers';
 export {
   clampPercent,
   formatPercent,
+  formatQuotaValueLabel,
+  formatQuotaResetLabel,
   resolveUsageTone,
   formatWindowLabel,
   calculatePace,

@@ -36,30 +36,30 @@ export const createVSCodeFilesAPI = (): FilesAPI => ({
 
   async search(payload: FileSearchQuery): Promise<FileSearchResult[]> {
     const directory = normalizePath(payload.directory);
-    const params = new URLSearchParams();
-    if (directory) {
-      params.set('directory', directory);
-    }
-    params.set('query', payload.query);
-    params.set('dirs', 'false');
-    params.set('type', 'file');
-    if (typeof payload.maxResults === 'number' && Number.isFinite(payload.maxResults)) {
-      params.set('limit', String(payload.maxResults));
-    }
+    const data = await sendBridgeMessage<{
+      files?: Array<{ path?: string; relativePath?: string }>;
+    }>('api:fs:search', {
+      directory,
+      query: payload.query,
+      limit: payload.maxResults,
+      includeHidden: false,
+      respectGitignore: true,
+    });
 
-    const response = await fetch(`/api/find/file?${params.toString()}`);
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: response.statusText }));
-      throw new Error((error as { error?: string }).error || 'Failed to search files');
-    }
+    const files = Array.isArray(data?.files) ? data.files : [];
 
-    const result = (await response.json()) as string[];
-    const files = Array.isArray(result) ? result : [];
-
-    return files.map((relativePath) => ({
-      path: normalizePath(`${directory}/${relativePath}`),
-      preview: [normalizePath(relativePath)],
-    }));
+    return files.map((file) => {
+      const relativePath = typeof file.relativePath === 'string'
+        ? normalizePath(file.relativePath)
+        : normalizePath(file.path || '');
+      const absolutePath = typeof file.path === 'string'
+        ? normalizePath(file.path)
+        : normalizePath(`${directory}/${relativePath}`);
+      return {
+        path: absolutePath,
+        preview: [relativePath || absolutePath],
+      };
+    });
   },
 
   async createDirectory(path: string): Promise<{ success: boolean; path: string }> {
@@ -96,23 +96,13 @@ export const createVSCodeFilesAPI = (): FilesAPI => ({
     };
   },
 
-  async readFile(path: string, options?: { optional?: boolean }): Promise<{ content: string; path: string } | null> {
+  async readFile(path: string): Promise<{ content: string; path: string }> {
     const target = normalizePath(path);
-    try {
-      const data = await sendBridgeMessage<{ content: string; path: string }>('api:fs:read', { path: target });
-      return {
-        content: typeof data?.content === 'string' ? data.content : '',
-        path: typeof data?.path === 'string' ? normalizePath(data.path) : target,
-      };
-    } catch (error) {
-      // For optional reads we treat any failure (missing file, permission,
-      // bridge error) as "not present" so callers can probe without surfacing
-      // noisy errors. Non-optional reads keep the original throw semantics.
-      if (options?.optional) {
-        return null;
-      }
-      throw error;
-    }
+    const data = await sendBridgeMessage<{ content: string; path: string }>('api:fs:read', { path: target });
+    return {
+      content: typeof data?.content === 'string' ? data.content : '',
+      path: typeof data?.path === 'string' ? normalizePath(data.path) : target,
+    };
   },
 
   async writeFile(path: string, content: string): Promise<{ success: boolean; path: string }> {

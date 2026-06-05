@@ -32,7 +32,18 @@ export const createOpenCodeEnvRuntime = (deps) => {
       result[key] = value;
     }
 
-    return Object.keys(result).length > 0 ? result : null;
+    if (Object.keys(result).length === 0) {
+      return null;
+    }
+
+    if (process.platform === 'win32' && typeof result.PATH !== 'string') {
+      const pathEntry = Object.entries(result).find(([key]) => key.toLowerCase() === 'path');
+      if (pathEntry && typeof pathEntry[1] === 'string') {
+        result.PATH = pathEntry[1];
+      }
+    }
+
+    return result;
   };
 
   const isExecutable = (filePath) => {
@@ -51,13 +62,60 @@ export const createOpenCodeEnvRuntime = (deps) => {
     }
   };
 
+  const resolveWindowsExecutablePath = (candidate) => {
+    if (process.platform !== 'win32' || typeof candidate !== 'string' || candidate.trim().length === 0) {
+      return candidate;
+    }
+
+    const trimmed = candidate.trim();
+    const ext = path.extname(trimmed).toLowerCase();
+    if (ext) {
+      return isExecutable(trimmed) ? trimmed : null;
+    }
+
+    const pathExt = process.env.PATHEXT || process.env.PathExt || '.COM;.EXE;.BAT;.CMD';
+    for (const rawExt of pathExt.split(';')) {
+      const normalizedExt = rawExt.trim();
+      if (!normalizedExt) continue;
+      const withExt = `${trimmed}${normalizedExt.startsWith('.') ? normalizedExt : `.${normalizedExt}`}`;
+      if (isExecutable(withExt)) {
+        return withExt;
+      }
+    }
+
+    return isExecutable(trimmed) ? trimmed : null;
+  };
+
   const searchPathFor = (binaryName) => {
+    const trimmed = typeof binaryName === 'string' ? binaryName.trim() : '';
+    if (!trimmed) {
+      return null;
+    }
+
     const current = process.env.PATH || '';
     const parts = current.split(path.delimiter).filter(Boolean);
+    const candidateNames = [];
+
+    if (process.platform === 'win32' && !path.extname(trimmed)) {
+      const pathExt = process.env.PATHEXT || process.env.PathExt || '.COM;.EXE;.BAT;.CMD';
+      for (const ext of pathExt.split(';')) {
+        const normalizedExt = ext.trim();
+        if (!normalizedExt) continue;
+        const candidateName = `${trimmed}${normalizedExt.startsWith('.') ? normalizedExt : `.${normalizedExt}`}`;
+        if (!candidateNames.some((existing) => existing.toLowerCase() === candidateName.toLowerCase())) {
+          candidateNames.push(candidateName);
+        }
+      }
+    }
+
+    candidateNames.push(trimmed);
+
     for (const dir of parts) {
-      const candidate = path.join(dir, binaryName);
-      if (isExecutable(candidate)) {
-        return candidate;
+      for (const candidateName of candidateNames) {
+        const candidate = path.join(dir, candidateName);
+        if (isExecutable(candidate)) {
+          return candidate;
+        }
       }
     }
     return null;
@@ -75,8 +133,13 @@ export const createOpenCodeEnvRuntime = (deps) => {
   const getWindowsShellEnvSnapshot = () => {
     const parseResult = (stdout) => parseNullSeparatedEnvSnapshot(typeof stdout === 'string' ? stdout : '');
 
-    const psScript =
-      "Get-ChildItem Env: | ForEach-Object { [Console]::Out.Write($_.Name); [Console]::Out.Write('='); [Console]::Out.Write($_.Value); [Console]::Out.Write([char]0) }";
+    const psScript = [
+      '$entries = [ordered]@{}',
+      'Get-ChildItem Env: | ForEach-Object { $entries[$_.Name] = $_.Value }',
+      "$pathValues = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'), [Environment]::GetEnvironmentVariable('Path', 'Process')) | Where-Object { $_ }",
+      "if ($pathValues.Count -gt 0) { $entries['Path'] = ($pathValues -join ';') }",
+      "$entries.GetEnumerator() | ForEach-Object { [Console]::Out.Write($_.Name); [Console]::Out.Write('='); [Console]::Out.Write($_.Value); [Console]::Out.Write([char]0) }",
+    ].join('; ');
 
     const powershellCandidates = [
       'pwsh.exe',
@@ -628,6 +691,9 @@ export const createOpenCodeEnvRuntime = (deps) => {
     if (!trimmed) {
       return null;
     }
+    if (process.platform === 'win32') {
+      return resolveWindowsExecutablePath(trimmed);
+    }
     return isExecutable(trimmed) ? trimmed : null;
   };
 
@@ -648,10 +714,20 @@ export const createOpenCodeEnvRuntime = (deps) => {
       return null;
     }
 
+    const packageShim = path.join(nodeModulesDir, 'opencode-ai', 'bin', 'opencode.exe');
+    if (isExecutable(packageShim)) {
+      return packageShim;
+    }
+
     for (const packageName of getWindowsNativeOpencodePackageNames()) {
-      const candidate = path.join(nodeModulesDir, packageName, 'bin', 'opencode.exe');
-      if (isExecutable(candidate)) {
-        return candidate;
+      const candidates = [
+        path.join(nodeModulesDir, packageName, 'bin', 'opencode.exe'),
+        path.join(nodeModulesDir, 'opencode-ai', 'node_modules', packageName, 'bin', 'opencode.exe'),
+      ];
+      for (const candidate of candidates) {
+        if (isExecutable(candidate)) {
+          return candidate;
+        }
       }
     }
 
@@ -795,6 +871,15 @@ export const createOpenCodeEnvRuntime = (deps) => {
 
       const directBinary = normalizeExecutableCandidate(candidate);
       if (directBinary) {
+        const directExt = path.extname(directBinary).toLowerCase();
+        if (WINDOWS_BATCH_EXTENSIONS.has(directExt)) {
+          return {
+            binary: process.env.ComSpec || 'cmd.exe',
+            args: ['/d', '/s', '/c', 'call', directBinary],
+            wrapperType: 'cmd-wrapper',
+          };
+        }
+
         return {
           binary: directBinary,
           args: [],
@@ -854,6 +939,51 @@ export const createOpenCodeEnvRuntime = (deps) => {
     }
   };
 
+  const isMacOpenCodeAppBundlePath = (candidate) => {
+    if (process.platform !== 'darwin' || typeof candidate !== 'string') {
+      return false;
+    }
+    return /\/OpenCode\.app\/Contents\/MacOS\/(?:OpenCode|opencode-cli)$/i.test(candidate);
+  };
+
+  const createConfiguredOpencodeBinaryError = (raw, normalized) => {
+    const configured = typeof raw === 'string' ? raw.trim() : '';
+    const candidate = typeof normalized === 'string' && normalized.trim().length > 0 ? normalized.trim() : configured;
+    const messageSuffix = 'OpenChamber needs the standalone opencode CLI. Install it and set settings.opencodeBinary to the CLI path, for example ~/.opencode/bin/opencode, or leave the setting empty to use PATH lookup.';
+    const error = (() => {
+      if (isMacOpenCodeAppBundlePath(candidate) || isMacOpenCodeAppBundlePath(configured)) {
+        return new Error(`Configured OpenCode binary points at the macOS desktop app bundle, not the CLI: ${candidate}. ${messageSuffix}`);
+      }
+
+      try {
+        const configuredStat = fs.statSync(configured);
+        if (configuredStat.isDirectory()) {
+          return new Error(`Configured OpenCode binary directory does not contain an executable ${process.platform === 'win32' ? 'opencode.exe' : 'opencode'}: ${configured}. ${messageSuffix}`);
+        }
+      } catch {
+      }
+
+      try {
+        const stat = fs.statSync(candidate);
+        if (stat.isDirectory()) {
+          return new Error(`Configured OpenCode binary directory does not contain an executable ${process.platform === 'win32' ? 'opencode.exe' : 'opencode'}: ${candidate}. ${messageSuffix}`);
+        }
+        if (!stat.isFile()) {
+          return new Error(`Configured OpenCode binary is not a file: ${candidate}. ${messageSuffix}`);
+        }
+        return new Error(`Configured OpenCode binary is not executable: ${candidate}. ${messageSuffix}`);
+      } catch {
+        return new Error(`Configured OpenCode binary not found: ${candidate}. ${messageSuffix}`);
+      }
+    })();
+    error.code = 'OPENCODE_BINARY_INVALID';
+    return error;
+  };
+
+  const createConfiguredWslOpencodeError = (raw) => new Error(
+    `Configured settings.opencodeBinary uses WSL but OpenChamber could not resolve a WSL OpenCode command: ${raw}. Ensure WSL is available and opencode is installed in the configured distro.`
+  );
+
   const normalizeOpencodeBinarySetting = (raw) => {
     if (typeof raw !== 'string') {
       return null;
@@ -875,7 +1005,8 @@ export const createOpenCodeEnvRuntime = (deps) => {
     return trimmed;
   };
 
-  const applyOpencodeBinaryFromSettings = async () => {
+  const applyOpencodeBinaryFromSettings = async (options = {}) => {
+    const strict = options?.strict === true;
     try {
       const settings = await readSettingsFromDiskMigrated();
       if (!settings || typeof settings !== 'object') {
@@ -911,6 +1042,9 @@ export const createOpenCodeEnvRuntime = (deps) => {
         if (applied) {
           return applied;
         }
+        if (strict) {
+          throw createConfiguredWslOpencodeError(raw);
+        }
       }
 
       if (process.platform === 'win32' && (isWslExecutableValue(raw) || isWslExecutableValue(normalized || ''))) {
@@ -924,9 +1058,12 @@ export const createOpenCodeEnvRuntime = (deps) => {
         if (applied) {
           return applied;
         }
+        if (strict) {
+          throw createConfiguredWslOpencodeError(raw);
+        }
       }
 
-      if (normalized && isExecutable(normalized)) {
+      if (normalized && isExecutable(normalized) && !isMacOpenCodeAppBundlePath(normalized)) {
         clearWslOpencodeResolution();
         process.env.OPENCODE_BINARY = normalized;
         prependToPath(path.dirname(normalized));
@@ -937,9 +1074,15 @@ export const createOpenCodeEnvRuntime = (deps) => {
       }
 
       if (raw) {
+        if (strict) {
+          throw createConfiguredOpencodeBinaryError(raw, normalized);
+        }
         console.warn(`Configured settings.opencodeBinary is not executable: ${raw}`);
       }
-    } catch {
+    } catch (error) {
+      if (strict) {
+        throw error;
+      }
     }
 
     return null;

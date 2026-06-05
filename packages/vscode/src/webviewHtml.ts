@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as os from 'os';
 import { getThemeKindName } from './theme';
 import type { ConnectionStatus } from './opencode';
 
@@ -14,6 +15,7 @@ export interface WebviewHtmlOptions {
   initialSessionId?: string;
   viewMode?: 'sidebar' | 'editor';
   devServerUrl?: string | null;
+  extensionVersion?: string;
 }
 
 const asCspToken = (value: string | null | undefined): string | null => {
@@ -50,6 +52,7 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
     initialSessionId,
     viewMode = 'sidebar',
     devServerUrl,
+    extensionVersion = '',
   } = options;
 
   const scriptPath = vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'assets', 'index.js');
@@ -104,6 +107,17 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
       opacity: 0;
       pointer-events: none;
     }
+    /* Glow pulse on the OpenCode mark on the cube's top face — signals loading without text. */
+    @keyframes oc-logo-glow {
+      0%, 100% { filter: drop-shadow(0 0 0 transparent); }
+      50% { filter: drop-shadow(0 0 4px var(--vscode-foreground)); }
+    }
+    #initial-loading .logo-inner {
+      animation: oc-logo-glow 1.8s ease-in-out infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #initial-loading .logo-inner { animation: none; }
+    }
     /* Logo colors use VS Code foreground color */
     #initial-loading .logo-stroke {
       stroke: var(--vscode-foreground);
@@ -150,9 +164,8 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
         <path class="logo-fill-dim" d="M-8 -4 L8 -4 L8 12 L-8 12 Z"/>
       </g>
     </svg>
-    <div class="status-text" id="loading-status">
-      ${initialStatus === 'connecting' ? 'Starting OpenCode API…' : initialStatus === 'connected' ? 'Initializing…' : 'Connecting…'}
-    </div>
+    <!-- Status text stays empty while things are fine; populated only on error. -->
+    <div class="status-text" id="loading-status"></div>
     ${!cliAvailable ? `<div class="error-text">OpenCode CLI not found. Please install it first.</div>` : ''}
   </div>
   
@@ -166,6 +179,9 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
       theme: "${themeKind}",
       connectionStatus: "${initialStatus}",
       cliAvailable: ${cliAvailable},
+      extensionVersion: "${extensionVersion.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}",
+      platform: "${os.platform()}",
+      arch: "${os.arch()}",
       panelType: "${panelType}",
       viewMode: "${viewMode}",
       initialSessionId: ${initialSessionId ? `"${initialSessionId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : 'null'},
@@ -178,17 +194,13 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
       if (msg && msg.type === 'connectionStatus') {
         var statusEl = document.getElementById('loading-status');
         if (statusEl) {
-          if (msg.status === 'connecting') {
-            statusEl.textContent = 'Starting OpenCode API…';
-            statusEl.classList.remove('error-text');
-          } else if (msg.status === 'connected') {
-            statusEl.textContent = 'Connected!';
-            statusEl.classList.remove('error-text');
-          } else if (msg.status === 'error') {
+          // Only show text when something is wrong — progress states stay silent
+          // (the animated logo already signals "working").
+          if (msg.status === 'error') {
             statusEl.textContent = msg.error || 'Connection error';
             statusEl.classList.add('error-text');
           } else {
-            statusEl.textContent = 'Reconnecting…';
+            statusEl.textContent = '';
             statusEl.classList.remove('error-text');
           }
         }

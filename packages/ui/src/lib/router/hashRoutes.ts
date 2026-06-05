@@ -28,7 +28,6 @@ export interface HashRouteState {
 
 const VIEW_TO_PATH: Record<AppActiveView, string> = {
   dashboard: '/',
-  memory: '/memory',
   tasks: '/tasks',
   chat: '/chat',
   settings: '/settings',
@@ -39,7 +38,7 @@ const PATH_TO_VIEW: Record<string, AppActiveView> = {
   '/dashboard': 'dashboard',
   '/projects': 'dashboard',
   '/persona': 'settings',
-  '/memory': 'memory',
+  '/memory': 'settings',
   '/tasks': 'tasks',
   '/schedule': 'tasks',
   '/chat': 'chat',

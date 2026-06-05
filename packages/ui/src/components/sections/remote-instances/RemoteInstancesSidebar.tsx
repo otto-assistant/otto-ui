@@ -1,11 +1,11 @@
 import React from 'react';
-import { RiAddLine, RiDeleteBinLine, RiPlug2Line, RiRefreshLine, RiStopLine } from '@remixicon/react';
 import { Button } from '@/components/ui/button';
 import { SettingsSidebarLayout } from '@/components/sections/shared/SettingsSidebarLayout';
 import { SettingsSidebarItem } from '@/components/sections/shared/SettingsSidebarItem';
 import { useDesktopSshStore } from '@/stores/useDesktopSshStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { toast } from '@/components/ui';
+import { Icon } from "@/components/icon/Icon";
 import type { DesktopSshInstance } from '@/lib/desktopSsh';
 import { useI18n } from '@/lib/i18n';
 
@@ -19,6 +19,8 @@ const makeId = (): string => {
   }
   return `ssh-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
+
+const DIRECT_INSTANCES_ID = '__direct_instances__';
 
 const randomPort = (): number => {
   return Math.floor(20000 + Math.random() * 30000);
@@ -76,6 +78,9 @@ export const RemoteInstancesSidebar: React.FC<RemoteInstancesSidebarProps> = ({ 
 
   React.useEffect(() => {
     if (isLoading) return;
+    if (selectedId === DIRECT_INSTANCES_ID) {
+      return;
+    }
     if (instances.length === 0) {
       if (selectedId !== null) {
         setSelectedId(null);
@@ -130,7 +135,7 @@ export const RemoteInstancesSidebar: React.FC<RemoteInstancesSidebarProps> = ({ 
   }, [connect, t, upsertInstance]);
 
   return (
-    <SettingsSidebarLayout
+      <SettingsSidebarLayout
       variant="background"
       header={
         <div className="border-b px-3 pt-4 pb-3">
@@ -145,12 +150,22 @@ export const RemoteInstancesSidebar: React.FC<RemoteInstancesSidebarProps> = ({ 
               onClick={() => void handleAdd()}
               aria-label={t('settings.remoteInstances.sidebar.actions.addSshInstance')}
             >
-              <RiAddLine className="size-4" />
+              <Icon name="add" className="size-4" />
             </Button>
           </div>
         </div>
       }
     >
+      <SettingsSidebarItem
+        title={t('settings.remoteInstances.direct.sidebarTitle')}
+        metadata={t('settings.remoteInstances.direct.sidebarDescription')}
+        selected={selectedId === DIRECT_INSTANCES_ID || (!selectedId && instances.length === 0)}
+        onSelect={() => {
+          setSelectedId(DIRECT_INSTANCES_ID);
+          onItemSelect?.();
+        }}
+        icon={<Icon name="global" className="h-4 w-4 text-muted-foreground" />}
+      />
       {instances.map((instance) => {
         const status = statusesById[instance.id];
         const selected = instance.id === selectedId;
@@ -172,7 +187,7 @@ export const RemoteInstancesSidebar: React.FC<RemoteInstancesSidebarProps> = ({ 
             actions={[
               {
                 label: isReady ? t('settings.remoteInstances.sidebar.actions.disconnect') : t('settings.remoteInstances.sidebar.actions.connect'),
-                icon: isReady ? RiStopLine : RiPlug2Line,
+                icon: isReady ? 'stop' : 'plug-2',
                 onClick: () => {
                   const op = isReady ? disconnect(instance.id) : connectWithPortRecovery(instance);
                   void op.catch((error) => {
@@ -189,7 +204,7 @@ export const RemoteInstancesSidebar: React.FC<RemoteInstancesSidebarProps> = ({ 
               },
               {
                 label: t('settings.remoteInstances.sidebar.actions.retry'),
-                icon: RiRefreshLine,
+                icon: "refresh",
                 onClick: () => {
                   if (!canRetry) return;
                   void retry(instance.id).catch((error) => {
@@ -201,7 +216,7 @@ export const RemoteInstancesSidebar: React.FC<RemoteInstancesSidebarProps> = ({ 
               },
               {
                 label: t('settings.remoteInstances.sidebar.actions.remove'),
-                icon: RiDeleteBinLine,
+                icon: "delete-bin",
                 destructive: true,
                 onClick: () => {
                   void removeInstance(instance.id).then(() => {

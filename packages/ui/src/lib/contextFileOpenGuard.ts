@@ -1,5 +1,6 @@
 import type { FilesAPI } from '@/lib/api/types';
 import { MAX_OPEN_FILE_LINES, countLinesWithLimit } from '@/lib/fileOpenLimits';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 export type ContextFileOpenFailureReason = 'too-large' | 'missing' | 'unreadable';
 
@@ -26,17 +27,15 @@ const classifyReadError = (error: unknown): ContextFileOpenFailureReason => {
 
 const readFileContent = async (files: FilesAPI, path: string): Promise<string> => {
   if (files.readFile) {
-    const result = await files.readFile(path);
-    if (!result) {
-      // readFile returns null only for optional probes that miss; treat the
-      // file as missing so the caller surfaces a "missing" reason rather than
-      // dereferencing undefined.
-      throw new Error('File not found');
-    }
+    const result = await files.readFile(path, { allowOutsideWorkspace: true, optional: true });
     return result.content ?? '';
   }
 
-  const response = await fetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
+  const params = new URLSearchParams({ path, allowOutsideWorkspace: 'true', optional: 'true' });
+  const response = await runtimeFetch(`/api/fs/read?${params.toString()}`, {
+    // Avoid conditional requests (304 + empty body).
+    cache: 'no-store',
+  });
   if (!response.ok) {
     const errorPayload = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error((errorPayload as { error?: string }).error || 'Failed to read file');

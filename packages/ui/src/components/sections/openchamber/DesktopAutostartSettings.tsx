@@ -2,12 +2,12 @@ import * as React from 'react';
 
 import { Checkbox } from '@/components/ui/checkbox';
 import { getDesktopAutostartEnabled, setDesktopAutostartEnabled } from '@/lib/desktopNative';
-import { isDesktopShell, isTauriShell } from '@/lib/desktop';
+import { isDesktopShell } from '@/lib/desktop';
 import { useI18n } from '@/lib/i18n';
 
 export const DesktopAutostartSettings: React.FC = () => {
   const { t } = useI18n();
-  const visible = React.useMemo(() => isDesktopShell() && isTauriShell(), []);
+  const visible = React.useMemo(() => isDesktopShell(), []);
   const [value, setValue] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(true);
   const [isSaving, setIsSaving] = React.useState(false);

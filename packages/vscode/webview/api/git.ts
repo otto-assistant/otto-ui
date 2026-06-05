@@ -29,11 +29,16 @@ import type {
   GitLogResponse,
   GitLogOptions,
   GitCommitFilesResponse,
+  CommitFileDiffResponse,
   GitIdentitySummary,
   GitIdentityProfile,
   GitRemote,
   GitRebaseResult,
   GitMergeResult,
+  CheckoutCommitResponse,
+  CherryPickResponse,
+  RevertCommitResponse,
+  ResetToCommitResponse,
 } from '@openchamber/ui/lib/api/types';
 
 export const createVSCodeGitAPI = (): GitAPI => ({
@@ -41,8 +46,8 @@ export const createVSCodeGitAPI = (): GitAPI => ({
     return sendBridgeMessage<boolean>('api:git/check', { directory });
   },
 
-  getGitStatus: async (directory: string): Promise<GitStatus> => {
-    return sendBridgeMessage<GitStatus>('api:git/status', { directory });
+  getGitStatus: async (directory: string, options?: { mode?: 'light' }): Promise<GitStatus> => {
+    return sendBridgeMessage<GitStatus>('api:git/status', { directory, mode: options?.mode });
   },
 
   getGitDiff: async (directory: string, options: GetGitDiffOptions): Promise<GitDiffResponse> => {
@@ -62,8 +67,24 @@ export const createVSCodeGitAPI = (): GitAPI => ({
     });
   },
 
-  revertGitFile: async (directory: string, filePath: string): Promise<void> => {
-    await sendBridgeMessage('api:git/revert', { directory, path: filePath });
+  revertGitFile: async (directory: string, filePath: string, options?: { scope?: 'all' | 'working' }): Promise<void> => {
+    await sendBridgeMessage('api:git/revert', { directory, path: filePath, scope: options?.scope });
+  },
+
+  stageGitFile: async (directory: string, filePath: string): Promise<void> => {
+    await sendBridgeMessage('api:git/stage', { directory, path: filePath });
+  },
+
+  stageGitFiles: async (directory: string, filePaths: string[]): Promise<void> => {
+    await sendBridgeMessage('api:git/stage', { directory, paths: filePaths });
+  },
+
+  unstageGitFile: async (directory: string, filePath: string): Promise<void> => {
+    await sendBridgeMessage('api:git/unstage', { directory, path: filePath });
+  },
+
+  unstageGitFiles: async (directory: string, filePaths: string[]): Promise<void> => {
+    await sendBridgeMessage('api:git/unstage', { directory, paths: filePaths });
   },
 
   isLinkedWorktree: async (directory: string): Promise<boolean> => {
@@ -181,6 +202,7 @@ export const createVSCodeGitAPI = (): GitAPI => ({
       message,
       addAll: options?.addAll,
       files: options?.files,
+      stageFiles: options?.stageFiles,
     });
   },
 
@@ -193,11 +215,12 @@ export const createVSCodeGitAPI = (): GitAPI => ({
     });
   },
 
-  gitPull: async (directory: string, options?: { remote?: string; branch?: string }): Promise<GitPullResult> => {
+  gitPull: async (directory: string, options?: { remote?: string; branch?: string; rebase?: boolean }): Promise<GitPullResult> => {
     return sendBridgeMessage<GitPullResult>('api:git/pull', {
       directory,
       remote: options?.remote,
       branch: options?.branch,
+      rebase: options?.rebase,
     });
   },
 
@@ -208,6 +231,13 @@ export const createVSCodeGitAPI = (): GitAPI => ({
       branch: options?.branch,
     });
   },
+
+  listGitStashes: async (directory: string) => sendBridgeMessage('api:git/stashes', { directory }),
+  countGitStashFiles: async (directory: string, refs: string[]) => sendBridgeMessage('api:git/stashes/file-counts', { directory, refs }),
+  stashGitChanges: async (directory: string, options?: { message?: string }) => sendBridgeMessage('api:git/stash', { directory, message: options?.message }),
+  applyGitStash: async (directory: string, options: { ref: string }) => sendBridgeMessage('api:git/stash/apply', { directory, ref: options.ref }),
+  popGitStash: async (directory: string, options: { ref: string }) => sendBridgeMessage('api:git/stash/pop', { directory, ref: options.ref }),
+  dropGitStash: async (directory: string, options: { ref: string }) => sendBridgeMessage('api:git/stash/drop', { directory, ref: options.ref }),
 
   checkoutBranch: async (directory: string, branch: string): Promise<{ success: boolean; branch: string }> => {
     return sendBridgeMessage<{ success: boolean; branch: string }>('api:git/checkout', {
@@ -241,6 +271,7 @@ export const createVSCodeGitAPI = (): GitAPI => ({
       from: options?.from,
       to: options?.to,
       file: options?.file,
+      all: options?.all,
     });
   },
 
@@ -248,6 +279,15 @@ export const createVSCodeGitAPI = (): GitAPI => ({
     return sendBridgeMessage<GitCommitFilesResponse>('api:git/commit-files', {
       directory,
       hash,
+    });
+  },
+
+  getCommitFileDiff: async (directory: string, hash: string, filePath: string, isBinary: boolean): Promise<CommitFileDiffResponse> => {
+    return sendBridgeMessage<CommitFileDiffResponse>('api:git/commit-file-diff', {
+      directory,
+      hash,
+      path: filePath,
+      binary: isBinary,
     });
   },
 
@@ -318,6 +358,22 @@ export const createVSCodeGitAPI = (): GitAPI => ({
 
   continueMerge: async (directory: string): Promise<{ success: boolean; conflict: boolean; conflictFiles?: string[] }> => {
     return sendBridgeMessage<{ success: boolean; conflict: boolean; conflictFiles?: string[] }>('api:git/merge/continue', { directory });
+  },
+
+  checkoutCommit: async (directory: string, hash: string): Promise<CheckoutCommitResponse> => {
+    return sendBridgeMessage<CheckoutCommitResponse>('api:git/checkout-commit', { directory, hash });
+  },
+
+  cherryPick: async (directory: string, hash: string): Promise<CherryPickResponse> => {
+    return sendBridgeMessage<CherryPickResponse>('api:git/cherry-pick', { directory, hash });
+  },
+
+  revertCommit: async (directory: string, hash: string): Promise<RevertCommitResponse> => {
+    return sendBridgeMessage<RevertCommitResponse>('api:git/revert-commit', { directory, hash });
+  },
+
+  resetToCommit: async (directory: string, hash: string, mode: 'soft' | 'mixed' | 'hard', force?: boolean): Promise<ResetToCommitResponse> => {
+    return sendBridgeMessage<ResetToCommitResponse>('api:git/reset-to-commit', { directory, hash, mode, force });
   },
 
   stash: async (

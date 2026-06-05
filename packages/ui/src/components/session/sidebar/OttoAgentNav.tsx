@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  RiBrainLine,
   RiChat3Line,
   RiDashboardLine,
   RiSettings3Line,
@@ -20,7 +19,6 @@ type NavItem = {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: RiDashboardLine },
-  { id: 'memory', label: 'Memory', icon: RiBrainLine },
   { id: 'tasks', label: 'Tasks', icon: RiTaskLine },
   { id: 'chat', label: 'Chat+Code', icon: RiChat3Line },
   { id: 'settings', label: 'Settings', icon: RiSettings3Line },
@@ -31,8 +29,10 @@ const PREFETCH_MAP: Partial<Record<AppActiveView, () => void>> = {
   tasks: () => {
     import('@/stores/useTasksStore').then(m => m.useTasksStore.getState().fetchTasks());
   },
-  memory: () => { import('@/stores/useMemoryStore').then(m => m.useMemoryStore.getState().fetchGraph()); },
-  settings: () => { import('@/stores/useOttoSettingsStore').then(m => m.useOttoSettingsStore.getState().fetchStatus()); },
+  settings: () => {
+    import('@/stores/useOttoSettingsStore').then(m => m.useOttoSettingsStore.getState().fetchStatus());
+    import('@/stores/useMemoryStore').then(m => m.useMemoryStore.getState().fetchGraph());
+  },
 };
 
 type Props = {

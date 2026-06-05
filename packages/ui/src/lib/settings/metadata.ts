@@ -7,17 +7,21 @@ export type SettingsPageSlug =
   | 'providers'
   | 'usage'
   | 'agents'
+  | 'behavior'
   | 'commands'
   | 'mcp'
+  | 'plugins'
   | 'skills.installed'
   | 'skills.catalog'
   | 'git'
   | 'integrations'
+  | 'memory'
   | 'appearance'
   | 'chat'
   | 'shortcuts'
   | 'sessions'
   | 'magic-prompts'
+  | 'snippets'
   | 'notifications'
   | 'voice'
   | 'tunnel';
@@ -79,9 +83,9 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     slug: 'remote-instances',
     title: 'Remote Instances',
     group: 'projects',
-    kind: 'split',
+    kind: 'single',
     keywords: ['ssh', 'remote', 'instances', 'tunnels', 'forwarding', 'connection'],
-    isAvailable: (ctx) => ctx.isDesktop && !ctx.isWeb && !ctx.isVSCode,
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     slug: 'providers',
@@ -105,6 +109,13 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     keywords: ['agent', 'agents', 'prompts', 'tools', 'permissions'],
   },
   {
+    slug: 'behavior',
+    title: 'Behavior',
+    group: 'opencode',
+    kind: 'single',
+    keywords: ['behavior', 'agents.md', 'system prompt', 'global rules', 'instructions', 'override'],
+  },
+  {
     slug: 'commands',
     title: 'Commands',
     group: 'opencode',
@@ -117,6 +128,13 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'opencode',
     kind: 'split',
     keywords: ['mcp', 'model context protocol', 'servers', 'tools', 'remote', 'stdio'],
+  },
+  {
+    slug: 'plugins',
+    title: 'Plugins',
+    group: 'opencode',
+    kind: 'split',
+    keywords: ['plugin', 'plugins', 'extensions', 'addons', 'npm', 'opencode-wakatime'],
   },
   {
     slug: 'skills.installed',
@@ -148,11 +166,18 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     keywords: ['integrations', 'discord', 'telegram', 'messenger', 'sync', 'relay', 'connection'],
   },
   {
+    slug: 'memory',
+    title: 'Memory',
+    group: 'general',
+    kind: 'single',
+    keywords: ['memory', 'mempalace', 'mem palace', 'memory palace', 'knowledge', 'recall', 'notes', 'graph'],
+  },
+  {
     slug: 'appearance',
     title: 'Appearance',
     group: 'appearance',
     kind: 'single',
-    keywords: ['theme', 'font', 'spacing', 'padding', 'corner radius', 'radius', 'input bar', 'terminal', 'pwa', 'install name', 'app shortcuts'],
+    keywords: ['theme', 'font', 'spacing', 'padding', 'corner radius', 'radius', 'input bar', 'keyboard', 'viewport', 'mobile', 'terminal', 'pwa', 'install name', 'app shortcuts'],
   },
   {
     slug: 'chat',
@@ -183,6 +208,13 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     kind: 'split',
     keywords: ['prompts', 'templates', 'git', 'github', 'review', 'commit', 'pull request'],
     isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
+    slug: 'snippets',
+    title: 'Snippets',
+    group: 'general',
+    kind: 'split',
+    keywords: ['prompt', 'templates', 'multi-run', 'strategy', 'approach'],
   },
 
   { slug: 'notifications', title: 'Notifications', group: 'general', kind: 'single', keywords: ['alerts', 'native', 'summary', 'summarization'], },

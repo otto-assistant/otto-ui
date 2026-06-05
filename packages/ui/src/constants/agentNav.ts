@@ -1,13 +1,11 @@
 export type AppActiveView =
   | 'dashboard'
-  | 'memory'
   | 'tasks'
   | 'chat'
   | 'settings';
 
 const APP_ACTIVE_VIEW_SET = new Set<AppActiveView>([
   'dashboard',
-  'memory',
   'tasks',
   'chat',
   'settings',

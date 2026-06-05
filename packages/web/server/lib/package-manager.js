@@ -29,7 +29,7 @@ function getOpenChamberConfigDir() {
 }
 
 function sanitizeInstallScope(scope) {
-  if (scope === 'desktop-tauri' || scope === 'vscode' || scope === 'web') return scope;
+  if (scope === 'desktop-electron' || scope === 'vscode' || scope === 'web') return scope;
   return 'web';
 }
 
@@ -65,7 +65,7 @@ function mapArch(value) {
 }
 
 function normalizeAppType(value) {
-  if (value === 'web' || value === 'desktop-tauri' || value === 'vscode') return value;
+  if (value === 'web' || value === 'desktop-electron' || value === 'vscode') return value;
   return 'web';
 }
 
@@ -655,14 +655,33 @@ export async function getLatestVersion() {
 /**
  * Compare semver-like version strings.
  */
+function parseVersionForComparison(value) {
+  const normalized = String(value || '').replace(/^v/, '').split('+')[0];
+  const prereleaseIndex = normalized.indexOf('-');
+  const core = prereleaseIndex >= 0 ? normalized.slice(0, prereleaseIndex) : normalized;
+  const parts = core.split('.').map((part) => {
+    const parsed = Number.parseInt(part || '0', 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+  });
+
+  return {
+    parts,
+    prerelease: prereleaseIndex >= 0,
+  };
+}
+
 function compareVersions(left, right) {
-  const a = String(left || '').replace(/^v/, '').split('.').map((part) => Number.parseInt(part || '0', 10));
-  const b = String(right || '').replace(/^v/, '').split('.').map((part) => Number.parseInt(part || '0', 10));
-  const length = Math.max(a.length, b.length);
+  const a = parseVersionForComparison(left);
+  const b = parseVersionForComparison(right);
+  const length = Math.max(a.parts.length, b.parts.length);
 
   for (let index = 0; index < length; index += 1) {
-    const diff = (a[index] || 0) - (b[index] || 0);
+    const diff = (a.parts[index] || 0) - (b.parts[index] || 0);
     if (diff !== 0) return diff;
+  }
+
+  if (a.prerelease !== b.prerelease) {
+    return a.prerelease ? -1 : 1;
   }
 
   return 0;
@@ -701,10 +720,17 @@ export async function fetchChangelogNotes(fromVersion, toVersion) {
 export async function checkForUpdates(options = {}) {
   const currentVersion = options.currentVersion || getCurrentVersion();
   const pm = detectPackageManager();
+  const appType = normalizeAppType(options.appType);
 
   if (currentVersion !== 'unknown') {
     const remote = await checkForUpdatesFromApi(currentVersion, options);
     if (remote) {
+      if (remote.available && appType === 'web') {
+        const npmLatest = await getLatestVersion();
+        if (!npmLatest || compareVersions(npmLatest, remote.version) < 0) {
+          remote.available = false;
+        }
+      }
       return {
         ...remote,
         packageManager: pm,

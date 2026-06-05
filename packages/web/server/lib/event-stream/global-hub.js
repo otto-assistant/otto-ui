@@ -1,6 +1,8 @@
 import { createUpstreamSseReader } from './upstream-reader.js';
 
-export const MESSAGE_STREAM_GLOBAL_REPLAY_LIMIT = 512;
+// Raised from 512 → 2048 to improve recovery after brief disconnects during
+// long-running agent sessions where many events accumulate quickly.
+export const MESSAGE_STREAM_GLOBAL_REPLAY_LIMIT = 2048;
 
 export function createGlobalMessageStreamHub({
   buildOpenCodeUrl,
@@ -20,9 +22,22 @@ export function createGlobalMessageStreamHub({
   let everConnected = false;
   let buildUrlFailed = false;
 
+  const notifySubscriber = (kind, subscriber, payload) => {
+    try {
+      const result = subscriber(payload);
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => {
+          console.warn(`Global message stream ${kind} subscriber failed:`, error);
+        });
+      }
+    } catch (error) {
+      console.warn(`Global message stream ${kind} subscriber failed:`, error);
+    }
+  };
+
   const notifyStatus = (status) => {
     for (const subscriber of Array.from(statusSubscribers)) {
-      subscriber(status);
+      notifySubscriber('status', subscriber, status);
     }
   };
 
@@ -79,7 +94,7 @@ export function createGlobalMessageStreamHub({
         }
 
         for (const subscriber of Array.from(eventSubscribers)) {
-          subscriber(normalized);
+          notifySubscriber('event', subscriber, normalized);
         }
       },
       onError(error) {

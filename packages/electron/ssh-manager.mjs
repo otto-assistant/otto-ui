@@ -17,6 +17,7 @@ const MONITOR_INITIAL_POLL_MS = 2000;
 const MONITOR_STEADY_POLL_MS = 10000;
 const MONITOR_STABILIZE_TICKS = 5;
 const SSH_STATUS_EVENT = 'openchamber:ssh-instance-status';
+const WINDOWS_HIDDEN_SPAWN_OPTIONS = process.platform === 'win32' ? { windowsHide: true } : {};
 
 const nowMillis = () => Date.now();
 
@@ -221,6 +222,7 @@ const runOutput = async (command, args, options = {}) => {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...WINDOWS_HIDDEN_SPAWN_OPTIONS,
       ...options,
     });
 
@@ -579,16 +581,20 @@ export class ElectronSshManager {
 
   async setInstances(config) {
     const root = readJsonRoot(this.settingsFilePath);
+    const previousSshIds = new Set(
+      (Array.isArray(root.desktopSshInstances) ? root.desktopSshInstances : [])
+        .map((entry) => String(entry?.id || '').trim())
+        .filter((id) => id && id !== LOCAL_HOST_ID)
+    );
     const instances = Array.isArray(config?.instances) ? config.instances.map((instance) => this.sanitizeInstance(instance)) : [];
     root.desktopSshInstances = instances;
 
-    const previousIds = new Set((Array.isArray(root.desktopHosts) ? root.desktopHosts : []).map((entry) => String(entry?.id || '').trim()).filter(Boolean));
     const hosts = Array.isArray(root.desktopHosts) ? root.desktopHosts.filter(Boolean) : [];
     const nextIds = new Set(instances.map((instance) => instance.id));
 
     const filteredHosts = hosts.filter((entry) => {
       const id = String(entry?.id || '').trim();
-      return id && !(previousIds.has(id) && !nextIds.has(id));
+      return id && id !== LOCAL_HOST_ID && !(previousSshIds.has(id) && !nextIds.has(id));
     });
 
     for (const instance of instances) {
@@ -605,7 +611,7 @@ export class ElectronSshManager {
     }
 
     root.desktopHosts = filteredHosts;
-    if (typeof root.desktopDefaultHostId === 'string' && previousIds.has(root.desktopDefaultHostId) && !nextIds.has(root.desktopDefaultHostId)) {
+    if (typeof root.desktopDefaultHostId === 'string' && previousSshIds.has(root.desktopDefaultHostId) && !nextIds.has(root.desktopDefaultHostId)) {
       root.desktopDefaultHostId = LOCAL_HOST_ID;
     }
 
@@ -757,6 +763,7 @@ export class ElectronSshManager {
       '-N',
     ]), {
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...WINDOWS_HIDDEN_SPAWN_OPTIONS,
       env: {
         ...process.env,
         SSH_ASKPASS_REQUIRE: 'force',
@@ -891,7 +898,7 @@ export class ElectronSshManager {
     if (secret) {
       envPrefix += ` OPENCHAMBER_UI_PASSWORD=${shellQuote(secret)}`;
     }
-    const output = await runRemoteCommand(parsed, controlPath, `${envPrefix} openchamber serve --daemon --hostname 127.0.0.1 --port ${desiredPort}`);
+    const output = await runRemoteCommand(parsed, controlPath, `${envPrefix} openchamber serve --hostname 127.0.0.1 --port ${desiredPort}`);
     const port = output.split(/\s+/).map((token) => Number.parseInt(token, 10)).find((value) => Number.isFinite(value));
     return port || desiredPort;
   }
@@ -915,6 +922,7 @@ export class ElectronSshManager {
       '-L', `${bindHost}:${localPort}:127.0.0.1:${remotePort}`,
     ]), {
       stdio: ['ignore', 'ignore', 'pipe'],
+      ...WINDOWS_HIDDEN_SPAWN_OPTIONS,
     });
   }
 

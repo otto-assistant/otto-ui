@@ -10,6 +10,11 @@ import { randomBytes } from 'crypto';
 import { normalizeWindowsDriveLetter } from './pathUtils';
 
 const READY_CHECK_TIMEOUT_MS = 30000;
+const WINDOWS_EXECUTABLE_EXTENSIONS = (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
+  .split(';')
+  .map((ext) => ext.trim().toLowerCase())
+  .filter(Boolean)
+  .map((ext) => (ext.startsWith('.') ? ext : `.${ext}`));
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 export type OpenCodeDebugInfo = {
@@ -139,15 +144,18 @@ function findExecutableInPath(binaryName: string): string | null {
     return null;
   }
 
+  const extensions = process.platform === 'win32' ? WINDOWS_EXECUTABLE_EXTENSIONS : [''];
   for (const segment of current.split(path.delimiter)) {
     const dir = segment.trim();
     if (!dir) {
       continue;
     }
 
-    const candidate = path.join(dir, trimmed);
-    if (isExecutable(candidate)) {
-      return candidate;
+    for (const ext of extensions) {
+      const candidate = path.join(dir, process.platform === 'win32' ? `${trimmed}${ext}` : trimmed);
+      if (isExecutable(candidate)) {
+        return candidate;
+      }
     }
   }
 
@@ -156,28 +164,105 @@ function findExecutableInPath(binaryName: string): string | null {
 
 let cachedDetectedOpencodeCliPath: string | undefined;
 
+function normalizeConfiguredOpencodeBinary(raw: unknown): string | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const stat = fs.statSync(trimmed);
+    if (stat.isDirectory()) {
+      return path.join(trimmed, process.platform === 'win32' ? 'opencode.exe' : 'opencode');
+    }
+  } catch {
+    // Keep the explicit path so strict startup validation can report it.
+  }
+  return trimmed;
+}
+
+function isMacOpenCodeAppBundlePath(candidate: string): boolean {
+  return process.platform === 'darwin' && /\/OpenCode\.app\/Contents\/MacOS\/(?:OpenCode|opencode-cli)$/i.test(candidate);
+}
+
+function createConfiguredOpencodeBinaryError(raw: string, normalized: string): Error {
+  const messageSuffix = 'OpenChamber needs the standalone opencode CLI. Install it and set openchamber.opencodeBinary to the CLI path, for example ~/.opencode/bin/opencode, or leave the setting empty to use PATH lookup.';
+  if (isMacOpenCodeAppBundlePath(raw) || isMacOpenCodeAppBundlePath(normalized)) {
+    return new Error(`Configured OpenCode binary points at the macOS desktop app bundle, not the CLI: ${normalized}. ${messageSuffix}`);
+  }
+
+  try {
+    const rawStat = fs.statSync(raw);
+    if (rawStat.isDirectory()) {
+      return new Error(`Configured OpenCode binary directory does not contain an executable ${process.platform === 'win32' ? 'opencode.exe' : 'opencode'}: ${raw}. ${messageSuffix}`);
+    }
+  } catch {
+    // The normalized path check below produces the missing-path error.
+  }
+
+  try {
+    const stat = fs.statSync(normalized);
+    if (!stat.isFile()) {
+      return new Error(`Configured OpenCode binary is not a file: ${normalized}. ${messageSuffix}`);
+    }
+    return new Error(`Configured OpenCode binary is not executable: ${normalized}. ${messageSuffix}`);
+  } catch {
+    return new Error(`Configured OpenCode binary not found: ${normalized}. ${messageSuffix}`);
+  }
+}
+
+function validateConfiguredOpencodeBinaryForManagedStart(): string | null {
+  const candidates: string[] = [];
+  try {
+    const config = vscode.workspace.getConfiguration('openchamber');
+    const raw = config.get<string>('opencodeBinary') || '';
+    if (raw.trim()) {
+      candidates.push(raw.trim());
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const settings = readOpenChamberSettings();
+    const raw = typeof settings.opencodeBinary === 'string' ? settings.opencodeBinary.trim() : '';
+    if (raw) {
+      candidates.push(raw);
+    }
+  } catch {
+    // ignore
+  }
+
+  const raw = candidates[0];
+  if (!raw) {
+    return null;
+  }
+
+  const normalized = normalizeConfiguredOpencodeBinary(raw);
+  if (!normalized) {
+    return null;
+  }
+
+  if (isExecutable(normalized) && !isMacOpenCodeAppBundlePath(normalized)) {
+    return normalized;
+  }
+
+  throw createConfiguredOpencodeBinaryError(raw, normalized);
+}
+
 function resolveOpencodeCliPath(): string | null {
   const configured = (() => {
     try {
       const config = vscode.workspace.getConfiguration('openchamber');
-      const raw = config.get<string>('opencodeBinary') || '';
-      const trimmed = raw.trim();
-      if (!trimmed) return null;
-      try {
-        const stat = fs.statSync(trimmed);
-        if (stat.isDirectory()) {
-          return path.join(trimmed, process.platform === 'win32' ? 'opencode.exe' : 'opencode');
-        }
-      } catch {
-        // ignore
-      }
-      return trimmed;
+      return normalizeConfiguredOpencodeBinary(config.get<string>('opencodeBinary') || '');
     } catch {
       return null;
     }
   })();
 
-  if (configured && isExecutable(configured)) {
+  if (configured && isExecutable(configured) && !isMacOpenCodeAppBundlePath(configured)) {
     return configured;
   }
 
@@ -188,14 +273,13 @@ function resolveOpencodeCliPath(): string | null {
       if (typeof candidate !== 'string') {
         return null;
       }
-      const trimmed = candidate.trim();
-      return trimmed.length > 0 ? trimmed : null;
+      return normalizeConfiguredOpencodeBinary(candidate);
     } catch {
       return null;
     }
   })();
 
-  if (sharedFromOpenChamber && isExecutable(sharedFromOpenChamber)) {
+  if (sharedFromOpenChamber && isExecutable(sharedFromOpenChamber) && !isMacOpenCodeAppBundlePath(sharedFromOpenChamber)) {
     return sharedFromOpenChamber;
   }
 
@@ -233,14 +317,18 @@ function resolveOpencodeCliPath(): string | null {
 
   const winFallbacks = (() => {
     const userProfile = process.env.USERPROFILE || home;
-    const appData = process.env.APPDATA || '';
+    const appData = process.env.APPDATA || path.join(userProfile, 'AppData', 'Roaming');
     const localAppData = process.env.LOCALAPPDATA || '';
     const programData = process.env.ProgramData || 'C:\\ProgramData';
+    const npmDir = path.join(appData, 'npm');
 
     return [
       path.join(userProfile, '.opencode', 'bin', 'opencode.exe'),
       path.join(userProfile, '.opencode', 'bin', 'opencode.cmd'),
-      path.join(appData, 'npm', 'opencode.cmd'),
+      path.join(npmDir, 'node_modules', 'opencode-ai', 'bin', 'opencode.exe'),
+      path.join(npmDir, 'opencode.exe'),
+      path.join(npmDir, 'opencode.cmd'),
+      path.join(npmDir, 'opencode.bat'),
       path.join(userProfile, 'scoop', 'shims', 'opencode.cmd'),
       path.join(programData, 'chocolatey', 'bin', 'opencode.exe'),
       path.join(programData, 'chocolatey', 'bin', 'opencode.cmd'),
@@ -269,6 +357,12 @@ function resolveOpencodeCliPath(): string | null {
   }
 
   if (process.platform === 'win32') {
+    const fromPath = findExecutableInPath('opencode');
+    if (fromPath) {
+      cachedDetectedOpencodeCliPath = fromPath;
+      return fromPath;
+    }
+
     try {
       const result = spawnSync('where', ['opencode'], {
         encoding: 'utf8',
@@ -559,7 +653,10 @@ async function spawnManagedOpenCodeServer(
 
     const onExit = (code: number | null) => {
       cleanup();
-      reject(new Error(`OpenCode exited with code ${code}. Output: ${output}`));
+      const appBundleHint = isMacOpenCodeAppBundlePath(binary)
+        ? ' The configured binary appears to point at the macOS desktop app bundle; OpenChamber needs the standalone opencode CLI.'
+        : '';
+      reject(new Error(`OpenCode process exited before serving with code ${code}. Binary used: ${binary}.${appBundleHint} Output: ${output}`));
     };
 
     const onError = (error: Error) => {
@@ -767,8 +864,15 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
     try {
       applyLoginShellEnvSnapshot();
 
+      const configuredCli = validateConfiguredOpencodeBinaryForManagedStart();
+      if (configuredCli) {
+        cliPath = configuredCli;
+        appendToPath(path.dirname(configuredCli));
+        process.env.OPENCODE_BINARY = configuredCli;
+      }
+
       // Best-effort: locate CLI even when VS Code PATH is stale.
-      const resolvedCli = resolveOpencodeCliPath();
+      const resolvedCli = configuredCli || resolveOpencodeCliPath();
       if (resolvedCli) {
         cliPath = resolvedCli;
         appendToPath(path.dirname(resolvedCli));
@@ -962,16 +1066,17 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
     getApiUrl,
     getOpenCodeAuthHeaders,
     getWorkingDirectory: () => workingDirectory,
-    isCliAvailable: () => !cliMissing,
+    isCliAvailable: () => !cliMissing || Boolean(cliPath || resolveOpencodeCliPath()),
     getDebugInfo: () => {
       const secureConnection = Boolean(getOpenCodeAuthHeaders().Authorization);
+      const detectedCliPath = cliPath || resolveOpencodeCliPath();
       return {
         mode: useConfiguredUrl && configuredApiUrl ? 'external' : 'managed',
         status,
         lastError,
         workingDirectory,
-        cliAvailable: !cliMissing,
-        cliPath,
+        cliAvailable: !cliMissing || Boolean(detectedCliPath),
+        cliPath: detectedCliPath,
         configuredApiUrl: useConfiguredUrl && configuredApiUrl ? configuredApiUrl.replace(/\/+$/, '') : null,
         configuredPort,
         detectedPort,

@@ -11,19 +11,15 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { toast } from '@/components/ui';
-import {
-  RiGithubLine,
-  RiLoader4Line,
-  RiSearchLine,
-  RiExternalLinkLine,
-} from '@remixicon/react';
+import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
-import type { GitHubPullRequestContextResult, GitHubPullRequestSummary, GitHubPullRequestsListResult } from '@/lib/api/types';
+import { useDeviceInfo } from '@/lib/device';
+import type { GitHubPullRequestContextResult, GitHubPullRequestSummary, GitHubPullRequestsListResult, GitHubRepoSelector } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
 
 const parsePrNumber = (value: string): number | null => {
@@ -75,6 +71,8 @@ export function GitHubPrPickerDialog({
   const setSettingsDialogOpen = useUIStore((state) => state.setSettingsDialogOpen);
   const setSettingsPage = useUIStore((state) => state.setSettingsPage);
   const isMobile = useUIStore((state) => state.isMobile);
+  const { isTablet } = useDeviceInfo();
+  const alwaysShowActions = isMobile || isTablet;
   const activeProject = useProjectsStore((state) => state.getActiveProject());
 
   const projectDirectory = activeProject?.path ?? null;
@@ -195,7 +193,7 @@ export function GitHubPrPickerDialog({
 
   const directNumber = React.useMemo(() => parsePrNumber(query), [query]);
 
-  const attachPr = React.useCallback(async (prNumber: number) => {
+  const attachPr = React.useCallback(async (prNumber: number, sourceRepo?: GitHubRepoSelector | null) => {
     if (!projectDirectory) {
       toast.error(t('session.githubPrPicker.error.noActiveProject'));
       return;
@@ -211,6 +209,7 @@ export function GitHubPrPickerDialog({
       const context = await github.prContext(projectDirectory, prNumber, {
         includeDiff,
         includeCheckDetails: false,
+        sourceRepo,
       });
 
       if (context.connected === false) {
@@ -265,7 +264,7 @@ export function GitHubPrPickerDialog({
     <>
       <div className="mt-2 flex items-center gap-3">
         <div className="relative flex-1 min-w-0">
-          <RiSearchLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder={t('session.githubPrPicker.searchPlaceholder')}
             value={query}
@@ -302,7 +301,7 @@ export function GitHubPrPickerDialog({
 
           {isLoading ? (
             <div className="text-center text-muted-foreground py-8 flex items-center justify-center gap-2">
-              <RiLoader4Line className="h-4 w-4 animate-spin" />
+              <Icon name="loader-4" className="h-4 w-4 animate-spin" />
               {t('session.githubPrPicker.loading.pullRequests')}
             </div>
           ) : null}
@@ -336,7 +335,7 @@ export function GitHubPrPickerDialog({
               </p>
               <div className="flex-shrink-0 h-5 flex items-center mr-2">
                 {loadingPrNumber === directNumber ? (
-                  <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <Icon name="loader-4" className="h-4 w-4 animate-spin text-muted-foreground" />
                 ) : null}
               </div>
             </div>
@@ -348,34 +347,42 @@ export function GitHubPrPickerDialog({
 
           {filtered.map((pr) => (
             <div
-              key={pr.number}
+              key={`${pr.sourceRepo?.owner ?? ''}-${pr.sourceRepo?.repo ?? ''}-${pr.number}`}
               className={cn(
                 'group flex items-center gap-2 py-1.5 hover:bg-interactive-hover/30 rounded transition-colors cursor-pointer',
                 loadingPrNumber === pr.number && 'bg-interactive-selection/30'
               )}
-              onClick={() => void attachPr(pr.number)}
+              onClick={() => void attachPr(pr.number, pr.sourceRepo)}
             >
               <div className="flex-1 min-w-0 ml-0.5">
                 <p className="typography-small text-foreground truncate">
                   <span className="text-muted-foreground mr-1">#{pr.number}</span>
                   {pr.title}
                 </p>
+                {pr.sourceRepo?.source === 'upstream' ? (
+                  <span className="typography-micro px-1 py-0.5 rounded bg-status-info/10 text-status-info">
+                    {pr.sourceRepo.owner}/{pr.sourceRepo.repo}
+                  </span>
+                ) : null}
                 <p className="typography-meta text-muted-foreground truncate">{pr.head} → {pr.base}</p>
               </div>
 
               <div className="flex-shrink-0 h-5 flex items-center mr-2">
                 {loadingPrNumber === pr.number ? (
-                  <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <Icon name="loader-4" className="h-4 w-4 animate-spin text-muted-foreground" />
                 ) : (
                   <a
                     href={pr.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="hidden group-hover:flex h-5 w-5 items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn(
+                      "h-5 w-5 items-center justify-center text-muted-foreground hover:text-foreground transition-colors",
+                      alwaysShowActions ? "flex" : "hidden group-hover:flex"
+                    )}
                     onClick={(e) => e.stopPropagation()}
                     aria-label={t('session.githubPrPicker.actions.openInGitHubAria')}
                   >
-                    <RiExternalLinkLine className="h-4 w-4" />
+                    <Icon name="external-link" className="h-4 w-4" />
                   </a>
                 )}
               </div>
@@ -395,7 +402,7 @@ export function GitHubPrPickerDialog({
               >
                 {isLoadingMore ? (
                   <span className="inline-flex items-center gap-2">
-                    <RiLoader4Line className="h-4 w-4 animate-spin" />
+                    <Icon name="loader-4" className="h-4 w-4 animate-spin" />
                     {t('session.githubPrPicker.loading.more')}
                   </span>
                 ) : (
@@ -434,7 +441,7 @@ export function GitHubPrPickerDialog({
       <DialogContent className="max-w-2xl max-h-[70vh] flex flex-col">
         <DialogHeader className="flex-shrink-0">
           <DialogTitle className="flex items-center gap-2">
-            <RiGithubLine className="h-5 w-5" />
+            <Icon name="github" className="h-5 w-5" />
             {title}
           </DialogTitle>
           <DialogDescription>

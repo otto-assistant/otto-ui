@@ -1,4 +1,5 @@
 import type { WorktreeMetadata } from '@/types/worktree';
+import type { DraftStarterRef } from '@/lib/draftStarters';
 
 export type RuntimePlatform = 'web' | 'desktop' | 'vscode';
 
@@ -118,11 +119,19 @@ export interface GitRebaseInProgress {
   onto: string;
 }
 
+export interface GitRemoteComparison {
+  remote: string;
+  branch: string;
+  ahead: number;
+  behind: number;
+}
+
 export interface GitStatus {
   current: string;
   tracking: string | null;
   ahead: number;
   behind: number;
+  upstreamComparison?: GitRemoteComparison | null;
   files: GitStatusFile[];
   isClean: boolean;
   diffStats?: Record<string, { insertions: number; deletions: number }>;
@@ -213,6 +222,19 @@ export interface GitPullResult {
   deletions: number;
 }
 
+export interface GitPullOptions {
+  remote?: string;
+  branch?: string;
+  rebase?: boolean;
+}
+
+export interface GitStashEntry {
+  ref: string;
+  message: string;
+  relativeTime: string;
+  hash: string;
+}
+
 export interface GitRemote {
   name: string;
   fetchUrl: string;
@@ -223,6 +245,37 @@ export interface GitMergeResult {
   success: boolean;
   conflict?: boolean;
   conflictFiles?: string[];
+}
+
+export interface CheckoutCommitResponse {
+  success: boolean;
+}
+
+export interface CherryPickRequest {
+  hash: string;
+}
+export interface CherryPickResponse {
+  success: boolean;
+  conflict?: boolean;
+  conflictFiles?: string[];
+}
+
+export interface RevertCommitRequest {
+  hash: string;
+}
+export interface RevertCommitResponse {
+  success: boolean;
+  conflict?: boolean;
+  conflictFiles?: string[];
+}
+
+export interface ResetToCommitRequest {
+  hash: string;
+  mode: 'soft' | 'mixed' | 'hard';
+  force?: boolean;
+}
+export interface ResetToCommitResponse {
+  success: boolean;
 }
 
 export interface GitRebaseResult {
@@ -280,6 +333,7 @@ export interface GitLogEntry {
   filesChanged: number;
   insertions: number;
   deletions: number;
+  parents: string[];
 }
 
 export interface GitLogResponse {
@@ -298,6 +352,12 @@ export interface CommitFileEntry {
 
 export interface GitCommitFilesResponse {
   files: CommitFileEntry[];
+}
+
+export interface CommitFileDiffResponse {
+  original: string;
+  modified: string;
+  isBinary: boolean;
 }
 
 export interface GitWorktreeInfo {
@@ -379,6 +439,7 @@ export interface GitRemoveRemotePayload {
 export interface CreateGitCommitOptions {
   addAll?: boolean;
   files?: string[];
+  stageFiles?: string[];
 }
 
 export interface GitLogOptions {
@@ -386,6 +447,7 @@ export interface GitLogOptions {
   from?: string;
   to?: string;
   file?: string;
+  all?: boolean;
 }
 
 export interface GeneratedCommitMessage {
@@ -412,7 +474,11 @@ export interface GitAPI {
   getGitStatus(directory: string, options?: { mode?: 'light' }): Promise<GitStatus>;
   getGitDiff(directory: string, options: GetGitDiffOptions): Promise<GitDiffResponse>;
   getGitFileDiff(directory: string, options: GetGitFileDiffOptions): Promise<GitFileDiffResponse>;
-  revertGitFile(directory: string, filePath: string): Promise<void>;
+  revertGitFile(directory: string, filePath: string, options?: { scope?: 'all' | 'working' }): Promise<void>;
+  stageGitFile(directory: string, filePath: string): Promise<void>;
+  stageGitFiles?(directory: string, filePaths: string[]): Promise<void>;
+  unstageGitFile(directory: string, filePath: string): Promise<void>;
+  unstageGitFiles?(directory: string, filePaths: string[]): Promise<void>;
   isLinkedWorktree(directory: string): Promise<boolean>;
   getGitBranches(directory: string): Promise<GitBranch>;
   deleteGitBranch(directory: string, payload: GitDeleteBranchPayload): Promise<{ success: boolean }>;
@@ -431,13 +497,20 @@ export interface GitAPI {
   deleteGitWorktree?(directory: string, payload: RemoveGitWorktreePayload): Promise<{ success: boolean }>;
   createGitCommit(directory: string, message: string, options?: CreateGitCommitOptions): Promise<GitCommitResult>;
   gitPush(directory: string, options?: { remote?: string; branch?: string; options?: string[] | Record<string, unknown> }): Promise<GitPushResult>;
-  gitPull(directory: string, options?: { remote?: string; branch?: string }): Promise<GitPullResult>;
+  gitPull(directory: string, options?: GitPullOptions): Promise<GitPullResult>;
   gitFetch(directory: string, options?: { remote?: string; branch?: string }): Promise<{ success: boolean }>;
+  listGitStashes(directory: string): Promise<{ stashes: GitStashEntry[] }>;
+  countGitStashFiles(directory: string, refs: string[]): Promise<{ counts: Record<string, number> }>;
+  stashGitChanges(directory: string, options?: { message?: string }): Promise<{ success: boolean; created: boolean; message: string; output: string }>;
+  applyGitStash(directory: string, options: { ref: string }): Promise<{ success: boolean; ref: string }>;
+  popGitStash(directory: string, options: { ref: string }): Promise<{ success: boolean; ref: string }>;
+  dropGitStash(directory: string, options: { ref: string }): Promise<{ success: boolean; ref: string }>;
   checkoutBranch(directory: string, branch: string): Promise<{ success: boolean; branch: string }>;
   createBranch(directory: string, name: string, startPoint?: string): Promise<{ success: boolean; branch: string }>;
   renameBranch(directory: string, oldName: string, newName: string): Promise<{ success: boolean; branch: string }>;
   getGitLog(directory: string, options?: GitLogOptions): Promise<GitLogResponse>;
   getCommitFiles(directory: string, hash: string): Promise<GitCommitFilesResponse>;
+  getCommitFileDiff?(directory: string, hash: string, filePath: string, isBinary: boolean): Promise<CommitFileDiffResponse>;
   getCurrentGitIdentity(directory: string): Promise<GitIdentitySummary | null>;
   hasLocalIdentity?(directory: string): Promise<boolean>;
   setGitIdentity(directory: string, profileId: string): Promise<{ success: boolean; profile: GitIdentityProfile }>;
@@ -455,6 +528,10 @@ export interface GitAPI {
   merge(directory: string, options: { branch: string }): Promise<GitMergeResult>;
   abortMerge(directory: string): Promise<{ success: boolean }>;
   continueMerge(directory: string): Promise<{ success: boolean; conflict: boolean; conflictFiles?: string[] }>;
+  checkoutCommit(directory: string, hash: string): Promise<CheckoutCommitResponse>;
+  cherryPick(directory: string, hash: string): Promise<CherryPickResponse>;
+  revertCommit(directory: string, hash: string): Promise<RevertCommitResponse>;
+  resetToCommit(directory: string, hash: string, mode: 'soft' | 'mixed' | 'hard', force?: boolean): Promise<ResetToCommitResponse>;
   stash(directory: string, options?: { message?: string; includeUntracked?: boolean }): Promise<{ success: boolean }>;
   stashPop(directory: string): Promise<{ success: boolean }>;
   getConflictDetails(directory: string): Promise<MergeConflictDetails>;
@@ -519,13 +596,18 @@ export interface ListDirectoryOptions {
   respectGitignore?: boolean;
 }
 
+export interface FileReadOptions {
+  allowOutsideWorkspace?: boolean;
+  optional?: boolean;
+}
+
 export interface FilesAPI {
   listDirectory(path: string, options?: ListDirectoryOptions): Promise<DirectoryListResult>;
   search(payload: FileSearchQuery): Promise<FileSearchResult[]>;
   createDirectory(path: string): Promise<{ success: boolean; path: string }>;
-  statFile?(path: string): Promise<{ path: string; isFile: boolean; size: number; mtimeMs?: number }>;
-  readFile?(path: string, options?: { optional?: boolean }): Promise<{ content: string; path: string } | null>;
-  readFileBinary?(path: string): Promise<{ dataUrl: string; path: string }>;
+  statFile?(path: string, options?: FileReadOptions): Promise<{ path: string; isFile: boolean; size: number; mtimeMs?: number }>;
+  readFile?(path: string, options?: FileReadOptions): Promise<{ content: string; path: string }>;
+  readFileBinary?(path: string, options?: FileReadOptions): Promise<{ dataUrl: string; path: string }>;
   writeFile?(path: string, content: string): Promise<{ success: boolean; path: string }>;
   delete?(path: string): Promise<{ success: boolean }>;
   rename?(oldPath: string, newPath: string): Promise<{ success: boolean; path: string }>;
@@ -566,6 +648,7 @@ export interface SettingsPayload {
   securityScopedBookmarks?: string[];
   pinnedDirectories?: string[];
   showReasoningTraces?: boolean;
+  collapsibleThinkingBlocks?: boolean;
   showDeletionDialog?: boolean;
   nativeNotificationsEnabled?: boolean;
   notificationMode?: 'always' | 'hidden-only';
@@ -575,7 +658,10 @@ export interface SettingsPayload {
   queueModeEnabled?: boolean;
   gitmojiEnabled?: boolean;
   inputSpellcheckEnabled?: boolean;
+  showOpenCodeUpdateNotifications?: boolean;
+  openCodeUpdateToastDismissedVersion?: string;
   showToolFileIcons?: boolean;
+  showTurnChangedFiles?: boolean;
   showExpandedBashTools?: boolean;
   showExpandedEditTools?: boolean;
   chatRenderMode?: 'sorted' | 'live';
@@ -590,6 +676,7 @@ export interface SettingsPayload {
   padding?: number;
   cornerRadius?: number;
   inputBarOffset?: number;
+  shortcutOverrides?: Record<string, string>;
   diffLayoutPreference?: 'dynamic' | 'inline' | 'side-by-side';
   diffViewMode?: 'single' | 'stacked';
   gitChangesViewMode?: 'flat' | 'tree';
@@ -599,6 +686,8 @@ export interface SettingsPayload {
   gitProviderId?: string;
   gitModelId?: string;
   pwaAppName?: string;
+  mobileKeyboardMode?: 'native' | 'resize-content';
+  draftStarters?: DraftStarterRef[];
 
   [key: string]: unknown;
 }
@@ -641,6 +730,10 @@ export interface NotificationPayload {
   body?: string;
 
   tag?: string;
+  kind?: string;
+  sessionId?: string;
+  directory?: string;
+  requireHidden?: boolean;
 }
 
 export interface NotificationsAPI {
@@ -671,6 +764,9 @@ export interface VSCodeAPI {
   executeCommand(command: string, ...args: unknown[]): Promise<unknown>;
   openAgentManager(): Promise<void>;
   openExternalUrl(url: string): Promise<void>;
+  pickFiles?(): Promise<unknown>;
+  saveImage?(payload: unknown): Promise<unknown>;
+  saveMarkdown?(payload: unknown): Promise<unknown>;
 }
 
 export interface PushSubscribePayload {
@@ -785,6 +881,7 @@ export type GitHubPullRequestSummary = GitHubPullRequest & {
   updatedAt?: string;
   headLabel?: string;
   headRepo?: GitHubPullRequestHeadRepo | null;
+  sourceRepo?: (GitHubRepoSelector & { source: string }) | null;
 };
 
 export type GitHubPullRequestFile = {
@@ -850,6 +947,8 @@ export type GitHubPullRequestCreateInput = {
   remote?: string;
   /** Remote where the head branch lives (source repo, e.g., 'origin' for forks) */
   headRemote?: string;
+  /** Explicit target repo (alternative to remote, for auto-detected upstream) */
+  targetRepo?: { owner: string; repo: string };
 };
 
 export type GitHubPullRequestUpdateInput = {
@@ -884,6 +983,11 @@ export type GitHubIssueLabel = {
   color?: string;
 };
 
+export type GitHubRepoSelector = {
+  owner: string;
+  repo: string;
+};
+
 export type GitHubIssueSummary = {
   number: number;
   title: string;
@@ -891,6 +995,7 @@ export type GitHubIssueSummary = {
   state: 'open' | 'closed';
   author?: GitHubUserSummary | null;
   labels?: GitHubIssueLabel[];
+  sourceRepo?: (GitHubRepoSelector & { source: string }) | null;
 };
 
 export type GitHubIssue = GitHubIssueSummary & {
@@ -915,6 +1020,12 @@ export type GitHubIssuesListResult = {
   issues?: GitHubIssueSummary[];
   page?: number;
   hasMore?: boolean;
+};
+
+export type GitHubRepoUpstreamResult = {
+  connected: boolean;
+  isFork: boolean;
+  upstream: { owner: string; repo: string; url: string; defaultBranch: string; defaultBranchSha: string | null; remoteName: string | null } | null;
 };
 
 export type GitHubIssueGetResult = {
@@ -965,7 +1076,7 @@ export interface GitHubAPI {
   authActivate(accountId: string): Promise<GitHubAuthStatus>;
   me?(): Promise<GitHubUserSummary>;
 
-  prStatus(directory: string, branch: string, remote?: string): Promise<GitHubPullRequestStatus>;
+  prStatus(directory: string, branch: string, remote?: string, options?: { force?: boolean }): Promise<GitHubPullRequestStatus>;
   prCreate(payload: GitHubPullRequestCreateInput): Promise<GitHubPullRequest>;
   prUpdate(payload: GitHubPullRequestUpdateInput): Promise<GitHubPullRequest>;
   prMerge(payload: GitHubPullRequestMergeInput): Promise<GitHubPullRequestMergeResult>;
@@ -975,12 +1086,45 @@ export interface GitHubAPI {
   prContext(
     directory: string,
     number: number,
-    options?: { includeDiff?: boolean; includeCheckDetails?: boolean }
+    options?: { includeDiff?: boolean; includeCheckDetails?: boolean; sourceRepo?: GitHubRepoSelector | null }
   ): Promise<GitHubPullRequestContextResult>;
 
   issuesList(directory: string, options?: { page?: number }): Promise<GitHubIssuesListResult>;
-  issueGet(directory: string, number: number): Promise<GitHubIssueGetResult>;
-  issueComments(directory: string, number: number): Promise<GitHubIssueCommentsResult>;
+  issueGet(directory: string, number: number, options?: { sourceRepo?: GitHubRepoSelector | null }): Promise<GitHubIssueGetResult>;
+  issueComments(directory: string, number: number, options?: { sourceRepo?: GitHubRepoSelector | null }): Promise<GitHubIssueCommentsResult>;
+  repoUpstream(directory: string): Promise<GitHubRepoUpstreamResult>;
+  repoBranches(owner: string, repo: string): Promise<string[]>;
+}
+
+export interface RemoteClientRecord {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  expiresAt?: string | null;
+  clientKind?: string | null;
+}
+
+export interface RemoteClientCreateResult {
+  client: RemoteClientRecord;
+  token: string;
+}
+
+export interface RemoteClientRevokeResult {
+  revoked: boolean;
+  client?: RemoteClientRecord;
+}
+
+export interface RemoteClientPurgeRevokedResult {
+  purged: number;
+}
+
+export interface ClientAuthAPI {
+  listClients(): Promise<RemoteClientRecord[]>;
+  createClient(input?: { label?: string }): Promise<RemoteClientCreateResult>;
+  purgeRevokedClients(): Promise<RemoteClientPurgeRevokedResult>;
+  revokeClient(id: string): Promise<RemoteClientRevokeResult>;
 }
 
 export interface RuntimeAPIs {
@@ -994,6 +1138,7 @@ export interface RuntimeAPIs {
   github?: GitHubAPI;
   push?: PushAPI;
   diagnostics?: DiagnosticsAPI;
+  clientAuth?: ClientAuthAPI;
   tools: ToolsAPI;
   editor?: EditorAPI;
   vscode?: VSCodeAPI;
