@@ -33,6 +33,11 @@ These provider IDs are currently dispatchable via `fetchQuotaForProvider(provide
 | `wafer` | Wafer.ai | `providers/wafer.js` | `wafer`, `wafer-ai`, `wafer_ai`, `wafer.ai` |
 | `opencode-go` | OpenCode Go | `providers/opencode-go.js` | `opencode-go`, `opencode`, `opencode-zen` |
 
+### OpenCode Go notes
+
+- Usage windows (`5h`, `weekly`, `monthly`) come from `GET https://opencode.ai/zen/go/v1/usage` (Bearer key from `auth.json`). Dollar labels are derived from the documented limits ($12 / $30 / $60).
+- Per-model spend (`usage.models`) is read from the local OpenCode SQLite database (`~/.local/share/opencode/opencode.db`, `message` table) by `providers/opencode-go-usage-db.js`, aggregating assistant-message `cost`/`tokens` by `modelID` for the OpenCode provider aliases. The OpenCode Go API does not expose per-model usage, so this is sourced locally and is display-only (omitted if the DB is unavailable). The reader uses `bun:sqlite` under Bun and `better-sqlite3` under Node.
+
 ## Internal-only provider module
 - `providers/openai.js` exists for logic parity/reuse but is intentionally not registered for dispatcher ID routing.
 

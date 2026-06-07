@@ -7,6 +7,7 @@ import {
   toNumber,
   formatMoney
 } from '../utils/index.js';
+import { readOpenCodeModelUsage } from './opencode-go-usage-db.js';
 
 export const providerId = 'opencode-go';
 export const providerName = 'OpenCode Go';
@@ -114,12 +115,18 @@ export const fetchQuota = async () => {
       windows['monthly'] = monthly;
     }
 
+    const usage = { windows };
+    const models = await readOpenCodeModelUsage(aliases);
+    if (models) {
+      usage.models = models;
+    }
+
     return buildResult({
       providerId,
       providerName,
       ok: true,
       configured: true,
-      usage: { windows }
+      usage
     });
   } catch (error) {
     return buildResult({
