@@ -62,17 +62,29 @@ export class MessengerBridgeStore {
       CREATE INDEX IF NOT EXISTS idx_messenger_session_session
         ON messenger_session_bindings (session_id);
     `);
-    // Per-surface preferences (model + agent override) so /model and /agent
-    // commands can scope a choice to a channel/topic without touching the
-    // global OpenChamber settings. ALTER TABLE is run as separate statements
-    // and ignored when the column already exists.
-    for (const col of ['model_override TEXT', 'agent_override TEXT']) {
+    // Per-surface preferences (model + agent override + verbosity) so /model,
+    // /agent and /verbosity commands can scope a choice to a channel/topic
+    // without touching the global OpenChamber settings. ALTER TABLE is run as
+    // separate statements and ignored when the column already exists.
+    for (const col of ['model_override TEXT', 'agent_override TEXT', 'verbosity_override TEXT']) {
       try {
         this.db.run(`ALTER TABLE messenger_session_bindings ADD COLUMN ${col}`);
       } catch {
         // ignore — column already exists
       }
     }
+    // Global bridge settings (key/value). Holds the per-messenger verbosity
+    // default (key `verbosity:discord` / `verbosity:telegram`) that the
+    // OpenChamber UI writes and the `/verbosity` chat command can override
+    // per-surface. Both surfaces read it at render time so the UI and Discord
+    // stay in sync without a listener restart.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS messenger_bridge_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
     // Per-project defaults. Resolution order at prompt time:
     //   surface override (channel/thread)  >  parent-channel fallback  >
     //   project default  >  OpenCode default.
@@ -87,6 +99,44 @@ export class MessengerBridgeStore {
         updated_at TEXT NOT NULL
       );
     `);
+  }
+
+  /** Raw key/value read from the global bridge settings table. */
+  getSetting(key) {
+    if (!key) return null;
+    const row = this.db
+      .prepare(`SELECT value FROM messenger_bridge_settings WHERE key = ?`)
+      .get(key);
+    return row?.value ?? null;
+  }
+
+  /** Upsert a global bridge setting. Pass `null` to clear it. */
+  setSetting(key, value) {
+    if (!key) return;
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO messenger_bridge_settings (key, value, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                        updated_at = excluded.updated_at`,
+      )
+      .run(key, value ?? null, now);
+  }
+
+  /**
+   * Per-messenger default verbosity (`quiet` | `normal` | `verbose`) used when
+   * a surface has no explicit `/verbosity` override. Returns `null` when never
+   * configured so the caller can fall back to its own default.
+   */
+  getVerbosityDefault(type) {
+    if (!type) return null;
+    return this.getSetting(`verbosity:${type}`);
+  }
+
+  setVerbosityDefault(type, level) {
+    if (!type) return;
+    this.setSetting(`verbosity:${type}`, level ?? null);
   }
 
   /** Read the project-wide defaults for a working directory. */
@@ -155,7 +205,8 @@ export class MessengerBridgeStore {
                 project_label AS projectLabel, created_at AS createdAt,
                 last_used_at AS lastUsedAt,
                 model_override AS modelOverride,
-                agent_override AS agentOverride
+                agent_override AS agentOverride,
+                verbosity_override AS verbosityOverride
            FROM messenger_session_bindings
           WHERE type = ? AND bot_token_hash = ? AND target_key = ?`,
       )
@@ -167,7 +218,7 @@ export class MessengerBridgeStore {
    * Update per-surface preferences without touching the session binding.
    * Used by /model and /agent in-chat commands.
    */
-  setOverrides({ type, botTokenHash, targetKey, modelOverride, agentOverride }) {
+  setOverrides({ type, botTokenHash, targetKey, modelOverride, agentOverride, verbosityOverride }) {
     const sets = [];
     const params = [];
     if (modelOverride !== undefined) {
@@ -177,6 +228,10 @@ export class MessengerBridgeStore {
     if (agentOverride !== undefined) {
       sets.push('agent_override = ?');
       params.push(agentOverride ?? null);
+    }
+    if (verbosityOverride !== undefined) {
+      sets.push('verbosity_override = ?');
+      params.push(verbosityOverride ?? null);
     }
     if (sets.length === 0) return;
     params.push(type, botTokenHash, targetKey);

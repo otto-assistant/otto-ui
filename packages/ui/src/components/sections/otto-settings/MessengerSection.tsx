@@ -25,6 +25,7 @@ import {
   useMessengerStore,
   type MessengerType,
   type MessengerConnection,
+  type MessengerVerbosity,
   type SyncMode,
   type TelegramInboundMessage,
   type TelegramDiagnosisCheck,
@@ -123,6 +124,16 @@ const SYNC_MODES: { id: SyncMode; label: string; desc: string }[] = [
   { id: 'full', label: 'Full Sync', desc: 'Projects as channels, sessions as threads, all messages' },
   { id: 'notifications', label: 'Notifications', desc: 'Task completions, schedule triggers, errors' },
   { id: 'off', label: 'Off', desc: 'Connected but no automatic sync' },
+];
+
+const VERBOSITY_OPTIONS: { id: MessengerVerbosity; label: string; desc: string }[] = [
+  { id: 'quiet', label: 'Quiet', desc: 'Final answer only — hides reasoning and tool activity' },
+  { id: 'normal', label: 'Normal', desc: 'Answer + thinking marker + compact tool one-liners' },
+  {
+    id: 'verbose',
+    label: 'Verbose',
+    desc: 'Everything, with full tool calls + results collapsed under spoilers',
+  },
 ];
 
 function StatusBadge({ status }: { status: MessengerConnection['status'] }) {
@@ -1069,6 +1080,8 @@ function BridgePanel({
   onToggle: (v: boolean) => void;
 }) {
   const enabled = conn.bridgeEnabled !== false;
+  const bridgeVerbosity = useMessengerStore((s) => s.bridgeVerbosity);
+  const setBridgeVerbosity = useMessengerStore((s) => s.setBridgeVerbosity);
   useEffect(() => {
     refreshBridgeStatus(type);
     const id = setInterval(() => refreshBridgeStatus(type), 8000);
@@ -1078,6 +1091,7 @@ function BridgePanel({
 
   const bindings = bridgeStatus.bindings.filter((b) => b.type === type);
   const active = bridgeStatus.active.filter((a) => a.type === type);
+  const currentVerbosity: MessengerVerbosity = bridgeVerbosity[type] ?? 'normal';
 
   return (
     <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
@@ -1123,6 +1137,41 @@ function BridgePanel({
           The web server reports the bridge is unavailable — OpenCode may not be reachable yet.
         </div>
       )}
+
+      {/* Output verbosity — how much of each OpenCode turn is mirrored back.
+          Mirrors the in-chat `/verbosity` command; the per-conversation
+          `/verbosity <level>` override always wins over this default. */}
+      <div className="space-y-1.5 border-t border-border/60 pt-2">
+        <div className="text-[11px] font-medium text-foreground">Output verbosity</div>
+        <div className="flex gap-1">
+          {VERBOSITY_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setBridgeVerbosity(type, opt.id)}
+              disabled={!bridgeStatus.enabled}
+              className={cn(
+                'flex-1 rounded-md px-2 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-50',
+                currentVerbosity === opt.id
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:text-foreground',
+              )}
+              title={opt.desc}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <div className="text-[10px] text-muted-foreground leading-snug">
+          {VERBOSITY_OPTIONS.find((o) => o.id === currentVerbosity)?.desc}. Change it from{' '}
+          {type === 'telegram' ? 'the chat' : 'Discord'} too with{' '}
+          <code className="bg-muted px-1 rounded">/verbosity {currentVerbosity}</code> (this
+          conversation) or <code className="bg-muted px-1 rounded">/verbosity default verbose</code>{' '}
+          (everywhere). At <strong>Verbose</strong>, every tool call and result is posted under a
+          click-to-reveal spoiler.
+        </div>
+      </div>
+
       {bindings.length > 0 && (
         <div className="space-y-1">
           <div className="text-[10px] font-medium text-foreground">
