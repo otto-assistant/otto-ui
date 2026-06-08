@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import { MessengerBridgeStore } from './messenger-bridge-store.js';
 import { executeMessengerCommand, parseLeadingCommand } from './messenger-commands.js';
+import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
+import { renderPartForMessenger, escapeMd, clipBlock } from './messenger-render.js';
 
 /**
  * Bidirectional bridge between Discord/Telegram and OpenCode chat sessions.
@@ -61,11 +63,6 @@ function maxLenFor(type) {
   return type === 'discord' ? DISCORD_LIMIT : TELEGRAM_LIMIT;
 }
 
-function escapeMd(s) {
-  // Light markdown escaping — keep code-fence + backticks usable.
-  return String(s ?? '').replace(/[*_]/g, (c) => `\\${c}`);
-}
-
 function slugify(s) {
   return String(s ?? '')
     .toLowerCase()
@@ -93,143 +90,6 @@ function pickProjectForName(projects, name) {
     if (candidates.some((c) => wanted.includes(c) || c.includes(wanted))) return p;
   }
   return null;
-}
-
-function shortFileName(p) {
-  if (!p) return '';
-  const last = String(p).split(/[\\/]/).pop();
-  return last || String(p);
-}
-
-function clipBlock(s, limit) {
-  if (!s) return '';
-  return s.length > limit ? s.slice(0, limit - 1) + '…' : s;
-}
-
-// ---------------------------------------------------------------------------
-// Part rendering (kimaki-style compact one-liners)
-// ---------------------------------------------------------------------------
-
-/**
- * Render an OpenCode message part for a Discord/Telegram surface. Returns
- * `null` when nothing should be posted (e.g. empty text, pending tools).
- */
-export function renderPartForMessenger(part) {
-  if (!part || typeof part !== 'object') return null;
-
-  if (part.type === 'reasoning') {
-    if (!part.text || !String(part.text).trim()) return null;
-    return '┣ thinking';
-  }
-
-  if (part.type === 'text') {
-    const text = typeof part.text === 'string' ? part.text : '';
-    if (!text.trim()) return null;
-    // We only render text when streaming has settled (part.time.end set).
-    // The caller guards this; here we just format.
-    return text;
-  }
-
-  if (part.type === 'tool') {
-    return renderToolPart(part);
-  }
-
-  return null;
-}
-
-function renderToolPart(part) {
-  const tool = String(part.tool ?? 'tool');
-  const status = part.state?.status ?? 'running';
-  const input = part.state?.input ?? {};
-
-  // Tool title — usually a one-word context (e.g. "build", "test").
-  const title = typeof part.state?.title === 'string' ? part.state.title : '';
-  const titlePart = title ? ` _${escapeMd(title)}_` : '';
-
-  const summary = (() => {
-    switch (tool) {
-      case 'read': {
-        const file = shortFileName(input.filePath);
-        return file ? `*${escapeMd(file)}*` : '';
-      }
-      case 'edit':
-      case 'multiedit':
-      case 'apply_patch': {
-        const file = shortFileName(input.filePath);
-        const oldStr = typeof input.oldString === 'string' ? input.oldString : '';
-        const newStr = typeof input.newString === 'string' ? input.newString : '';
-        const removed = oldStr ? oldStr.split('\n').length : 0;
-        const added = newStr ? newStr.split('\n').length : 0;
-        const delta = added || removed ? ` (+${added}-${removed})` : '';
-        return file ? `*${escapeMd(file)}*${delta}` : delta.trim();
-      }
-      case 'write': {
-        const file = shortFileName(input.filePath);
-        return file ? `*${escapeMd(file)}*` : '';
-      }
-      case 'bash':
-      case 'shell': {
-        const cmd = (input.command ?? '').toString().split('\n')[0];
-        return cmd ? `\`${clipBlock(cmd, 150)}\`` : '';
-      }
-      case 'glob': {
-        const pattern = input.pattern ?? '';
-        const count = part.state?.metadata?.count;
-        return `\`${clipBlock(pattern, 80)}\`${typeof count === 'number' ? ` (${count} match${count === 1 ? '' : 'es'})` : ''}`;
-      }
-      case 'grep': {
-        const pattern = input.pattern ?? '';
-        const count = part.state?.metadata?.count;
-        return `\`${clipBlock(pattern, 80)}\`${typeof count === 'number' ? ` (${count} hit${count === 1 ? '' : 's'})` : ''}`;
-      }
-      case 'list':
-      case 'ls': {
-        const path = input.path ?? '';
-        return path ? `*${escapeMd(shortFileName(path))}*` : '';
-      }
-      case 'webfetch':
-      case 'fetch': {
-        return input.url ? `<${input.url}>` : '';
-      }
-      case 'task':
-      case 'subagent': {
-        const desc = input.description ?? input.prompt ?? '';
-        return desc ? `_${escapeMd(clipBlock(desc, 100))}_` : '';
-      }
-      case 'todowrite':
-      case 'todoread': {
-        const count = Array.isArray(input.todos) ? input.todos.length : null;
-        return count != null ? `(${count} todo${count === 1 ? '' : 's'})` : '';
-      }
-      default: {
-        // Unknown tool — show the first useful input string field.
-        const candidate =
-          input.filePath ?? input.path ?? input.command ?? input.url ?? input.query ?? '';
-        if (typeof candidate === 'string' && candidate.length > 0) {
-          return `*${escapeMd(shortFileName(candidate))}*`;
-        }
-        return '';
-      }
-    }
-  })();
-
-  let icon = '┣';
-  if (status === 'error') icon = '✗';
-  else if (tool === 'edit' || tool === 'write' || tool === 'multiedit' || tool === 'apply_patch') {
-    icon = '◼︎';
-  } else if (tool === 'bash' || tool === 'shell') {
-    icon = '⬦';
-  } else if (tool === 'read') {
-    icon = '📖';
-  }
-
-  let line = `${icon} ${tool}${titlePart}`;
-  if (summary) line += ` ${summary}`;
-  if (status === 'error') {
-    const errMsg = part.state?.error ?? '';
-    if (errMsg) line += ` — ${escapeMd(clipBlock(String(errMsg), 200))}`;
-  }
-  return line;
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +508,33 @@ export function createMessengerOpencodeBridge({
     return { sessionId, projectPath: effectivePath, autoResolved };
   }
 
+  /**
+   * Resolve the effective verbosity for a surface at render time.
+   * Resolution order: surface override (`/verbosity X`) → parent-channel
+   * override (for thread follow-ups) → per-messenger UI default → `normal`.
+   */
+  function resolveVerbosity({ type, token, channelId, threadId }) {
+    const hash = tokenHash(token);
+    const stableKey = targetKey({ type, channelId, threadId });
+    let level = null;
+    try {
+      const row = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      level = row?.verbosityOverride ?? null;
+      if (!level && stableKey !== String(channelId)) {
+        const parent = bridgeStore.lookup({
+          type,
+          botTokenHash: hash,
+          targetKey: String(channelId),
+        });
+        level = parent?.verbosityOverride ?? null;
+      }
+      if (!level) level = bridgeStore.getVerbosityDefault?.(type) ?? null;
+    } catch {
+      // ignore — verbosity is best-effort, fall back to the default
+    }
+    return normalizeVerbosity(level ?? DEFAULT_VERBOSITY);
+  }
+
   // --- Outbound: post one message per renderable part --------------------
   async function postToSurface(ctx, content) {
     return postMessengerSurface(ctx, content);
@@ -694,6 +581,7 @@ export function createMessengerOpencodeBridge({
     if (!ctx) return;
     const partId = part?.id;
     const partType = part?.type;
+    const verbosity = normalizeVerbosity(ctx.verbosity);
 
     // Skip duplicates we've already posted (parts get many updates as they
     // stream — we only want one Discord/Telegram message per logical part).
@@ -703,21 +591,28 @@ export function createMessengerOpencodeBridge({
       if (!part?.time?.end) return; // wait until streaming finishes
     }
     if (partType === 'tool') {
+      // `quiet` suppresses tool activity entirely.
+      if (verbosity === 'quiet') return;
       const status = part.state?.status ?? 'running';
-      // Skip "pending" (the tool is still initializing — we don't know the
-      // input yet) and "completed" (the running message already conveyed
-      // what happened; emitting again would be noise). Surface running +
-      // error.
-      if (status !== 'running' && status !== 'error') return;
+      if (verbosity === 'verbose') {
+        // Wait for the terminal state so the spoiler can carry the real
+        // input + output; skip pending/running to keep one message per tool.
+        if (status !== 'completed' && status !== 'error') return;
+      } else {
+        // `normal`: skip "pending" (input unknown) and "completed" (the
+        // running line already conveyed it). Surface running + error.
+        if (status !== 'running' && status !== 'error') return;
+      }
     }
     if (partType === 'reasoning') {
+      if (verbosity === 'quiet') return;
       // Post a single thinking marker per reasoning block — once.
     }
 
     const dedupKey = partId ? `${partId}:${partType}:${part?.state?.status ?? ''}` : null;
     if (dedupKey && ctx.sentPartIds.has(dedupKey)) return;
 
-    const rendered = renderPartForMessenger(part);
+    const rendered = renderPartForMessenger(part, verbosity);
     if (!rendered) return;
 
     const sent = await postToSurface(ctx, rendered);
@@ -839,16 +734,16 @@ export function createMessengerOpencodeBridge({
         command: parsedCmd,
         ctx: { ...surface, sourceMessageId },
         opencode: opencodeAdapter,
-        binding: stored
-          ? {
-              sessionId: stored.sessionId || null,
-              projectPath: stored.projectPath,
-              projectLabel: stored.projectLabel,
-              modelOverride: stored.modelOverride,
-              agentOverride: stored.agentOverride,
-              projectDefaults,
-            }
-          : null,
+        binding: {
+          sessionId: stored?.sessionId || null,
+          projectPath: stored?.projectPath ?? null,
+          projectLabel: stored?.projectLabel ?? null,
+          modelOverride: stored?.modelOverride ?? null,
+          agentOverride: stored?.agentOverride ?? null,
+          verbosityOverride: stored?.verbosityOverride ?? null,
+          verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
+          projectDefaults,
+        },
         surfaceMutators: {
           async setOverrides(changes) {
             bridgeStore.setOverrides({
@@ -857,6 +752,9 @@ export function createMessengerOpencodeBridge({
               targetKey: stableKey,
               ...changes,
             });
+          },
+          async setVerbosityDefault(level) {
+            bridgeStore.setVerbosityDefault(type, level);
           },
           async unbindSession() {
             bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
@@ -1047,11 +945,15 @@ export function createMessengerOpencodeBridge({
         sentPartIds: new Set(),
         startedAt: Date.now(),
         lastError: null,
+        verbosity: DEFAULT_VERBOSITY,
         from,
       };
       sessionContexts.set(sessionId, ctx);
     }
     const ctx = sessionContexts.get(sessionId);
+    // Re-resolve verbosity each turn so a mid-session `/verbosity` change (or a
+    // UI default change) takes effect on the next prompt.
+    ctx.verbosity = resolveVerbosity({ type, token, channelId, threadId: effectiveThreadId });
     startTypingPulse(ctx);
 
     // Pull per-surface model/agent overrides (set via /model and /agent).

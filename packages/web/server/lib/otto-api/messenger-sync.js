@@ -5,6 +5,7 @@ import {
   generateApprovalId,
 } from './discord-listener.js';
 import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
+import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js';
 import { bootstrapProject as bootstrapProjectFn } from '../projects/project-bootstrap.js';
 
 /**
@@ -665,9 +666,65 @@ export function createMessengerSyncRouter({
   // any prompts currently in flight. Useful for the settings UI to show
   // "Discord channel X is bound to session Y".
   router.post('/bridge/status', (req, res) => {
-    if (!bridge) return res.json({ ok: true, enabled: false, bindings: [], active: [] });
+    if (!bridge) {
+      return res.json({ ok: true, enabled: false, bindings: [], active: [], verbosity: {} });
+    }
     const { type, token } = req.body ?? {};
-    return res.json({ ok: true, enabled: true, ...bridge.statusSnapshot({ type, token }) });
+    const verbosity = {
+      discord: bridge.store.getVerbosityDefault?.('discord') ?? null,
+      telegram: bridge.store.getVerbosityDefault?.('telegram') ?? null,
+    };
+    return res.json({
+      ok: true,
+      enabled: true,
+      verbosity,
+      ...bridge.statusSnapshot({ type, token }),
+    });
+  });
+
+  /**
+   * Per-messenger default verbosity (`quiet` | `normal` | `verbose`). This is
+   * the same value the in-chat `/verbosity default <level>` command writes, so
+   * the OpenChamber UI and Discord/Telegram stay in sync. A per-conversation
+   * `/verbosity <level>` override always wins over this default.
+   *
+   * POST body: { type: 'discord'|'telegram', level }  (level null clears it)
+   * GET query: ?type=discord
+   */
+  router.post('/bridge/verbosity', (req, res) => {
+    if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
+    const { type, level } = req.body ?? {};
+    if (type !== 'discord' && type !== 'telegram') {
+      return res.status(400).json({ ok: false, error: "type must be 'discord' or 'telegram'" });
+    }
+    if (level == null || level === '') {
+      bridge.store.setVerbosityDefault(type, null);
+      return res.json({ ok: true, type, level: null });
+    }
+    const parsed = parseVerbosityLevel(level);
+    if (!parsed) {
+      return res
+        .status(400)
+        .json({ ok: false, error: `level must be one of: ${VERBOSITY_LEVELS.join(', ')}` });
+    }
+    bridge.store.setVerbosityDefault(type, parsed);
+    return res.json({ ok: true, type, level: parsed });
+  });
+
+  router.get('/bridge/verbosity', (req, res) => {
+    if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
+    const type = typeof req.query?.type === 'string' ? req.query.type : '';
+    if (type === 'discord' || type === 'telegram') {
+      return res.json({ ok: true, type, level: bridge.store.getVerbosityDefault?.(type) ?? null });
+    }
+    return res.json({
+      ok: true,
+      levels: VERBOSITY_LEVELS,
+      verbosity: {
+        discord: bridge.store.getVerbosityDefault?.('discord') ?? null,
+        telegram: bridge.store.getVerbosityDefault?.('telegram') ?? null,
+      },
+    });
   });
 
   /**

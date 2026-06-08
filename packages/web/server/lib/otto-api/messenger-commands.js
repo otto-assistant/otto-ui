@@ -30,6 +30,13 @@
  */
 
 import crypto from 'node:crypto';
+import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js';
+
+const VERBOSITY_DESCRIPTIONS = {
+  quiet: 'final answer only — hides reasoning and tool activity',
+  normal: 'answer + thinking marker + compact tool one-liners (default)',
+  verbose: 'everything, with full tool input/output collapsed under spoilers',
+};
 
 // Commands we recognise. The `usage` text is shown by /help so order matters.
 const COMMAND_HELP = [
@@ -69,6 +76,12 @@ const COMMAND_HELP = [
     name: 'agent',
     usage: '/agent [name | default name | reset]',
     summary: 'List agents / set this conversation\'s agent / `default name` sets a project-wide default.',
+  },
+  {
+    name: 'verbosity',
+    usage: '/verbosity [quiet | normal | verbose | default <level> | reset]',
+    summary:
+      'How much Otto streams back. `verbose` shows every tool call + result under a spoiler. `default <level>` sets the messenger-wide default.',
   },
   {
     name: 'sessions',
@@ -395,6 +408,68 @@ export async function executeMessengerCommand({
       }
       await surfaceMutators.setOverrides({ agentOverride: raw });
       return { reply: `✓ Agent set to \`${raw}\` for this conversation.` };
+    }
+
+    case 'verbosity': {
+      const effective =
+        binding?.verbosityOverride ?? binding?.verbosityDefault ?? 'normal';
+      if (!command.args) {
+        const lines = [
+          '**Output verbosity** — how much of each turn Otto mirrors back here',
+          '',
+        ];
+        for (const level of VERBOSITY_LEVELS) {
+          const marker = level === effective ? '➤ ' : '· ';
+          lines.push(`${marker}\`${level}\` — ${VERBOSITY_DESCRIPTIONS[level]}`);
+        }
+        lines.push('');
+        lines.push(
+          'Set with `/verbosity verbose` (this conversation) or `/verbosity default verbose` (every channel/chat on this bot). `/verbosity reset` clears the conversation override.',
+        );
+        if (binding?.verbosityOverride) {
+          lines.push('', `Conversation override: \`${binding.verbosityOverride}\``);
+        }
+        if (binding?.verbosityDefault) {
+          lines.push(`Messenger default: \`${binding.verbosityDefault}\``);
+        }
+        return { reply: lines.join('\n') };
+      }
+
+      const raw = command.args.trim();
+      const defaultMatch = raw.match(/^default\s+(.+)$/i);
+      if (defaultMatch) {
+        const value = defaultMatch[1].trim();
+        if (value === 'reset' || value === 'clear') {
+          await surfaceMutators.setVerbosityDefault(null);
+          return { reply: '✓ Messenger default verbosity cleared — falling back to `normal`.' };
+        }
+        const level = parseVerbosityLevel(value);
+        if (!level) {
+          return {
+            reply: `✗ Unknown level. Use one of: ${VERBOSITY_LEVELS.map((l) => `\`${l}\``).join(', ')}.`,
+          };
+        }
+        await surfaceMutators.setVerbosityDefault(level);
+        return {
+          reply: `✓ Messenger default verbosity set to \`${level}\` — ${VERBOSITY_DESCRIPTIONS[level]}.`,
+        };
+      }
+
+      if (raw === 'reset' || raw === 'clear') {
+        await surfaceMutators.setOverrides({ verbosityOverride: null });
+        return { reply: '✓ Conversation verbosity override cleared — falling back to the messenger default.' };
+      }
+
+      const level = parseVerbosityLevel(raw);
+      if (!level) {
+        return {
+          reply: `✗ Unknown level. Use one of: ${VERBOSITY_LEVELS.map((l) => `\`${l}\``).join(', ')}, or \`/verbosity default <level>\`.`,
+        };
+      }
+      await surfaceMutators.setOverrides({ verbosityOverride: level });
+      return {
+        reply: `✓ Verbosity set to \`${level}\` for this conversation — ${VERBOSITY_DESCRIPTIONS[level]}.`,
+      };
     }
 
     case 'sessions': {

@@ -5,6 +5,7 @@ import { useProjectsStore } from './useProjectsStore';
 
 export type MessengerType = 'discord' | 'telegram';
 export type SyncMode = 'full' | 'notifications' | 'off';
+export type MessengerVerbosity = 'quiet' | 'normal' | 'verbose';
 
 export interface MessengerConnection {
   type: MessengerType;
@@ -291,6 +292,14 @@ interface MessengerState {
     }[];
   };
 
+  /**
+   * Per-messenger default output verbosity for the OpenCode bridge
+   * (`quiet` | `normal` | `verbose`). `null` means "never configured —
+   * the bridge uses its built-in `normal` default". Mirrors the in-chat
+   * `/verbosity default <level>` command; refreshed from /bridge/status.
+   */
+  bridgeVerbosity: Partial<Record<MessengerType, MessengerVerbosity | null>>;
+
   addConnection: (type: MessengerType) => void;
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
   removeConnection: (type: MessengerType) => void;
@@ -312,6 +321,7 @@ interface MessengerState {
   diagnoseTelegram: () => Promise<boolean>;
   diagnoseDiscord: () => Promise<boolean>;
   refreshBridgeStatus: (type?: MessengerType) => Promise<void>;
+  setBridgeVerbosity: (type: MessengerType, level: MessengerVerbosity) => Promise<boolean>;
   startDiscordListener: () => Promise<boolean>;
   stopDiscordListener: () => Promise<boolean>;
   refreshDiscordListenerStatus: () => Promise<void>;
@@ -381,6 +391,7 @@ export const useMessengerStore = create<MessengerState>()(
       discordDiagnosisRunning: false,
       approvals: [],
       bridgeStatus: { enabled: false, bindings: [], active: [] },
+      bridgeVerbosity: {},
 
       addConnection: (type) => {
         const existing = get().connections.find((c) => c.type === type);
@@ -1093,6 +1104,7 @@ export const useMessengerStore = create<MessengerState>()(
             enabled?: boolean;
             bindings?: MessengerState['bridgeStatus']['bindings'];
             active?: MessengerState['bridgeStatus']['active'];
+            verbosity?: Partial<Record<MessengerType, MessengerVerbosity | null>>;
           }>('/api/otto/messenger/bridge/status', { type, token });
           set({
             bridgeStatus: {
@@ -1100,9 +1112,26 @@ export const useMessengerStore = create<MessengerState>()(
               bindings: data.bindings ?? [],
               active: data.active ?? [],
             },
+            bridgeVerbosity: data.verbosity ?? get().bridgeVerbosity,
           });
         } catch {
           // ignore
+        }
+      },
+
+      setBridgeVerbosity: async (type, level) => {
+        try {
+          const data = await postJson<{ ok: boolean; level?: MessengerVerbosity | null }>(
+            '/api/otto/messenger/bridge/verbosity',
+            { type, level },
+          );
+          if (!data.ok) return false;
+          set({
+            bridgeVerbosity: { ...get().bridgeVerbosity, [type]: data.level ?? level },
+          });
+          return true;
+        } catch {
+          return false;
         }
       },
 
