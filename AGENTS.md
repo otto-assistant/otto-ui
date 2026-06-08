@@ -94,3 +94,22 @@ See `AGENTS.openchamber.md` and root `package.json` for the full list. Key comma
 - The `bun run dev` script (as opposed to `bun run dev:web:hmr`) also starts the UI type-check watcher via `concurrently`. Both work, but `dev:web:hmr` is sufficient for most development.
 - Port `5173` is the Vite HMR port; port `3001` is the API port. Browse `http://localhost:5173` for HMR — not `http://localhost:3001`.
 - If ports are occupied from a previous run, find and kill the processes before restarting (`lsof -ti:5173 -ti:3001 | xargs kill -9`).
+
+### Module docs (upstream references)
+
+- **quota**: `packages/web/server/lib/quota/DOCUMENTATION.md`
+- **git**: `packages/web/server/lib/git/DOCUMENTATION.md`
+- **github**: `packages/web/server/lib/github/DOCUMENTATION.md`
+- **opencode**: `packages/web/server/lib/opencode/DOCUMENTATION.md`
+- **notifications**: `packages/web/server/lib/notifications/DOCUMENTATION.md`
+- **scheduled-tasks**: `packages/web/server/lib/scheduled-tasks/DOCUMENTATION.md`
+- **text**: `packages/web/server/lib/text/DOCUMENTATION.md`
+- **terminal**: `packages/web/server/lib/terminal/DOCUMENTATION.md`
+- **tts**: `packages/web/server/lib/tts/DOCUMENTATION.md`
+- **tunnels**: `packages/web/server/lib/tunnels/DOCUMENTATION.md`
+- **ui-auth**: `packages/web/server/lib/ui-auth/DOCUMENTATION.md`
+- **skills-catalog**: `packages/web/server/lib/skills-catalog/DOCUMENTATION.md`
+- **sync**: `packages/ui/src/sync/DOCUMENTATION.md`
+- **stores**: `packages/ui/src/stores/DOCUMENTATION.md`
+- **session sidebar**: `packages/ui/src/components/session/sidebar/DOCUMENTATION.md`
+- **message parts**: `packages/ui/src/components/chat/message/parts/DOCUMENTATION.md`

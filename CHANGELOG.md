@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Chat: added `/handoff-review` to open a linked review session for the current workspace changes, with actions to send review feedback and implementation replies between the sessions.
+- Worktrees: creating a single new worktree session now opens the session immediately while worktree setup continues in the background.
+- Multi-Run: creating isolated runs now opens sessions immediately while worktree setup continues in the background.
+- Sessions: chat folder assignments now stay in place after reloads.
+
+## [1.12.3] - 2026-06-05
+
+- Windows/Startup: WSL OpenCode installs are no longer detected or launched; install OpenCode natively on Windows and configure `opencode.cmd` or `opencode.exe` instead.
+- Startup: OpenCode health checks now work with OpenCode 1.15.x.
+- Files: file trees now show directory loading errors with a retry action instead of leaving the folder empty, and slow Git ignore checks no longer block directory listings indefinitely.
+
+## [1.12.2] - 2026-06-05
+
+- **Desktop/Windows: the Windows app is now available publicly, with full functionality parity across the app.**
+- Tunnels: switching between Cloudflare and ngrok quick tunnels now replaces the active quick tunnel instead of reusing the previous provider.
+- Tunnels: ngrok startup failures now show the ngrok or authtoken error returned during startup.
+- Projects: the Add Project directory picker now starts with hidden files off each time it opens.
+- Chat: prompts sent while creating or switching target sessions now stay attached to the intended project directory.
+- VSCode: the extension now detects more Windows OpenCode installs from PATH, npm, Scoop, and Chocolatey.
+
 ## [1.12.1] - 2026-06-03
 
 - Chat: completed turns can now show changed-file chips with per-file additions and deletions, controlled by a new Chat setting.

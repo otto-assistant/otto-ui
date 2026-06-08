@@ -977,6 +977,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const isSessionsLoading = useSessionUIStore((state) => state.isLoading);
   useSessionFolderCleanup({
     isSessionsLoading,
+    hasLoadedGlobalSessions,
     sessions,
     archivedSessions,
     normalizedProjects,
@@ -1875,7 +1876,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             setCurrentSession(options.sessionId, worktreePath);
             return;
           }
-          openNewSessionDraft({ directoryOverride: worktreePath });
+          openNewSessionDraft({ directoryOverride: worktreePath, preserveDirectoryOverride: true });
         }}
       />
 

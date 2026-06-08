@@ -408,6 +408,8 @@ export interface CreateGitWorktreePayload {
   /** Optional remote provisioning (used for fork PR workflows). */
   ensureRemoteName?: string;
   ensureRemoteUrl?: string;
+  /** Return once the target directory exists and finish Git worktree setup in the background. */
+  returnAfterDirectoryCreated?: boolean;
 }
 
 export interface GitWorktreeCreateResult {
@@ -415,6 +417,8 @@ export interface GitWorktreeCreateResult {
   name: string;
   branch: string;
   path: string;
+  directoryCreated?: true;
+  bootstrapStatus?: GitWorktreeBootstrapStatus;
 }
 
 export interface RemoveGitWorktreePayload {
@@ -548,7 +552,7 @@ export interface GitAPI {
     cwd: string | null;
     branch: string | null;
     headState: 'branch' | 'detached' | 'unborn';
-    worktreeStatus: 'ready' | 'missing' | 'invalid' | 'not-a-repo';
+    worktreeStatus: 'pending' | 'ready' | 'missing' | 'invalid' | 'not-a-repo';
     legacy: boolean;
     degraded: boolean;
     attentionReason?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'bisect' | null;

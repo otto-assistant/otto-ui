@@ -70,12 +70,24 @@ const getAgentsCacheKey = (directory: string | null): string => {
   return directory?.trim() || DEFAULT_AGENTS_CACHE_KEY;
 };
 
+const invalidateAgentsLoadCache = (directory: string | null = getConfigDirectory()) => {
+  agentsLastLoadedAt.delete(getAgentsCacheKey(directory));
+};
+
 const buildAgentsSignature = (agents: Agent[]): string => {
   return agents
     .map((agent) => {
       const extended = agent as AgentWithExtras;
       return [
         agent.name,
+        extended.mode ?? '',
+        typeof extended.model === 'object' && extended.model
+          ? `${extended.model.providerID ?? ''}/${extended.model.modelID ?? ''}`
+          : String(extended.model ?? ''),
+        String(extended.temperature ?? ''),
+        String((extended as { topP?: unknown; top_p?: unknown }).topP ?? (extended as { topP?: unknown; top_p?: unknown }).top_p ?? ''),
+        extended.prompt ?? '',
+        JSON.stringify(extended.permission ?? null),
         extended.scope ?? '',
         extended.group ?? '',
         extended.description ?? '',
@@ -345,6 +357,7 @@ export const useAgentsStore = create<AgentsStore>()(
             }
 
             const needsReload = payload?.requiresReload ?? true;
+            invalidateAgentsLoadCache(configDirectory);
             if (needsReload) {
               requiresReload = true;
               await refreshAfterOpenCodeRestart({
@@ -406,6 +419,7 @@ export const useAgentsStore = create<AgentsStore>()(
             }
 
             const needsReload = payload?.requiresReload ?? true;
+            invalidateAgentsLoadCache(configDirectory);
             if (needsReload) {
               requiresReload = true;
               await refreshAfterOpenCodeRestart({
@@ -452,6 +466,7 @@ export const useAgentsStore = create<AgentsStore>()(
             }
 
             const needsReload = payload?.requiresReload ?? true;
+            invalidateAgentsLoadCache(configDirectory);
             if (needsReload) {
               requiresReload = true;
               await refreshAfterOpenCodeRestart({
@@ -620,15 +635,16 @@ async function performConfigRefresh(options: {
     const sdkRefreshTasks: Promise<void>[] = [];
     for (const directory of directoriesToRefresh) {
       if (refreshProviders) {
-        sdkRefreshTasks.push(configStore.loadProviders({ directory }).then(() => undefined));
+        sdkRefreshTasks.push(configStore.loadProviders({ directory, source: 'agentsStore:refreshConfig' }).then(() => undefined));
       }
       if (refreshSdkAgents) {
-        sdkRefreshTasks.push(configStore.loadAgents({ directory }).then(() => undefined));
+        sdkRefreshTasks.push(configStore.loadAgents({ directory, source: 'agentsStore:refreshConfig' }).then(() => undefined));
       }
     }
 
     const uiRefreshTasks: Promise<void>[] = [];
     if (refreshAgentConfigs) {
+      invalidateAgentsLoadCache(currentDirectory);
       uiRefreshTasks.push(agentConfigStore.loadAgents().then(() => undefined));
     }
     if (refreshCommands) {
