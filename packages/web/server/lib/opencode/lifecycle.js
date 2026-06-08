@@ -840,6 +840,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         if (await probeOpenCodeHealthOnPort(probePort, probeOrigin)) {
           console.log(`External OpenCode server detected at ${label} (skip-start mode)`);
           setOpenCodePort(probePort);
+          state.isOpenCodeReady = true;
+          state.lastOpenCodeError = null;
+          state.openCodeNotReadySince = 0;
         } else {
           // Scan nearby ports in case OpenCode restarted on a different port
           console.log(`No OpenCode at ${label}, scanning for external OpenCode server...`);
@@ -848,14 +851,17 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
             console.log(`External OpenCode server detected on port ${foundPort} (auto-detected)`);
             state.openCodeBaseUrl = null;
             setOpenCodePort(foundPort);
+            state.isOpenCodeReady = true;
+            state.lastOpenCodeError = null;
+            state.openCodeNotReadySince = 0;
           } else {
             console.log(`No external OpenCode server found on any scanned port (skip-start mode). Server may start later.`);
             setOpenCodePort(probePort);
+            state.isOpenCodeReady = false;
+            state.lastOpenCodeError = `No external OpenCode server responding on ports ${Math.max(1024, probePort - OPENCODE_PORT_SCAN_RANGE)}-${Math.min(65535, probePort + OPENCODE_PORT_SCAN_RANGE)}`;
+            state.openCodeNotReadySince = Date.now();
           }
         }
-        state.isOpenCodeReady = true;
-        state.lastOpenCodeError = null;
-        state.openCodeNotReadySince = 0;
         syncToHmrState();
       } else if (env.ENV_EFFECTIVE_PORT && await probeExternalOpenCode(env.ENV_EFFECTIVE_PORT, env.ENV_CONFIGURED_OPENCODE_HOST?.origin)) {
         const label = env.ENV_CONFIGURED_OPENCODE_HOST ? env.ENV_CONFIGURED_OPENCODE_HOST.origin : `http://localhost:${env.ENV_EFFECTIVE_PORT}`;
