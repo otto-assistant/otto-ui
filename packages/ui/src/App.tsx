@@ -417,8 +417,8 @@ function App({ apis }: AppProps) {
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let retryCount = 0;
-    const MAX_RETRIES = 10;
-    const BASE_DELAY_MS = 1000;
+    const MAX_RETRIES = 15;
+    const BASE_DELAY_MS = 400;
 
     const retryInitialization = async () => {
       if (!active) return;
@@ -444,11 +444,14 @@ function App({ apis }: AppProps) {
         setInitRetryExhausted(true);
         return;
       }
-      const delay = Math.min(BASE_DELAY_MS * Math.pow(2, retryCount - 1), 16000);
+      // Fast first retry, gentle backoff: 400ms, 800ms, 1.2s, 1.6s, 2s... cap 8s
+      const delay = Math.min(400 * retryCount, 8000);
       retryTimer = setTimeout(retryInitialization, delay);
     };
 
-    retryTimer = setTimeout(retryInitialization, BASE_DELAY_MS);
+    // Initial delay of 200ms instead of 1s — checkConnection is already doing
+    // the heavy lifting, we just want to retry if it returns false.
+    retryTimer = setTimeout(retryInitialization, 200);
 
     return () => {
       active = false;
