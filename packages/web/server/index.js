@@ -1231,8 +1231,14 @@ async function main(options = {}) {
   // Messenger sync routes (Discord + Telegram). The bridge plumbing lets
   // listeners forward inbound messages to OpenCode and mirror streamed
   // responses back into the originating channel/thread.
-  app.use('/api/otto/messenger', createMessengerSyncRouter({
-    broadcastEvent: (type, data) => ottoEventsBroadcast(type, data),
+  const { router: messengerRouter, discordListener } = createMessengerSyncRouter({
+    // Bridge approval button clicks to both the WS clients (UI) and
+    // the global event hub (so the bridge's initApprovalListener can
+    // respond to OpenCode).
+    broadcastEvent: (type, data) => {
+      try { ottoEventsBroadcast(type, data); } catch {}
+      try { globalMessageStreamHub?.publishEvent?.(type, data); } catch {}
+    },
     globalEventHub: globalMessageStreamHub,
     buildOpenCodeUrl,
     getOpenCodeAuthHeaders,
@@ -1243,7 +1249,8 @@ async function main(options = {}) {
     readSettings: readSettingsFromDiskMigrated,
     persistSettings,
     sanitizeProjects,
-  }));
+  });
+  app.use('/api/otto/messenger', messengerRouter);
 
   // Discord ↔ Web UI sync routes
   app.use('/api/otto/discord', createDiscordSyncRouter({
@@ -1337,6 +1344,49 @@ async function main(options = {}) {
   } catch (error) {
     console.warn('[ScheduledTasks] Failed to start runtime:', error?.message || error);
   }
+
+  // Auto-start Discord Gateway listener if a bot token is saved in settings.
+  // This lets the integration survive server restarts without manual re-start.
+  // The bridge is enabled by default, routing all incoming messages through OpenCode
+  // and streaming responses back into the originating channel/thread.
+  (async () => {
+    try {
+      const settings = await readSettingsFromDiskMigrated();
+      const discord = settings?.discord;
+      if (discord?.botToken) {
+        // Build a resolveProject function from saved projects + channel bindings.
+        // If no explicit bindings exist, the bridge falls back to auto-resolve
+        // by slug-matching the Discord channel name against project labels/paths.
+        const projects = sanitizeProjects(settings?.projects || []);
+        const resolveProject = ({ channelId, guildId }) => {
+          // No channel-level bindings saved on server — channel-to-project
+          // mappings live in the UI's localStorage. The bridge auto-resolves
+          // by slug name, so this is only used as an optimisation.
+          // If there's exactly one project, bind all messages to it.
+          if (projects.length === 1) {
+            const p = projects[0];
+            return p?.path ? { path: p.path, label: p.label ?? p.path } : null;
+          }
+          return null;
+        };
+
+        const result = discordListener.start(discord.botToken, {
+          guildId: discord.guildId || undefined,
+          autoReply: discord.autoReply !== false,
+          scopeToGuild: Boolean(discord.scopeToGuild),
+          bridgeEnabled: true, // Always enable bridge on auto-start
+          resolveProject,
+        });
+        if (result?.alreadyRunning) {
+          console.log('[Discord] Listener already running (from saved config)');
+        } else {
+          console.log('[Discord] Listener auto-started from saved config');
+        }
+      }
+    } catch (err) {
+      console.warn('[Discord] Failed to auto-start listener:', err?.message ?? err);
+    }
+  })();
 
   return {
     expressApp: app,

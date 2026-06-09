@@ -129,21 +129,6 @@ const MOCK_TASKS: Task[] = [
     updatedAt: new Date(Date.now() - 7200000).toISOString(),
     history: [{ timestamp: new Date(Date.now() - 7200000).toISOString(), action: 'Created' }],
   },
-  {
-    id: 'demo-3',
-    title: 'Nightly backup verification',
-    description: 'Automated check that nightly DB backup completed successfully.',
-    priority: 'low',
-    status: 'pending',
-    ownerType: 'cron',
-    ownerName: 'Cron: backup-check',
-    dueAt: new Date(Date.now() + 6 * 3600000).toISOString(),
-    recurrence: 'daily',
-    lastTriggeredAt: null,
-    createdAt: new Date(Date.now() - 86400000).toISOString(),
-    updatedAt: new Date(Date.now() - 43200000).toISOString(),
-    history: [{ timestamp: new Date(Date.now() - 86400000).toISOString(), action: 'Created' }],
-  },
 ];
 
 const API_BASE = () => apiUrl('/api/otto/tasks');
@@ -407,6 +392,8 @@ export const useTasksStore = create<TasksStore>()(
         }),
         onRehydrateStorage: () => (state) => {
           if (!state) return;
+          // Remove leftover demo/mock tasks from localStorage (no longer in MOCK_TASKS).
+          state.tasks = state.tasks.filter((t) => !t.id.startsWith('demo-'));
           // Normalize legacy entries that only have `dueDate`.
           state.tasks = state.tasks.map((t) => normalizeTask(t));
         },

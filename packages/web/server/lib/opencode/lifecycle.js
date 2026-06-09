@@ -466,6 +466,83 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     return null;
   };
 
+  /**
+   * Find the OpenCode port by directly inspecting the running process.
+   *
+   * - POSIX:  pgrep + lsof  (macOS, Linux, BSD)
+   * - Win32:  tasklist + netstat -ano
+   *
+   * Returns the port number or null if no opencode process is found.
+   * Much faster than port scanning — a single synchronous check.
+   */
+  const findOpenCodePortViaProcessCheck = () => {
+    try {
+      if (process.platform === 'win32') {
+        return findOpenCodePortViaProcessCheckWin32();
+      }
+      return findOpenCodePortViaProcessCheckPosix();
+    } catch {
+      // Tools not available — not an error
+    }
+    return null;
+  };
+
+  const findOpenCodePortViaProcessCheckPosix = () => {
+    // Use lsof to find all TCP listening ports, then filter by process name.
+    // We deliberately avoid `lsof -p <pid>` because on lsof 4.93.x the `-p`
+    // flag is silently ignored when combined with `-i`.
+    const lsofResult = spawnSync('lsof', ['-i', '-P', '-n', '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    if (!lsofResult.stdout) return null;
+
+    // lsof output columns: COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE  NODE  NAME
+    // We only care about rows where COMMAND is exactly "opencode"
+    for (const line of lsofResult.stdout.split('\n')) {
+      if (!/^opencode\s/.test(line)) continue;
+      const match = line.match(/:(\d+)\s+\(LISTEN\)/);
+      if (match) {
+        const port = parseInt(match[1], 10);
+        if (Number.isFinite(port) && port > 0) return port;
+      }
+    }
+
+    return null;
+  };
+
+  const findOpenCodePortViaProcessCheckWin32 = () => {
+    // Find opencode.exe process PIDs via tasklist
+    const tasklistResult = spawnSync('tasklist', ['/FI', 'IMAGENAME eq opencode.exe', '/NH', '/FO', 'CSV'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    if (!tasklistResult.stdout) return null;
+
+    const pids = [];
+    for (const line of tasklistResult.stdout.split('\n')) {
+      const match = line.match(/"opencode\.exe".*?"(\d+)"/);
+      if (match) {
+        const pid = parseInt(match[1], 10);
+        if (Number.isFinite(pid) && pid > 0) pids.push(pid);
+      }
+    }
+    if (pids.length === 0) return null;
+
+    // Use netstat to find which ports these PIDs are listening on
+    const netstatResult = spawnSync('netstat', ['-ano'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    if (!netstatResult.stdout) return null;
+
+    const pidSet = new Set(pids);
+    for (const line of netstatResult.stdout.split('\n')) {
+      // TCP    0.0.0.0:4096    0.0.0.0:0    LISTENING    12345
+      const match = line.match(/TCP\s+.*?:(\d+)\s+.*?LISTENING\s+(\d+)/);
+      if (match) {
+        const port = parseInt(match[1], 10);
+        const pid = parseInt(match[2], 10);
+        if (Number.isFinite(port) && Number.isFinite(pid) && pidSet.has(pid)) {
+          return port;
+        }
+      }
+    }
+
+    return null;
+  };
+
   const waitForOpenCodePort = async (timeoutMs = 15000) => {
     if (state.openCodePort !== null) {
       return state.openCodePort;
@@ -602,8 +679,28 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       return true;
     }
 
+    // Try direct process check before scanning ports
+    console.log(`[OpenCode] Port ${currentPort} not responding, checking for running opencode process...`);
+    const processPort = findOpenCodePortViaProcessCheck();
+    if (processPort && await probeOpenCodeHealthOnPort(processPort)) {
+      console.log(`[OpenCode] Found external OpenCode server on port ${processPort} (via process check)`);
+      state.openCodePort = processPort;
+      state.openCodeBaseUrl = null;
+      setOpenCodePort(processPort);
+      state.isOpenCodeReady = true;
+      state.lastOpenCodeError = null;
+      state.openCodeNotReadySince = 0;
+      syncToHmrState();
+      if (state.expressApp) {
+        console.log(`[OpenCode] Updating proxy to port ${processPort}`);
+        setupProxy(state.expressApp);
+        ensureOpenCodeApiPrefix();
+      }
+      return true;
+    }
+
     // Scan nearby ports for OpenCode
-    console.log(`[OpenCode] Port ${currentPort} not responding, scanning for OpenCode...`);
+    console.log(`[OpenCode] Scanning ports for external OpenCode server...`);
     const foundPort = await scanForOpenCodePort(currentPort);
     if (foundPort) {
       console.log(`[OpenCode] Found external OpenCode server on port ${foundPort}, reconnecting...`);
@@ -844,22 +941,34 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
           state.lastOpenCodeError = null;
           state.openCodeNotReadySince = 0;
         } else {
-          // Scan nearby ports in case OpenCode restarted on a different port
-          console.log(`No OpenCode at ${label}, scanning for external OpenCode server...`);
-          const foundPort = await scanForOpenCodePort(probePort);
-          if (foundPort) {
-            console.log(`External OpenCode server detected on port ${foundPort} (auto-detected)`);
+          // Try direct process check first — faster than scanning ports
+          console.log(`No OpenCode at ${label}, checking for running opencode process...`);
+          const processPort = findOpenCodePortViaProcessCheck();
+          if (processPort && await probeOpenCodeHealthOnPort(processPort)) {
+            console.log(`External OpenCode server detected on port ${processPort} (via process check)`);
             state.openCodeBaseUrl = null;
-            setOpenCodePort(foundPort);
+            setOpenCodePort(processPort);
             state.isOpenCodeReady = true;
             state.lastOpenCodeError = null;
             state.openCodeNotReadySince = 0;
           } else {
-            console.log(`No external OpenCode server found on any scanned port (skip-start mode). Server may start later.`);
-            setOpenCodePort(probePort);
-            state.isOpenCodeReady = false;
-            state.lastOpenCodeError = `No external OpenCode server responding on ports ${Math.max(1024, probePort - OPENCODE_PORT_SCAN_RANGE)}-${Math.min(65535, probePort + OPENCODE_PORT_SCAN_RANGE)}`;
-            state.openCodeNotReadySince = Date.now();
+            // Scan nearby ports in case OpenCode restarted on a different port
+            console.log(`No OpenCode process found, scanning ports for external OpenCode server...`);
+            const foundPort = await scanForOpenCodePort(probePort);
+            if (foundPort) {
+              console.log(`External OpenCode server detected on port ${foundPort} (auto-detected)`);
+              state.openCodeBaseUrl = null;
+              setOpenCodePort(foundPort);
+              state.isOpenCodeReady = true;
+              state.lastOpenCodeError = null;
+              state.openCodeNotReadySince = 0;
+            } else {
+              console.log(`No external OpenCode server found on any scanned port (skip-start mode). Server may start later.`);
+              setOpenCodePort(probePort);
+              state.isOpenCodeReady = false;
+              state.lastOpenCodeError = `No external OpenCode server responding on ports ${Math.max(1024, probePort - OPENCODE_PORT_SCAN_RANGE)}-${Math.min(65535, probePort + OPENCODE_PORT_SCAN_RANGE)}`;
+              state.openCodeNotReadySince = Date.now();
+            }
           }
         }
         syncToHmrState();
@@ -882,6 +991,27 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         state.openCodeNotReadySince = 0;
         syncToHmrState();
       } else {
+        // Before starting a managed process, check if OpenCode is already running
+        if (!env.ENV_EFFECTIVE_PORT) {
+          const processPort = findOpenCodePortViaProcessCheck();
+          if (processPort && await probeOpenCodeHealthOnPort(processPort)) {
+            console.log(`Auto-detected existing OpenCode server on port ${processPort} (via process check, before managed start)`);
+            setOpenCodePort(processPort);
+            state.isOpenCodeReady = true;
+            state.isExternalOpenCode = true;
+            state.lastOpenCodeError = null;
+            state.openCodeNotReadySince = 0;
+            syncToHmrState();
+            await waitForOpenCodePort();
+            try {
+              await waitForOpenCodeReady();
+            } catch (error) {
+              console.error(`OpenCode readiness check failed: ${error.message}`);
+            }
+            return;
+          }
+        }
+
         if (env.ENV_EFFECTIVE_PORT) {
           console.log(`Using OpenCode port from environment: ${env.ENV_EFFECTIVE_PORT}`);
           setOpenCodePort(env.ENV_EFFECTIVE_PORT);

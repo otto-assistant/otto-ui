@@ -631,6 +631,28 @@ function DiscordListenerPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Auto-save Discord config to server-side settings.json on mount so that
+  // the server-side auto-start on reboot picks it up. This handles the case
+  // where the user configured Discord (localStorage) but never triggered
+  // saveDiscordConfig (e.g. first visit after a server restart).
+  useEffect(() => {
+    if (conn.botToken) {
+      useMessengerStore.getState().saveDiscordConfig();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-start the Discord listener on mount if it's configured but not running.
+  // Server auto-starts on boot (from saved config), but this handles first-time
+  // setup so the user doesn't need to click "Start listening" manually.
+  useEffect(() => {
+    if (!running && conn.botToken && (conn.discordGuildId || conn.defaultChannelId)) {
+      startListener();
+    }
+    // Only run once on mount — user can manually stop/start after that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const historyTarget = conn.defaultChannelId;
 
   return (
@@ -688,11 +710,13 @@ function DiscordListenerPanel({
             <input
               type="checkbox"
               checked={Boolean(conn.discordListenerScopeToGuild)}
-              onChange={(e) =>
+              onChange={(e) => {
                 useMessengerStore
                   .getState()
-                  .updateConnection('discord', { discordListenerScopeToGuild: e.target.checked })
-              }
+                  .updateConnection('discord', { discordListenerScopeToGuild: e.target.checked });
+                // Persist to server-side settings.json so auto-start works on reboot
+                setTimeout(() => useMessengerStore.getState().saveDiscordConfig(), 0);
+              }}
               className="rounded border-border accent-primary"
             />
             Scope to saved server
@@ -1056,7 +1080,19 @@ function ApprovalsPanel({
                   {formatRelative(a.decidedAt ?? a.sentAt)}
                 </span>
               </div>
-              <div className="text-muted-foreground break-words">{a.prompt}</div>
+              <div className="text-muted-foreground break-words">
+                {a.permissionTool && (
+                  <span className="inline-block px-1 py-0.5 mr-1 rounded bg-muted text-[9px] font-mono text-foreground/70 uppercase">
+                    {a.permissionTool}
+                  </span>
+                )}
+                {a.prompt}
+              </div>
+              {a.permissionContext && (
+                <pre className="text-[9px] font-mono text-muted-foreground bg-muted/50 rounded px-1.5 py-1 mt-0.5 overflow-hidden max-h-12 leading-snug">
+                  {a.permissionContext}
+                </pre>
+              )}
               {a.error && <div className="text-destructive">{a.error}</div>}
             </li>
           ))}
@@ -1320,6 +1356,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const discordInbound = useMessengerStore((s) => s.discordInbound);
   const discordHistory = useMessengerStore((s) => s.discordHistory);
   const loadDiscordHistory = useMessengerStore((s) => s.loadDiscordHistory);
+  const saveDiscordConfig = useMessengerStore((s) => s.saveDiscordConfig);
   const sendApprovalRequest = useMessengerStore((s) => s.sendApprovalRequest);
   const approvals = useMessengerStore((s) => s.approvals);
   const projects = useProjectsStore((s) => s.projects);
@@ -1344,10 +1381,22 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const isConnected = conn.status === 'connected';
   const setupComplete = hasToken && hasTarget && isConnected;
 
+  // Auto-save Discord config to server-side settings.json on mount so that
+  // the server-side auto-start on reboot picks it up. Runs when the
+  // ConnectionCard first renders (user visits Messenger settings page).
+  useEffect(() => {
+    if (conn.type === 'discord' && conn.botToken) {
+      saveDiscordConfig();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleSaveToken = () => {
     if (!tokenInput.trim()) return;
     if (conn.type === 'discord') {
       updateConnection('discord', { botToken: tokenInput.trim(), enabled: true });
+      // Persist to server-side settings.json so auto-start works on reboot
+      setTimeout(() => saveDiscordConfig(), 0);
     } else {
       updateConnection('telegram', { telegramBotToken: tokenInput.trim(), enabled: true });
     }
@@ -1361,6 +1410,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
     if (!value) return;
     if (conn.type === 'discord') {
       updateConnection('discord', { defaultChannelId: value });
+      // Persist to server-side settings.json so auto-start works on reboot
+      setTimeout(() => saveDiscordConfig(), 0);
       setTimeout(() => {
         resolveDiscordChannel();
       }, 0);
@@ -1731,6 +1782,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                     if (!v) return;
                     updateConnection('discord', { discordGuildId: v });
                     setGuildInput('');
+                    // Persist to server-side settings.json so auto-start works on reboot
+                    setTimeout(() => saveDiscordConfig(), 0);
                     setTimeout(() => resolveDiscordGuild(), 0);
                   }}
                   disabled={!guildInput.trim()}
@@ -1749,6 +1802,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                         type="button"
                         onClick={() => {
                           updateConnection('discord', { discordGuildId: g.id, guildName: g.name });
+                          // Persist to server-side settings.json so auto-start works on reboot
+                          setTimeout(() => saveDiscordConfig(), 0);
                           setTimeout(() => resolveDiscordGuild(), 0);
                         }}
                         className="rounded-full bg-background border border-border px-2 py-0.5 text-foreground hover:border-primary/40"
@@ -1792,15 +1847,17 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
                     updateConnection('discord', {
                       discordGuildId: undefined,
                       discordGuildChannels: undefined,
                       discordGuildCategories: undefined,
                       discordGuildActiveThreadCount: undefined,
                       discordParentCategoryId: undefined,
-                    })
-                  }
+                    });
+                    // Persist to server-side settings.json so auto-start works on reboot
+                    setTimeout(() => saveDiscordConfig(), 0);
+                  }}
                   className="text-primary text-[10px] hover:underline"
                 >
                   Change
@@ -1816,11 +1873,13 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                   <select
                     id={`cat-${conn.type}`}
                     value={conn.discordParentCategoryId ?? ''}
-                    onChange={(e) =>
+                    onChange={(e) => {
                       updateConnection('discord', {
                         discordParentCategoryId: e.target.value || undefined,
-                      })
-                    }
+                      });
+                      // Persist to server-side settings.json so auto-start works on reboot
+                      setTimeout(() => saveDiscordConfig(), 0);
+                    }}
                     className="rounded border border-border bg-background px-2 py-0.5 text-foreground text-[11px]"
                   >
                     <option value="">(none — root of server)</option>
@@ -1919,6 +1978,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                       discordChannelType: undefined,
                       discordChannelTypeLabel: undefined,
                     });
+                    // Persist to server-side settings.json so auto-start works on reboot
+                    setTimeout(() => saveDiscordConfig(), 0);
                   } else {
                     updateConnection('telegram', {
                       telegramChatId: undefined,
@@ -2012,7 +2073,11 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           type={conn.type}
           bridgeStatus={bridgeStatus}
           refreshBridgeStatus={refreshBridgeStatus}
-          onToggle={(v) => updateConnection(conn.type, { bridgeEnabled: v })}
+          onToggle={(v) => {
+            updateConnection(conn.type, { bridgeEnabled: v });
+            // Persist to server-side settings.json when toggling bridge for Discord
+            if (conn.type === 'discord') setTimeout(() => saveDiscordConfig(), 0);
+          }}
         />
       )}
 

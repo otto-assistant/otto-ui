@@ -81,7 +81,9 @@ function buildAutoReply(update) {
 
 async function processCallbackQuery(state, cb, broadcastEvent) {
   const data = typeof cb.data === 'string' ? cb.data : '';
+  // Parse: otto-approve:{id} (once), otto-approve-always:{id}, otto-deny:{id}
   const decision =
+    data.startsWith('otto-approve-always:') ? 'approve-always' :
     data.startsWith('otto-approve:') ? 'approve' :
     data.startsWith('otto-deny:') ? 'deny' :
     null;
@@ -95,7 +97,10 @@ async function processCallbackQuery(state, cb, broadcastEvent) {
   const approvalId = data.split(':')[1];
   const userName =
     cb.from?.first_name || cb.from?.username || `user ${cb.from?.id ?? ''}`.trim();
-  const ackText = decision === 'approve' ? `Approved by ${userName}` : `Denied by ${userName}`;
+  const isApprove = decision === 'approve' || decision === 'approve-always';
+  const ackText = isApprove
+    ? (decision === 'approve-always' ? `Approved always by ${userName}` : `Approved by ${userName}`)
+    : `Denied by ${userName}`;
   try {
     await tg(state.token, 'answerCallbackQuery', {
       callback_query_id: cb.id,
@@ -106,7 +111,9 @@ async function processCallbackQuery(state, cb, broadcastEvent) {
   // Edit the original message so the buttons disappear and the outcome is permanent in chat.
   if (cb.message?.chat?.id && cb.message?.message_id) {
     const original = cb.message.text ?? '';
-    const decoration = decision === 'approve' ? '\n\n✅ ' + ackText : '\n\n❌ ' + ackText;
+    const decoration = isApprove
+      ? (decision === 'approve-always' ? '\n\n♻️ ' + ackText : '\n\n✅ ' + ackText)
+      : '\n\n❌ ' + ackText;
     try {
       await tg(state.token, 'editMessageText', {
         chat_id: cb.message.chat.id,

@@ -68,6 +68,127 @@ export function toolDetailSpoiler(part) {
 }
 
 /**
+ * Render a PermissionRequest into a rich Discord/Telegram prompt.
+ * Mirrors the same tool-specific context as the web UI's PermissionCard.
+ * Returns a plain text + markdown string suitable for an approval message footer.
+ */
+export function renderPermissionContext(permission) {
+  if (!permission || typeof permission !== 'object') return '';
+  const tool = String(permission.permission ?? '').toLowerCase();
+  const meta = permission.metadata ?? {};
+
+  const getStr = (keys, fallback = '') => {
+    for (const key of keys) {
+      const val = meta[key];
+      if (typeof val === 'string' && val.length > 0) return val;
+    }
+    return fallback;
+  };
+
+  const clip = (s, limit) =>
+    s && s.length > limit ? s.slice(0, limit - 1) + '…' : s ?? '';
+
+  switch (tool) {
+    case 'bash':
+    case 'shell':
+    case 'shell_command':
+    case 'cmd':
+    case 'terminal': {
+      const cmd = getStr(['command', 'cmd', 'script']);
+      const desc = getStr(['description']);
+      if (!cmd && !desc) return '';
+      const parts = [];
+      if (desc) parts.push(`> *${clip(desc, 200)}*`);
+      if (cmd) parts.push('```bash\n' + clip(cmd, 800) + '\n```');
+      return parts.join('\n');
+    }
+    case 'edit':
+    case 'multiedit':
+    case 'str_replace':
+    case 'str_replace_based_edit_tool':
+    case 'apply_patch': {
+      const fp = getStr(['path', 'file_path', 'filename', 'filePath', 'file']);
+      const oldS = getStr(['old_string', 'oldString', 'changes', 'diff']);
+      const newS = getStr(['new_string', 'newString']);
+      if (!fp && !oldS && !newS) return '';
+      const parts = [];
+      if (fp) parts.push(`**File:** \`${fp}\``);
+      if (oldS) {
+        parts.push('**Replace:**\n```diff\n- ' + clip(oldS, 400) + '\n+ ' + clip(newS || '', 400) + '\n```');
+      } else if (newS) {
+        parts.push('**New content:**\n```\n' + clip(newS, 600) + '\n```');
+      }
+      return parts.join('\n');
+    }
+    case 'write':
+    case 'create':
+    case 'file_write': {
+      const fp = getStr(['path', 'file_path', 'filename', 'filePath', 'file']);
+      const content = getStr(['content', 'text', 'data']);
+      if (!fp && !content) return '';
+      const parts = [];
+      if (fp) parts.push(`**File:** \`${fp}\``);
+      if (content) parts.push('```\n' + clip(content, 600) + '\n```');
+      return parts.join('\n');
+    }
+    case 'webfetch':
+    case 'fetch':
+    case 'curl':
+    case 'wget': {
+      const url = getStr(['url', 'uri', 'endpoint']);
+      const method = getStr(['method']) || 'GET';
+      if (!url) return '';
+      return `**URL:** \`${method.toUpperCase()}\` ${url}`;
+    }
+    case 'read': {
+      const fp = getStr(['filePath', 'file_path', 'path', 'file', 'filename']);
+      const dir = getStr(['parentDir', 'parent_dir', 'directory']);
+      if (!fp && !dir) return '';
+      const parts = [];
+      if (fp) parts.push(`**Reading:** \`${fp}\``);
+      if (dir) parts.push(`**Directory:** \`${dir}\``);
+      return parts.join('\n');
+    }
+    case 'list':
+    case 'ls': {
+      const p = getStr(['path', 'directory', 'filePath']);
+      return p ? `**Listing:** \`${p}\`` : '';
+    }
+    case 'glob': {
+      const p = getStr(['pattern', 'glob']);
+      return p ? `**Pattern:** \`${p}\`` : '';
+    }
+    case 'grep': {
+      const p = getStr(['pattern', 'query']);
+      return p ? `**Search:** \`${p}\`` : '';
+    }
+    case 'external_directory': {
+      const fp = getStr(['filepath', 'path', 'directory']);
+      const par = getStr(['parentDir', 'parent_dir']);
+      const parts = [];
+      if (fp) parts.push(`**Path:** \`${fp}\``);
+      if (par) parts.push(`**Parent:** \`${par}\``);
+      return parts.join('\n');
+    }
+    case 'task':
+    case 'subagent': {
+      const desc = getStr(['description', 'prompt']);
+      return desc ? `> ${clip(desc, 300)}` : '';
+    }
+    default: {
+      const desc = getStr(['description', 'action', 'operation', 'command']);
+      if (desc) return `> *${clip(desc, 300)}*`;
+      const keys = Object.keys(meta).filter((k) => !['sessionID', 'id', 'type'].includes(k));
+      if (keys.length > 0) {
+        const preview = keys.slice(0, 3).map((k) => `${k}: ${String(meta[k]).slice(0, 60)}`).join('\n');
+        return '```\n' + clip(preview, 400) + '\n```';
+      }
+      return '';
+    }
+  }
+}
+
+/**
  * Render an OpenCode message part for a Discord/Telegram surface. Returns
  * `null` when nothing should be posted (e.g. empty text, pending tools).
  *
@@ -200,9 +321,25 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
     if (errMsg) line += ` — ${escapeMd(clipBlock(String(errMsg), 200))}`;
   }
 
-  // At max verbosity, append the full input + output/error collapsed behind a
-  // Discord spoiler so the channel isn't flooded but every detail is reachable.
-  if (normalizeVerbosity(verbosity) === 'verbose') {
+  const level = normalizeVerbosity(verbosity);
+
+  // Show tool output at any verbosity (not just verbose) — the user needs
+  // to see results, especially after approving a permission request.
+  if (status === 'completed' && part.state?.output && typeof part.state.output === 'string' && part.state.output.trim()) {
+    const out = clipBlock(part.state.output.trim(), level === 'verbose' ? 1500 : 500);
+    // Use a compact code block for the output
+    line += `\n\`\`\`\n${out}\n\`\`\``;
+  } else if (status === 'completed' && part.state?.output && typeof part.state.output === 'object') {
+    try {
+      const out = clipBlock(JSON.stringify(part.state.output, null, 2), level === 'verbose' ? 1500 : 500);
+      line += `\n\`\`\`json\n${out}\n\`\`\``;
+    } catch {
+      // ignore
+    }
+  }
+
+  // At verbose verbosity, also append the full input under a spoiler
+  if (level === 'verbose') {
     const detail = toolDetailSpoiler(part);
     if (detail) line += `\n${detail}`;
   }

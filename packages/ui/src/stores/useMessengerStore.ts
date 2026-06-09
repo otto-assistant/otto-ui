@@ -216,6 +216,14 @@ export interface MessengerApproval {
   decidedAt: number | null;
   decidedBy: string | null;
   error: string | null;
+  /** OpenCode session ID that this approval is for (optional). */
+  sessionID?: string;
+  /** OpenCode permission request ID. */
+  requestID?: string;
+  /** Tool name (bash, read, edit, webfetch, external_directory, etc.). */
+  permissionTool?: string;
+  /** Rich permission context rendered for display. */
+  permissionContext?: string;
 }
 
 export interface TelegramInboundMessage {
@@ -322,6 +330,7 @@ interface MessengerState {
   diagnoseDiscord: () => Promise<boolean>;
   refreshBridgeStatus: (type?: MessengerType) => Promise<void>;
   setBridgeVerbosity: (type: MessengerType, level: MessengerVerbosity) => Promise<boolean>;
+  saveDiscordConfig: () => Promise<void>;
   startDiscordListener: () => Promise<boolean>;
   stopDiscordListener: () => Promise<boolean>;
   refreshDiscordListenerStatus: () => Promise<void>;
@@ -331,7 +340,19 @@ interface MessengerState {
   sendApprovalRequest: (
     type: MessengerType,
     prompt: string,
-    opts?: { target?: string; threadId?: string },
+    opts?: {
+      target?: string;
+      threadId?: string;
+      /** Structured permission data for rich rendering in messenger. */
+      permission?: {
+        id?: string;
+        sessionID?: string;
+        permission?: string;
+        patterns?: string[];
+        metadata?: Record<string, unknown>;
+        always?: string[];
+      };
+    },
   ) => Promise<MessengerApproval | null>;
   ingestApprovalDecision: (
     approvalId: string,
@@ -1178,6 +1199,23 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
+      saveDiscordConfig: async () => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) return;
+        try {
+          await postJson('/api/otto/messenger/discord/save-config', {
+            botToken: conn.botToken,
+            guildId: conn.discordGuildId,
+            autoReply: conn.discordListenerAutoReply !== false,
+            scopeToGuild: Boolean(conn.discordListenerScopeToGuild),
+            bridgeEnabled: conn.bridgeEnabled !== false,
+            defaultChannelId: conn.defaultChannelId,
+          });
+        } catch {
+          // silent — config save is best-effort
+        }
+      },
+
       startDiscordListener: async () => {
         const conn = get().connections.find((c) => c.type === 'discord');
         if (!conn?.botToken) return false;
@@ -1232,6 +1270,8 @@ export const useMessengerStore = create<MessengerState>()(
             discordListenerError: data.lastError ?? null,
             discordListenerAutoReply: data.autoReply ?? true,
           });
+          // Persist config server-side so it auto-starts on server restart
+          get().saveDiscordConfig();
           return true;
         } catch (e) {
           get().updateConnection('discord', {
@@ -1397,15 +1437,30 @@ export const useMessengerStore = create<MessengerState>()(
             type === 'discord'
               ? '/api/otto/messenger/discord/send-approval'
               : '/api/otto/messenger/telegram/send-approval';
-          const body: Record<string, unknown> =
-            type === 'discord'
-              ? { token, channelId: target, prompt }
-              : {
-                  token,
-                  chatId: target,
-                  prompt,
-                  ...(opts?.threadId ? { threadId: opts.threadId } : {}),
-                };
+          const perm = opts?.permission;
+          // Build the request body — include structured permission data when available
+          const body: Record<string, unknown> = {
+            token,
+            prompt,
+            ...(perm
+              ? {
+                  permission: {
+                    id: perm.id,
+                    sessionID: perm.sessionID,
+                    permission: perm.permission,
+                    patterns: perm.patterns ?? [],
+                    metadata: perm.metadata ?? {},
+                    always: perm.always ?? [],
+                  },
+                }
+              : {}),
+          };
+          if (type === 'discord') {
+            body.channelId = target;
+          } else {
+            body.chatId = target;
+            if (opts?.threadId) body.threadId = opts.threadId;
+          }
           const data = await postJson<{
             ok: boolean;
             error?: string;
@@ -1426,6 +1481,9 @@ export const useMessengerStore = create<MessengerState>()(
               decidedAt: null,
               decidedBy: null,
               error: data.error ?? 'send-approval failed',
+              sessionID: perm?.sessionID,
+              requestID: perm?.id,
+              permissionTool: perm?.permission,
             };
             set({ approvals: [failed, ...get().approvals].slice(0, 50) });
             return null;
@@ -1441,6 +1499,9 @@ export const useMessengerStore = create<MessengerState>()(
             decidedAt: null,
             decidedBy: null,
             error: null,
+            sessionID: perm?.sessionID,
+            requestID: perm?.id,
+            permissionTool: perm?.permission,
           };
           set({ approvals: [approval, ...get().approvals].slice(0, 50) });
           return approval;
@@ -1525,7 +1586,8 @@ export const useMessengerStore = create<MessengerState>()(
           error: null,
           lastSyncStatus: 'idle' as const,
           lastSyncMessage: null,
-          // Listener state lives on the server — clear it so the UI re-syncs after reload.
+          // Listener state lives on the server — clear it on persist so the
+          // UI always re-syncs from the server after reload (via auto-start).
           telegramListenerRunning: false,
           telegramListenerStartedAt: null,
           telegramListenerLastUpdateAt: null,

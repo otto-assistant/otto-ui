@@ -779,11 +779,20 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
     if (typeof document === "undefined") return
     if (document.visibilityState !== "visible") return
     if (Date.now() - lastEventAt < heartbeatTimeoutMs) return
+    if (process.env.NODE_ENV === 'development') {
+      console.warn(
+        '[event-pipeline] Page became visible after inactivity — aborting SSE attempt.',
+        { lastEventAt, heartbeatTimeoutMs, age: Date.now() - lastEventAt },
+      )
+    }
     attempt?.abort()
   }
 
   const onPageShow = (event: PageTransitionEvent) => {
     if (!event.persisted) return
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[event-pipeline] Page restored from BFCache — aborting SSE attempt.')
+    }
     attempt?.abort()
   }
 
@@ -792,6 +801,9 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
   // reconnect loop fires on the next tick with retryDelayMs = 0.
   const onSystemResume = () => {
     attemptAbortReason = `${activeTransport}_system_resume`
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[event-pipeline] System resume detected — aborting SSE attempt.')
+    }
     attempt?.abort()
   }
 
@@ -802,6 +814,9 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
   // doesn't disrupt a healthy connection.
   const onOnline = () => {
     if (!disconnected) return
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[event-pipeline] Network came back online — aborting SSE attempt for fast reconnect.')
+    }
     attempt?.abort()
   }
 

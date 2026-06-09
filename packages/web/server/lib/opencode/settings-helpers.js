@@ -698,6 +698,33 @@ export const createSettingsHelpers = (dependencies) => {
       result.sttTranscribeOnStop = candidate.sttTranscribeOnStop;
     }
 
+    // Discord listener config — saved so the server can auto-start on boot.
+    if (candidate.discord && typeof candidate.discord === 'object') {
+      const d = candidate.discord;
+      const sanitized = {};
+      if (typeof d.botToken === 'string' && d.botToken.length > 0) {
+        sanitized.botToken = d.botToken;
+      }
+      if (typeof d.guildId === 'string' && d.guildId.length > 0) {
+        sanitized.guildId = d.guildId;
+      }
+      if (typeof d.autoReply === 'boolean') {
+        sanitized.autoReply = d.autoReply;
+      }
+      if (typeof d.scopeToGuild === 'boolean') {
+        sanitized.scopeToGuild = d.scopeToGuild;
+      }
+      if (typeof d.bridgeEnabled === 'boolean') {
+        sanitized.bridgeEnabled = d.bridgeEnabled;
+      }
+      if (typeof d.defaultChannelId === 'string' && d.defaultChannelId.length > 0) {
+        sanitized.defaultChannelId = d.defaultChannelId;
+      }
+      if (Object.keys(sanitized).length > 0) {
+        result.discord = sanitized;
+      }
+    }
+
     return result;
   };
 

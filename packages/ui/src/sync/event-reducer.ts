@@ -298,6 +298,19 @@ export function applyDirectoryEvent(
 
     case "message.updated": {
       const info = (event.properties as { info: Message }).info
+      // Debug logging for MessageAbortedError — helps identify unexpected aborts
+      if (process.env.NODE_ENV === 'development') {
+        const errorField = (info as Record<string, unknown>).error
+        if (errorField && typeof errorField === 'object') {
+          const err = errorField as { name?: string; data?: { message?: string } }
+          if (err.name === 'MessageAbortedError' || err.data?.message === 'aborted') {
+            console.warn(
+              `[event-reducer] MessageAbortedError received for ${info.role} message ${info.id} in session ${info.sessionID}`,
+              { error: err, info },
+            )
+          }
+        }
+      }
       const messages = draft.message[info.sessionID]
       if (!messages) {
         draft.message[info.sessionID] = [info]
