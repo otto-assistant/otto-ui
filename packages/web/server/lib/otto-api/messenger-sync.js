@@ -112,6 +112,21 @@ export function createMessengerSyncRouter({
           listProjects,
           bootstrapProject: projectBootstrap,
           lookupMessengerTarget: makeLookupMessengerTarget(),
+          // Fall back to the same Settings → Defaults model/agent the web chat
+          // uses when a surface/project hasn't set its own override.
+          getGlobalDefaults: readSettings
+            ? async () => {
+                try {
+                  const settings = await readSettings();
+                  return {
+                    model: settings?.defaultModel ?? null,
+                    agent: settings?.defaultAgent ?? null,
+                  };
+                } catch {
+                  return { model: null, agent: null };
+                }
+              }
+            : null,
         })
       : null;
   if (bridge) {

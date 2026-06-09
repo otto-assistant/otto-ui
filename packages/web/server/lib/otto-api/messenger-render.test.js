@@ -21,13 +21,18 @@ describe('renderPartForMessenger — verbosity gating', () => {
     expect(renderPartForMessenger(toolPart(), 'quiet')).toBeNull();
   });
 
-  it('normal: text + thinking marker + compact tool one-liner (no spoiler)', () => {
+  it('normal: text + thinking marker + compact tool one-liner (no spoiler, no raw output dump)', () => {
     expect(renderPartForMessenger({ type: 'text', text: 'hi' }, 'normal')).toBe('hi');
     expect(renderPartForMessenger({ type: 'reasoning', text: 'x' }, 'normal')).toBe('┣ thinking');
     const line = renderPartForMessenger(toolPart(), 'normal');
     expect(line).toContain('bash');
-    expect(line).toContain('ls -la');
-    expect(line).not.toContain('||');
+    expect(line).toContain('ls -la'); // command summary stays
+    expect(line).not.toContain('||'); // no spoiler at normal
+    // The raw tool output must NOT be dumped inline at normal verbosity — it
+    // only belongs under the verbose spoiler, keeping the channel feed compact.
+    expect(line).not.toContain('total 0');
+    // A single compact line, not a multi-line code-block dump.
+    expect(line.split('\n').length).toBe(1);
   });
 
   it('verbose: appends a collapsed spoiler with input + output', () => {

@@ -12,12 +12,12 @@ function makeMutators() {
   };
 }
 
-async function run(text, { binding = null, surfaceMutators = makeMutators() } = {}) {
+async function run(text, { binding = null, surfaceMutators = makeMutators(), opencode = {} } = {}) {
   const command = parseLeadingCommand(text);
   const result = await executeMessengerCommand({
     command,
     ctx,
-    opencode: {},
+    opencode,
     binding,
     surfaceMutators,
   });
@@ -81,6 +81,46 @@ describe('/verbosity command', () => {
     const { result, surfaceMutators } = await run('/verbosity loud');
     expect(result.reply).toMatch(/Unknown level/);
     expect(surfaceMutators.setOverrides).not.toHaveBeenCalled();
+  });
+});
+
+describe('/model + /status surface the OpenChamber default model', () => {
+  const opencode = { listProviders: async () => [{ id: 'anthropic', name: 'Anthropic', models: [{ id: 'claude-sonnet-4' }] }] };
+
+  it('/model with no args shows the OpenChamber default when no override is set', async () => {
+    const { result } = await run('/model', {
+      opencode,
+      binding: {
+        globalDefaultModel: 'anthropic/claude-sonnet-4',
+        projectDefaults: null,
+      },
+    });
+    expect(result.reply).toContain('OpenChamber default');
+    expect(result.reply).toContain('anthropic/claude-sonnet-4');
+  });
+
+  it('/model with no args explains nothing is set when there is no default anywhere', async () => {
+    const { result } = await run('/model', { opencode, binding: {} });
+    expect(result.reply).toMatch(/No default set/);
+  });
+
+  it('/status falls back to the OpenChamber default model + agent', async () => {
+    const { result } = await run('/status', {
+      binding: {
+        globalDefaultModel: 'openai/gpt-5',
+        globalDefaultAgent: 'build',
+      },
+    });
+    expect(result.reply).toContain('`openai/gpt-5` _(OpenChamber default)_');
+    expect(result.reply).toContain('`build` _(OpenChamber default)_');
+  });
+
+  it('/status prefers a surface override over the OpenChamber default', async () => {
+    const { result } = await run('/status', {
+      binding: { modelOverride: 'x/y', globalDefaultModel: 'openai/gpt-5' },
+    });
+    expect(result.reply).toContain('`x/y` _(this conversation)_');
+    expect(result.reply).not.toContain('OpenChamber default');
   });
 });
 
