@@ -148,38 +148,6 @@ export function useAllSessionStatuses(): Record<string, SessionStatus> {
   )
 }
 
-const EMPTY_PERMISSION_LIST: PermissionRequest[] = []
-
-const arePermissionListsEquivalent = (a: PermissionRequest[], b: PermissionRequest[]): boolean => {
-  if (a === b) return true
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i].id !== b[i].id) return false
-  }
-  return true
-}
-
-/**
- * Read a session's pending permission requests by scanning every already-
- * loaded child store. Unlike `useSessionPermissions`, this does NOT
- * create or bootstrap a child store for the session's directory — making
- * it safe to call from sidebar list items, where hundreds of instances
- * may be rendered at once for projects/worktrees that we don't yet (and
- * may never) need to fully bootstrap.
- */
-export function useGlobalSessionPermissions(sessionId: string): PermissionRequest[] {
-  return useLiveSyncSelector(
-    useCallback((states) => {
-      for (const state of states) {
-        const list = state.permission?.[sessionId]
-        if (list && list.length > 0) return list
-      }
-      return EMPTY_PERMISSION_LIST
-    }, [sessionId]),
-    arePermissionListsEquivalent,
-  )
-}
-
 type LiveSessionStatusCounts = {
   running: number
 }
@@ -220,22 +188,15 @@ export function useAllLiveSessions(): Session[] {
 let bootingRoot = false
 let bootedAt = 0
 let globalBootstrapGeneration = 0
-// Wide enough to cover OpenCode's typical warmup window. The first
-// `server.connected` SSE event on each page load is the normal handshake
-// (not a real OpenCode restart) and we MUST NOT treat it as a signal to
-// re-bootstrap every child directory.
-const BOOT_DEBOUNCE_MS = 30_000
-// Tracks whether we have already observed a `server.connected` event since
-// page boot. The very first one is the SSE/WS handshake completing; only
-// subsequent ones indicate a real server restart and warrant re-bootstrap.
-let serverConnectedSeen = false
-const RECONNECT_MESSAGE_LIMIT = 200
+const BOOT_DEBOUNCE_MS = 1500
+const RECONNECT_MESSAGE_LIMIT = 30
 const SESSION_MATERIALIZATION_MESSAGE_LIMIT = 30
 const RECONNECT_SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 const ACTIVE_SESSION_WATCHDOG_INTERVAL_MS = 5_000
 const ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS = 5_000
 const ACTIVE_SESSION_STALE_EVENT_MS = 20_000
 const ACTIVE_SESSION_FULL_RESYNC_COOLDOWN_MS = 15_000
+const CHILD_SESSION_DISCOVERY_INTERVAL_MS = 15_000
 const requestSignature = (items: Array<{ id: string }> | undefined): string => {
   if (!items || items.length === 0) return ""
   return items
@@ -1321,17 +1282,7 @@ function handleEvent(
     // On server.connected / global.disposed, re-bootstrap all directories
     // but only if not during recent boot
     if (payload.type === "server.connected" || payload.type === "global.disposed") {
-      // The first `server.connected` after page load is just the normal SSE
-      // handshake completing — it does NOT indicate an OpenCode restart and
-      // must not trigger a re-bootstrap (which previously doubled the API
-      // request volume on every page load). Only subsequent
-      // `server.connected` events represent a real server restart.
-      const isFirstServerConnected =
-        payload.type === "server.connected" && !serverConnectedSeen
-      if (payload.type === "server.connected") {
-        serverConnectedSeen = true
-      }
-      if (!recent && !isFirstServerConnected) {
+      if (!recent) {
         for (const dir of childStores.children.keys()) {
           const store = childStores.getChild(dir)
           if (store && store.getState().status !== "loading") {
@@ -1602,11 +1553,6 @@ export function SyncProvider(props: {
   const messageStreamTransport = useConfigStore((state) => state.settingsMessageStreamTransport)
   const childStoresRef = useRef<ChildStoreManager | null>(null)
   if (!childStoresRef.current) childStoresRef.current = new ChildStoreManager()
-  // Track the current active directory in a ref so onBootstrap (created
-  // once via useEffect) can read the *current* value at retry-time
-  // without re-binding on every directory change.
-  const activeDirectoryRef = useRef(props.directory)
-  activeDirectoryRef.current = props.directory
   const childStores = childStoresRef.current
   const routingIndexRef = useRef<EventRoutingIndex | null>(null)
   if (!routingIndexRef.current) routingIndexRef.current = createEventRoutingIndex()
@@ -1614,6 +1560,7 @@ export function SyncProvider(props: {
   const lastActiveEventAtByDirectoryRef = useRef(new Map<string, number>())
   const lastStatusPollAtByDirectoryRef = useRef(new Map<string, number>())
   const lastFullResyncAtByDirectoryRef = useRef(new Map<string, number>())
+  const lastChildDiscoveryAtByDirectoryRef = useRef(new Map<string, number>())
   const resyncingDirectoriesRef = useRef(new Set<string>())
   const statusPollingDirectoriesRef = useRef(new Set<string>())
   const pipelineReconnectRef = useRef<((reason?: string) => void) | null>(null)
@@ -1672,10 +1619,9 @@ export function SyncProvider(props: {
               config: globalState.config,
               projects: globalState.projects,
               providers: globalState.providers,
-              path: globalState.path,
             },
             loadSessions: (dir) => retry(async () => {
-              const sessions = (await listGlobalSessionPages(props.sdk, {
+              const rootSessions = (await listGlobalSessionPages(props.sdk, {
                 directory: dir,
                 archived: false,
                 roots: true,
@@ -1683,6 +1629,30 @@ export function SyncProvider(props: {
               }))
                 .filter((s) => !!s?.id)
                 .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+
+              // Also load child sessions (sub-agent delegations) so they
+              // appear in the sidebar immediately instead of relying on
+              // the async global session store.
+              let allSessions: typeof rootSessions = []
+              try {
+                const allResult = await props.sdk.session.list({
+                  directory: dir,
+                  limit: 200,
+                })
+                const allError = (allResult as { error?: unknown }).error
+                if (!allError) {
+                  allSessions = ((allResult as { data?: unknown }).data ?? []) as typeof rootSessions
+                }
+              } catch {
+                // Child load is best-effort; fall back to roots only
+              }
+
+              // Merge: keep root sessions from the first query (for accurate
+              // sessionTotal), plus any child sessions from the broader query.
+              const rootIds = new Set(rootSessions.map((s: { id: string }) => s.id))
+              const childSessions = allSessions.filter((s: { id: string; parentID?: string | null }) => s?.id && !rootIds.has(s.id) && s.parentID)
+
+              const sessions = rootSessions.concat(childSessions)
               // Race guard: if the list came back empty but event pipeline
               // already populated the store, don't clobber. OpenCode can
               // answer HTTP with empty sessions while WS delivers session
@@ -1694,34 +1664,21 @@ export function SyncProvider(props: {
                 )
                 return
               }
-              store.setState({ session: sessions, sessionTotal: sessions.length, limit: Math.max(sessions.length, 50) })
+              store.setState({ session: sessions, sessionTotal: rootSessions.length, limit: Math.max(sessions.length, 50) })
               ingestDirectoryStateIntoRoutingIndex(routingIndex, directory, store.getState())
             }),
           })
 
           // VS Code race: if sessions are still empty after bootstrap, OpenCode
-          // wasn't ready yet (bridge returned 503). Retry — but ONLY for the
-          // currently-active directory and ONLY once.
-          //
-          // The previous "always retry up to 5 times" logic was a denial of
-          // service when many projects/worktrees were registered: the
-          // sidebar would mount a row per session, each ensure+bootstrap a
-          // child store for its directory, each retry 5× × 2s = 10s of
-          // background SDK polling. With 50 directories that fans out to
-          // 50 × 5 = 250 bootstrap rounds, ≈3000 SDK calls in waves, and a
-          // CPU-pegged tab. An empty session list is the legitimate state
-          // for a brand new project — it does not deserve a retry storm.
+          // wasn't ready yet (bridge returned 503). Retry a few times.
           const state = store.getState()
-          const isActiveDirectory = directory === activeDirectoryRef.current
-          if (state.session.length === 0 && attempt < 1 && isActiveDirectory) {
-            // Downgraded from console.warn — this is the expected first
-            // attempt under a slow/cold OpenCode backend (or a brand new
-            // project with no sessions yet) and was alarming users into
-            // thinking the app was malfunctioning.
-            console.debug(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
+          if (state.session.length === 0 && attempt < 5) {
+            console.warn(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
             await new Promise((r) => setTimeout(r, 2000))
             store.setState({ status: "loading" as const })
             await runBootstrap(attempt + 1)
+          } else if (state.session.length === 0) {
+            console.warn(`[bootstrap] sessions empty for ${directory} after ${attempt + 1} attempts; giving up`)
           }
         }
 
@@ -1790,7 +1747,6 @@ export function SyncProvider(props: {
         handleEvent(directory, payload, childStores, routingIndex)
       },
       onReconnect: () => {
-        const { hasEverConnected: wasEverConnected } = useConfigStore.getState()
         useConfigStore.setState({
           isConnected: true,
           hasEverConnected: true,
@@ -1801,19 +1757,6 @@ export function SyncProvider(props: {
         }
         for (const dir of childStores.children.keys()) {
           triggerDirectoryResync(dir)
-        }
-        // If we lost SSE and came back, the per-directory resync covers
-        // the active directory's state but the global session list
-        // (cross-project) can drift while disconnected. Re-pull it so
-        // sessions created in other projects show up after reconnect.
-        // Skipped on the initial connection — `ensureGlobalSessionsLoaded`
-        // already handled the cold load.
-        if (wasEverConnected) {
-          void import("@/stores/useGlobalSessionsStore").then((mod) => {
-            mod.refreshGlobalSessions().catch(() => {
-              // Transient — next SSE event or backstop will catch up.
-            })
-          })
         }
       },
       onDisconnect: (reason) => {
@@ -1849,6 +1792,53 @@ export function SyncProvider(props: {
   useEffect(() => {
     let stopped = false
     let running = false
+
+    const discoverChildSessions = async (
+      directory: string,
+      store: StoreApi<DirectoryStore>,
+      parentSessionIds: string[],
+    ) => {
+      if (parentSessionIds.length === 0) return
+      try {
+        const scopedClient = opencodeClient.getScopedSdkClient(directory)
+        const result = await scopedClient.session.list({ directory, limit: 200 })
+        const allSessions = ((result as { data?: unknown }).data ?? []) as Session[]
+        const state = store.getState()
+        const existingIds = new Set(state.session.map((s) => s.id))
+        const parentIdSet = new Set(parentSessionIds)
+        const newChildSessions: Session[] = []
+        for (const session of allSessions) {
+          if (
+            session?.id
+            && !existingIds.has(session.id)
+            && (session as { parentID?: string | null }).parentID
+            && parentIdSet.has((session as { parentID: string }).parentID)
+          ) {
+            newChildSessions.push(session)
+          }
+        }
+        if (newChildSessions.length === 0) return
+        // Collect unique parent IDs for materialization
+        const parentIdsForMaterialization = new Set<string>()
+        for (const session of newChildSessions) {
+          const pid = (session as { parentID?: string | null }).parentID
+          if (pid) parentIdsForMaterialization.add(pid)
+        }
+        store.setState((state: DirectoryStore) => {
+          const sessions = [...state.session, ...newChildSessions].sort((a, b) =>
+            a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+          )
+          return { session: sessions, limit: Math.max(sessions.length, 50) }
+        })
+        // Trigger parent session materialization so the task tool part
+        // state (metadata, sessionId, output) is refreshed.
+        for (const pid of parentIdsForMaterialization) {
+          enqueueSessionMaterialization(directory, pid, childStores)
+        }
+      } catch {
+        // Best-effort — next tick will retry.
+      }
+    }
 
     const pollDirectoryStatuses = async (
       directory: string,
@@ -1908,6 +1898,14 @@ export function SyncProvider(props: {
             ) {
               pipelineReconnectRef.current?.("active_stream_stale")
               triggerDirectoryResync(directory)
+            }
+
+            // Discover child sessions created by other OpenCode instances
+            // that didn't broadcast a session.created event on this stream.
+            const lastChildDiscoveryAt = lastChildDiscoveryAtByDirectoryRef.current.get(directory) ?? 0
+            if (now - lastChildDiscoveryAt >= CHILD_SESSION_DISCOVERY_INTERVAL_MS) {
+              lastChildDiscoveryAtByDirectoryRef.current.set(directory, now)
+              void discoverChildSessions(directory, store, candidateSessionIds)
             }
           }
         })

@@ -12,7 +12,7 @@ import { getRuntimeKey } from '@/lib/runtime-switch';
 
 export type { AppActiveView };
 
-export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files' | 'context';
+export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files' | 'context' | 'diagram';
 export type RightSidebarTab = 'git' | 'files' | 'context';
 export type ContextPanelMode = 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'preview' | 'browser';
 export type MermaidRenderingMode = 'svg' | 'ascii';
@@ -22,6 +22,11 @@ export type ActivityRenderMode = 'collapsed' | 'summary';
 export type SessionRetentionAction = 'archive' | 'delete';
 export type TimeFormatPreference = 'auto' | '12h' | '24h';
 export type WeekStartPreference = 'auto' | 'sunday' | 'monday';
+export type FileEditorKeymap = 'default' | 'vim';
+
+function normalizeFileEditorKeymap(value: unknown): FileEditorKeymap {
+  return value === 'vim' ? 'vim' : 'default';
+}
 
 type ContextPanelTab = {
   id: string;
@@ -522,6 +527,7 @@ interface UIStore {
   sidebarOpenBeforeFullscreenTab: boolean | null;
   pendingDiffFile: string | null;
   pendingDiffStaged: boolean;
+  pendingDiagramFile: string | null;
   pendingFileNavigation: PendingFileNavigation | null;
   pendingFileFocusPath: string | null;
   isMobile: boolean;
@@ -628,6 +634,7 @@ interface UIStore {
   isExpandedInput: boolean;
   reportUsage: boolean;
   shortcutOverrides: Record<string, ShortcutCombo>;
+  fileEditorKeymap: FileEditorKeymap;
 
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
   toggleSidebar: () => void;
@@ -665,10 +672,13 @@ interface UIStore {
   restoreForRuntimeSwitch: (runtimeKey?: string | null) => void;
   setMainTabGuard: (guard: MainTabGuard | null) => void;
   setPendingDiffFile: (filePath: string | null, staged?: boolean) => void;
+  setPendingDiagramFile: (filePath: string | null) => void;
   setPendingFileNavigation: (navigation: PendingFileNavigation | null) => void;
   setPendingFileFocusPath: (path: string | null) => void;
   navigateToDiff: (filePath: string, staged?: boolean) => void;
   consumePendingDiffFile: () => string | null;
+  navigateToDiagram: (filePath: string) => void;
+  consumePendingDiagramFile: () => string | null;
   setIsMobile: (isMobile: boolean) => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
@@ -776,6 +786,7 @@ interface UIStore {
   setShortcutOverride: (actionId: string, combo: ShortcutCombo) => void;
   clearShortcutOverride: (actionId: string) => void;
   resetAllShortcutOverrides: () => void;
+  setFileEditorKeymap: (value: FileEditorKeymap) => void;
 }
 
 
@@ -808,6 +819,7 @@ export const useUIStore = create<UIStore>()(
         sidebarOpenBeforeFullscreenTab: null,
         pendingDiffFile: null,
         pendingDiffStaged: false,
+        pendingDiagramFile: null,
         pendingFileNavigation: null,
         pendingFileFocusPath: null,
         isMobile: false,
@@ -905,6 +917,7 @@ export const useUIStore = create<UIStore>()(
         isExpandedInput: false,
         reportUsage: true,
         shortcutOverrides: {},
+        fileEditorKeymap: 'default',
 
         setTheme: (theme) => {
           set({ theme });
@@ -1394,6 +1407,10 @@ export const useUIStore = create<UIStore>()(
           set({ pendingDiffFile: filePath, pendingDiffStaged: filePath ? staged : false });
         },
 
+        setPendingDiagramFile: (filePath) => {
+          set({ pendingDiagramFile: filePath });
+        },
+
         setPendingFileNavigation: (navigation) => {
           set({ pendingFileNavigation: navigation });
         },
@@ -1416,6 +1433,22 @@ export const useUIStore = create<UIStore>()(
             set({ pendingDiffFile: null, pendingDiffStaged: false });
           }
           return pendingDiffFile;
+        },
+
+        navigateToDiagram: (filePath) => {
+          const guard = get().mainTabGuard;
+          if (guard && !guard('diagram')) {
+            return;
+          }
+          set({ pendingDiagramFile: filePath, activeMainTab: 'diagram' });
+        },
+
+        consumePendingDiagramFile: () => {
+          const { pendingDiagramFile } = get();
+          if (pendingDiagramFile) {
+            set({ pendingDiagramFile: null });
+          }
+          return pendingDiagramFile;
         },
 
         setIsMobile: (isMobile) => {
@@ -2062,6 +2095,10 @@ export const useUIStore = create<UIStore>()(
           set({ shortcutOverrides: {} });
         },
 
+        setFileEditorKeymap: (value) => {
+          set({ fileEditorKeymap: normalizeFileEditorKeymap(value) });
+        },
+
         toggleExpandedInput: () => {
           set((state) => ({ isExpandedInput: !state.isExpandedInput }));
         },
@@ -2166,6 +2203,7 @@ export const useUIStore = create<UIStore>()(
               state.activeView = 'dashboard';
             }
           }
+          state.fileEditorKeymap = normalizeFileEditorKeymap(state.fileEditorKeymap);
 
           return state;
         },
@@ -2250,6 +2288,7 @@ export const useUIStore = create<UIStore>()(
           isMobileSessionStatusBarCollapsed: state.isMobileSessionStatusBarCollapsed,
           mobileSessionFilterProjectId: state.mobileSessionFilterProjectId,
           shortcutOverrides: state.shortcutOverrides,
+          fileEditorKeymap: state.fileEditorKeymap,
         })
       }
     ),
