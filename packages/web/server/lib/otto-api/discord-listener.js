@@ -225,36 +225,405 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
   }
 }
 
-async function dispatchInteractionCreate(state, interaction, broadcastEvent) {
-  // We only care about MESSAGE_COMPONENT (type 3) interactions for approval buttons.
-  // Type 1 = PING (auto-acked), 2 = APPLICATION_COMMAND (slash), 3 = MESSAGE_COMPONENT, 5 = MODAL_SUBMIT.
+/**
+ * Known messenger command names that can be handled as native Discord slash commands.
+ * Kept in sync with messenger-commands.js COMMAND_HELP.
+ */
+const KNOWN_SLASH_COMMANDS = new Set([
+  'help', 'status', 'abort', 'new', 'undo', 'redo',
+  'compact', 'summary', 'init', 'review',
+  'model', 'agent', 'verbosity', 'sessions',
+]);
+
+// ── Interactive model wizard ──────────────────────────────────────────────
+// State for multi-step /model wizard (provider → model → scope).
+// Keyed by random hash embedded in the select menu custom_id.
+const modelWizardTTL = 10 * 60 * 1000; // 10 minutes
+const modelWizardState = new Map();
+const modelWizardTimers = new Map();
+
+function setWizard(hash, data) {
+  const existing = modelWizardTimers.get(hash);
+  if (existing) clearTimeout(existing);
+  modelWizardState.set(hash, data);
+  const timer = setTimeout(() => { modelWizardState.delete(hash); modelWizardTimers.delete(hash); }, modelWizardTTL);
+  timer.unref();
+  modelWizardTimers.set(hash, timer);
+}
+
+function getWizard(hash) {
+  return modelWizardState.get(hash) ?? null;
+}
+
+function delWizard(hash) {
+  const timer = modelWizardTimers.get(hash);
+  if (timer) { clearTimeout(timer); modelWizardTimers.delete(hash); }
+  modelWizardState.delete(hash);
+}
+
+function stringSelect(label, customId, options, placeholder) {
+  return {
+    type: 1,
+    components: [{
+      type: 3,
+      custom_id: customId,
+      options: options.slice(0, 25),
+      placeholder: placeholder ?? 'Select...',
+    }],
+  };
+}
+
+async function startModelWizard(state, interaction, bridge) {
+  const hash = crypto.randomBytes(6).toString('hex');
+
+  // Fetch providers from OpenCode via the bridge
+  let providerData;
+  try { providerData = await bridge?.fetchProviders?.(); } catch {}
+  if (!providerData || !Array.isArray(providerData.all) || providerData.all.length === 0) {
+    // Fall back to text response if bridge unavailable
+    const result = await bridge?.runCommand?.({ type: 'discord', token: state.token, channelId: interaction.channel_id, commandName: 'model' });
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 4,
+      data: { content: result?.reply?.slice(0, 2000) ?? '_(no providers configured)_', flags: 64 },
+    });
+    return;
+  }
+
+  const { all, connected } = providerData;
+  const connectedSet = new Set(Array.isArray(connected) ? connected : []);
+  const available = all.filter((p) => connectedSet.has(p.id));
+
+  if (available.length === 0) {
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 4,
+      data: { content: 'No providers with credentials found. Use `/login` to connect a provider.', flags: 64 },
+    });
+    return;
+  }
+
+  const options = available.map((p) => {
+    const count = p.models ? (Array.isArray(p.models) ? p.models.length : Object.keys(p.models).length) : 0;
+    return {
+      label: (p.name ?? p.id).slice(0, 100),
+      value: p.id,
+      description: `${count} model${count !== 1 ? 's' : ''}`.slice(0, 100),
+    };
+  });
+
+  // Store wizard context
+  setWizard(hash, {
+    token: state.token,
+    channelId: interaction.channel_id,
+    guildId: interaction.guild_id,
+    appId: interaction.application_id,
+    interactionToken: interaction.token,
+    providers: available,
+  });
+
+  // Respond with provider select menu
+  await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+    type: 4,
+    data: {
+      content: '**Set Model Preference**\nSelect a provider:',
+      flags: 64,
+      components: [stringSelect('Select a provider', `otto-model-provider:${hash}`, options, 'Select a provider')],
+    },
+  });
+}
+
+async function handleModelProviderSelect(state, interaction, customId, hash) {
+  const wizard = getWizard(hash);
+  if (!wizard) {
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 4,
+      data: { content: 'Selection expired. Please run /model again.', flags: 64 },
+    });
+    return;
+  }
+
+  const selectedProviderId = interaction.data?.values?.[0];
+  if (!selectedProviderId) return;
+
+  const provider = wizard.providers.find((p) => p.id === selectedProviderId);
+  if (!provider) return;
+
+  const models = provider.models
+    ? (Array.isArray(provider.models) ? provider.models : Object.values(provider.models))
+    : [];
+
+  const modelOptions = models.map((m) => ({
+    label: (m.name ?? m.id ?? String(m)).slice(0, 100),
+    value: m.id ?? m.name ?? String(m),
+    description: (m.release_date ? new Date(m.release_date).toLocaleDateString() : ' ').slice(0, 100),
+  }));
+
+  if (modelOptions.length === 0) {
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 7,
+      data: {
+        content: `Provider **${provider.name ?? provider.id}** has no models available.`,
+        flags: 64,
+        components: [],
+      },
+    });
+    return;
+  }
+
+  // Update wizard state with provider info
+  wizard.providerId = provider.id;
+  wizard.providerName = provider.name ?? provider.id;
+  wizard.models = models;
+  setWizard(hash, wizard);
+
+  await restCall(wizard.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+    type: 7,
+    data: {
+      content: `**Set Model Preference**\nProvider: **${wizard.providerName}**\nSelect a model:`,
+      flags: 64,
+      components: [stringSelect('Select a model', `otto-model-model:${hash}`, modelOptions, 'Select a model')],
+    },
+  });
+}
+
+async function handleModelModelSelect(state, interaction, customId, hash) {
+  const wizard = getWizard(hash);
+  if (!wizard) {
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 7,
+      data: { content: 'Selection expired. Please run /model again.', flags: 64, components: [] },
+    });
+    return;
+  }
+
+  const selectedModelId = interaction.data?.values?.[0];
+  if (!selectedModelId) return;
+
+  wizard.selectedModelId = `${wizard.providerId}/${selectedModelId}`;
+  wizard.selectedModelLocal = selectedModelId;
+  setWizard(hash, wizard);
+
+  // Show scope select menu
+  const scopeOptions = [
+    { label: 'This channel only', value: 'channel', description: 'Override for this channel only' },
+    { label: 'Global default', value: 'global', description: 'Set as default for all channels' },
+  ];
+
+  await restCall(wizard.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+    type: 7,
+    data: {
+      content: `**Set Model Preference**\nModel: **${wizard.providerName}** / **${selectedModelId}**\n\`${wizard.selectedModelId}\`\nApply to:`,
+      flags: 64,
+      components: [stringSelect('Apply to', `otto-model-scope:${hash}`, scopeOptions, 'Apply to...')],
+    },
+  });
+}
+
+async function handleModelScopeSelect(state, interaction, customId, hash, bridge) {
+  const wizard = getWizard(hash);
+  if (!wizard) {
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 7,
+      data: { content: 'Selection expired. Please run /model again.', flags: 64, components: [] },
+    });
+    return;
+  }
+
+  const scope = interaction.data?.values?.[0];
+  if (!scope) return;
+
+  const modelId = wizard.selectedModelId;
+  const modelDisplay = wizard.selectedModelLocal ?? modelId;
+  const reply =
+    scope === 'channel'
+      ? `✓ Model set for this channel:\n**${wizard.providerName}** / **${modelDisplay}**\n\`${modelId}\``
+      : `✓ Model set as global default:\n**${wizard.providerName}** / **${modelDisplay}**\n\`${modelId}\``;
+
+  // Save to bridge store
+  if (bridge?.store) {
+    try {
+      const hash2 = crypto.createHash('sha256').update(wizard.token).digest('hex').slice(0, 12);
+      const key = String(wizard.channelId);
+      bridge.store.setOverrides({ type: 'discord', botTokenHash: hash2, targetKey: key, modelOverride: modelId });
+    } catch {
+      // Best effort
+    }
+  }
+
+  delWizard(hash);
+
+  await restCall(wizard.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+    type: 7,
+    data: { content: reply, flags: 64, components: [] },
+  });
+}
+
+async function handleApplicationCommand(state, interaction, broadcastEvent, bridge) {
+  const cmdName = interaction.data?.name;
+  if (!cmdName || typeof cmdName !== 'string') return;
+
+  // Only handle commands we know about — pass unknown ones through silently.
+  if (!KNOWN_SLASH_COMMANDS.has(cmdName)) return;
+
+  // Interactive wizard commands — handle with select menus instead of text.
+  if (cmdName === 'model') {
+    await startModelWizard(state, interaction, bridge);
+    return;
+  }
+
+  // Ack immediately with a deferred ephemeral response so Discord doesn't
+  // show "The application did not respond". We'll edit the message once
+  // the command handler completes.
+  try {
+    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      type: 5, // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+      data: { flags: 64 }, // EPHEMERAL
+    });
+  } catch {
+    return; // Can't ack — interaction already expired
+  }
+
+  // Run the command through the bridge's command pipeline.
+  if (bridge?.runCommand) {
+    try {
+      const result = await bridge.runCommand({
+        type: 'discord',
+        token: state.token,
+        channelId: interaction.channel_id,
+        threadId: null,
+        commandName: cmdName,
+        args: '',
+        from: {
+          id: interaction.member?.user?.id,
+          username: interaction.member?.user?.username,
+          firstName: interaction.member?.user?.global_name ?? null,
+        },
+      });
+
+      if (result?.reply) {
+        // Edit the deferred ephemeral message with the command output.
+        await restCall(state.token, 'PATCH', `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
+          content: result.reply.slice(0, 2000),
+        }).catch(() => {});
+        state.totalReplied += 1;
+        state.lastError = null;
+        return;
+      }
+    } catch (err) {
+      state.lastError = err?.message ?? 'command failed';
+    }
+  }
+
+  // Fallback — edit with a generic error.
+  await restCall(state.token, 'PATCH', `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
+    content: `✗ Command \`/${cmdName}\` failed. Try typing it as a text message instead.`,
+  }).catch(() => {});
+}
+
+async function dispatchInteractionCreate(state, interaction, broadcastEvent, bridge) {
+  // Type 1 = PING (auto-acked by Discord), 2 = APPLICATION_COMMAND (slash),
+  // 3 = MESSAGE_COMPONENT (button/select), 5 = MODAL_SUBMIT.
+
+  // Handle slash commands — route through the bridge's command pipeline.
+  if (interaction.type === 2) {
+    await handleApplicationCommand(state, interaction, broadcastEvent, bridge);
+    return;
+  }
+
+  // We only care about MESSAGE_COMPONENT (type 3) interactions.
   if (interaction.type !== 3) return;
 
   const customId = interaction.data?.custom_id ?? '';
+
+  // ── Model wizard select menus ──────────────────────────────────────
+  if (customId.startsWith('otto-model-provider:')) {
+    const hash = customId.replace('otto-model-provider:', '');
+    await handleModelProviderSelect(state, interaction, customId, hash);
+    return;
+  }
+  if (customId.startsWith('otto-model-model:')) {
+    const hash = customId.replace('otto-model-model:', '');
+    await handleModelModelSelect(state, interaction, customId, hash);
+    return;
+  }
+  if (customId.startsWith('otto-model-scope:')) {
+    const hash = customId.replace('otto-model-scope:', '');
+    await handleModelScopeSelect(state, interaction, customId, hash, bridge);
+    return;
+  }
+
+  // ── Approval buttons ──────────────────────────────────────────────
+  // Parse: otto-approve:{id} (once), otto-approve-always:{id}, otto-deny:{id}
   const value =
+    customId.startsWith('otto-approve-always:') ? 'approve-always' :
     customId.startsWith('otto-approve:') ? 'approve' :
     customId.startsWith('otto-deny:') ? 'deny' :
     null;
   if (!value) return;
 
   const approvalId = customId.split(':')[1];
-  const responseText = value === 'approve' ? '✅ Approved by ' : '❌ Denied by ';
   const user = interaction.member?.user ?? interaction.user;
   const userName = user?.global_name || user?.username || 'user';
+  const isApprove = value === 'approve' || value === 'approve-always';
+  const emoji = isApprove ? (value === 'approve-always' ? '♻️' : '✅') : '❌';
+  const verb = isApprove ? (value === 'approve-always' ? 'Approved Always' : 'Approved') : 'Denied';
 
-  // Ack so the user sees Discord stop spinning.
+  // Build the updated message content (remove buttons, show result)
+  const origContent = interaction.message?.content ?? '';
+  const updatedContent = origContent
+    ? `${origContent}\n\n_${emoji} ${verb} by ${userName}_`
+    : `${emoji} ${verb} by ${userName}`;
+
+  // 1. Acknowledge the interaction immediately with type 6 (DEFERRED_UPDATE_MESSAGE).
+  //    This must complete within Discord's 3-second window. Type 6 is a simple
+  //    no-content ack — fast and always succeeds. After this we PATCH the message.
   try {
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
-      data: {
-        content: `${responseText}${userName}`,
-        flags: 64, // EPHEMERAL — only the clicker sees it
-      },
-    });
-  } catch {
-    // ignore — best effort
+    const ackResult = await restCall(
+      state.token,
+      'POST',
+      `/interactions/${interaction.id}/${interaction.token}/callback`,
+      { type: 6 }, // DEFERRED_UPDATE_MESSAGE
+    );
+    if (!ackResult.ok) {
+      console.error('[DISCORD] Deferred ack failed:', ackResult.status, typeof ackResult.body === 'string' ? ackResult.body.slice(0, 200) : '');
+    }
+  } catch (e) {
+    console.error('[DISCORD] Deferred ack threw:', e?.message ?? e);
   }
 
+  // 2. PATCH the original message to remove buttons and show the outcome.
+  //    We use the webhook endpoint (no separate PATCH API call needed):
+  //    PATCH /webhooks/{application_id}/{interaction.token}/messages/@original
+  //    This works because we already responded with type 6.
+  try {
+    const patchResult = await restCall(
+      state.token,
+      'PATCH',
+      `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`,
+      {
+        content: updatedContent.slice(0, 2000),
+        components: [],
+      },
+    );
+    if (!patchResult.ok) {
+      console.error('[DISCORD] Webhook PATCH failed:', patchResult.status, typeof patchResult.body === 'string' ? patchResult.body.slice(0, 200) : '');
+      // Fallback: direct PATCH
+      await restCall(state.token, 'PATCH', `/channels/${interaction.channel_id}/messages/${interaction.message?.id}`, {
+        content: updatedContent.slice(0, 2000),
+        components: [],
+      }).catch((e2) => console.error('[DISCORD] Direct PATCH also failed:', e2?.message ?? e2));
+    }
+  } catch (e) {
+    console.error('[DISCORD] Webhook PATCH threw:', e?.message ?? e);
+  }
+
+  // 2. Directly respond to OpenCode via the bridge (bypasses event hub)
+  try {
+    bridge?.handleApprovalDecision?.(approvalId, value);
+  } catch (e) {
+    console.error('[DISCORD] handleApprovalDecision threw:', e?.message ?? e);
+  }
+
+  // 3. Broadcast for UI clients (MessengerSection ApprovalsPanel)
   broadcastEvent?.('messenger.discord.approval', {
     approvalId,
     decision: value,
@@ -362,7 +731,7 @@ function startSession(state, broadcastEvent, bridge) {
           return;
         }
         if (t === 'INTERACTION_CREATE') {
-          void dispatchInteractionCreate(state, payload.d, broadcastEvent);
+          void dispatchInteractionCreate(state, payload.d, broadcastEvent, bridge);
           return;
         }
         return;

@@ -7,6 +7,7 @@ import {
 import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
 import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js';
 import { bootstrapProject as bootstrapProjectFn } from '../projects/project-bootstrap.js';
+import { renderPermissionContext, escapeMd, clipBlock } from './messenger-render.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -58,6 +59,49 @@ export function createMessengerSyncRouter({
           })
       : null;
 
+  // Lookup a messenger surface by session ID.
+  // Used by the bridge's permission.asked handler when the session is
+  // not tracked locally (e.g. inbound came through the gateway bot).
+  const makeLookupMessengerTarget = () => {
+    // We need the bridgeStore reference, which is created inside the bridge.
+    // Return a function that the bridge can call after initialization.
+    let resolved = null;
+    return (sessionId) => {
+      // Resolve lazily after bridge is created
+      if (!resolved && bridge?.store) {
+        resolved = { store: bridge.store, readSettings };
+      }
+      if (!resolved || !resolved.readSettings) return null;
+      try {
+        const bindings = resolved.store.lookupBySessionId(sessionId);
+        if (!bindings || bindings.length === 0) return null;
+        const binding = bindings[0];
+        // Read settings to get the bot token
+        const settings = resolved.readSettings();
+        if (!settings) return null;
+        if (binding.type === 'discord') {
+          const discord = settings.discord || settings.discordConnections?.[0] || {};
+          const token = discord.botToken;
+          if (!token) return null;
+          // targetKey is the thread id on Discord (or channel id for direct msgs)
+          const targetKey = binding.targetKey;
+          const threadId = null; // targetKey is already the thread
+          return { type: 'discord', token, targetKey, threadId, projectPath: binding.projectPath };
+        }
+        if (binding.type === 'telegram') {
+          const telegram = settings.telegram || settings.telegramConnections?.[0] || {};
+          const token = telegram.botToken;
+          if (!token) return null;
+          const targetKey = binding.targetKey;
+          return { type: 'telegram', token, targetKey, threadId: null, projectPath: binding.projectPath };
+        }
+      } catch {
+        // lookup failed — return null
+      }
+      return null;
+    };
+  };
+
   const bridge =
     globalEventHub && buildOpenCodeUrl
       ? createMessengerOpencodeBridge({
@@ -67,6 +111,7 @@ export function createMessengerSyncRouter({
           broadcastEvent,
           listProjects,
           bootstrapProject: projectBootstrap,
+          lookupMessengerTarget: makeLookupMessengerTarget(),
         })
       : null;
   if (bridge) {
@@ -74,6 +119,48 @@ export function createMessengerSyncRouter({
       bridge.ensureSubscribed();
     } catch {
       // ignore — subscription only fails when the hub itself is unavailable
+    }
+
+    // Wire approval button clicks back to OpenCode's permission.reply API.
+    // OpenCode SDK endpoint: POST /permission/{requestID}/reply
+    // Body: { reply: "once" | "always" | "reject" }
+    // Query: ?directory=... (directory is a query param, NOT in body)
+    try {
+      bridge.initApprovalListener?.(async ({ sessionID, requestID, reply, directory }) => {
+        if (!sessionID || !requestID) return;
+        const requestIdEnc = encodeURIComponent(requestID);
+        const dirParam = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+        const url = buildOpenCodeUrl(`/permission/${requestIdEnc}/reply${dirParam}`, '');
+        const headers = {
+          'Content-Type': 'application/json',
+          ...(getOpenCodeAuthHeaders?.() ?? {}),
+        };
+        console.log('[MESSENGER] Sending permission reply to OpenCode:', {
+          url,
+          reply,
+          sessionID,
+          requestID,
+          directory,
+        });
+        const res = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ reply }),
+        });
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          console.error(
+            '[MESSENGER] OpenCode permission reply failed:',
+            res.status,
+            errBody.slice(0, 300),
+            { sessionID, requestID, reply, directory },
+          );
+        } else {
+          console.log('[MESSENGER] OpenCode permission reply succeeded:', { sessionID, requestID, reply });
+        }
+      });
+    } catch (err) {
+      console.error('[MESSENGER] Failed to init approval listener:', err?.message ?? err);
     }
   }
 
@@ -965,6 +1052,76 @@ export function createMessengerSyncRouter({
   });
 
   /**
+   * Save Discord listener config to settings.json so it survives server restarts.
+   * Body matches the start endpoint: { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId }.
+   */
+  router.post('/discord/save-config', async (req, res) => {
+    const { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId } =
+      req.body ?? {};
+    try {
+      await persistSettings({
+        discord: {
+          botToken: botToken || undefined,
+          guildId: guildId || undefined,
+          autoReply: autoReply !== false,
+          scopeToGuild: Boolean(scopeToGuild),
+          bridgeEnabled: bridgeEnabled !== false,
+          defaultChannelId: defaultChannelId || undefined,
+        },
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err?.message ?? 'save failed' });
+    }
+  });
+
+  /**
+   * Read saved Discord listener config from settings.json.
+   * Returns the discord config object (without botToken for safety) or null.
+   */
+  router.get('/discord/load-config', async (req, res) => {
+    try {
+      const settings = await readSettings();
+      const config = settings?.discord ? { ...settings.discord } : null;
+      // Omit the token from the response — it's sensitive. The frontend has it in localStorage.
+      if (config) {
+        const hasToken = Boolean(config.botToken);
+        config.botToken = undefined;
+        res.json({ ok: true, config, hasToken });
+      } else {
+        res.json({ ok: true, config: null, hasToken: false });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err?.message ?? 'load failed' });
+    }
+  });
+
+  /**
+   * Start the Discord listener from saved config (settings.json).
+   * Used for auto-start on server boot.
+   */
+  router.post('/discord/auto-start', async (req, res) => {
+    try {
+      const settings = await readSettings();
+      const discord = settings?.discord;
+      if (!discord?.botToken) {
+        return res.json({ ok: false, reason: 'not-configured' });
+      }
+      const result = discordListener.start(discord.botToken, {
+        guildId: discord.guildId || undefined,
+        autoReply: discord.autoReply !== false,
+        scopeToGuild: Boolean(discord.scopeToGuild),
+        bridgeEnabled: discord.bridgeEnabled !== false && Boolean(bridge),
+        // No project bindings on auto-start — they'll be set when the frontend
+        // sends a proper start request with the current project mappings.
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(500).json({ error: err?.message ?? 'auto-start failed' });
+    }
+  });
+
+  /**
    * Fetch the last N messages from a Discord channel or thread via REST.
    * Body: { token, channelId, limit? } — limit clamped to 1..100.
    * Returns: { ok, messages: [{ id, content, author, timestamp, threadId }] }
@@ -1013,16 +1170,25 @@ export function createMessengerSyncRouter({
    * Discord channel. The button custom_ids embed the approvalId so the
    * gateway listener can route the click back as a structured event.
    *
-   * Body: { token, channelId, prompt, approvalId? }
+   * Body: { token, channelId, prompt, approvalId?, permission? }
+   * When `permission` is provided, rich context is rendered from its metadata.
    */
   router.post('/discord/send-approval', async (req, res) => {
-    const { token, channelId, prompt, approvalId } = req.body ?? {};
+    const { token, channelId, prompt, approvalId, permission } = req.body ?? {};
     if (!token || !channelId || !prompt) {
       return res.status(400).json({ error: 'token, channelId and prompt required' });
     }
     const id = approvalId || generateApprovalId();
+
+    // Render rich permission context if provided
+    const permissionContext = permission ? renderPermissionContext(permission) : '';
+    const preamble = `**⚠️ Permission Required**\n**Type:** \`${escapeMd(String(permission?.permission ?? 'approval'))}\``;
+    const bodyContent = permissionContext
+      ? `${preamble}\n\n${permissionContext}\n\n${String(prompt).slice(0, 1000)}`
+      : `**Otto needs approval**\n${String(prompt).slice(0, 1600)}`;
+
     const body = {
-      content: `**Otto needs approval**\n${String(prompt).slice(0, 1600)}`,
+      content: bodyContent.slice(0, 1900),
       components: [
         {
           type: 1, // ACTION_ROW
@@ -1074,17 +1240,26 @@ export function createMessengerSyncRouter({
 
   /**
    * Post an approval-request message with an inline keyboard in Telegram.
-   * Body: { token, chatId, threadId?, prompt, approvalId? }
+   * Body: { token, chatId, threadId?, prompt, approvalId?, permission? }
+   * When `permission` is provided, rich context is rendered from its metadata.
    */
   router.post('/telegram/send-approval', async (req, res) => {
-    const { token, chatId, threadId, prompt, approvalId } = req.body ?? {};
+    const { token, chatId, threadId, prompt, approvalId, permission } = req.body ?? {};
     if (!token || !chatId || !prompt) {
       return res.status(400).json({ error: 'token, chatId and prompt required' });
     }
     const id = approvalId || generateApprovalId();
+
+    // Render rich permission context if provided
+    const permissionContext = permission ? renderPermissionContext(permission) : '';
+    const preamble = `⚠️ *Permission Required* — \`${escapeMd(String(permission?.permission ?? 'approval'))}\``;
+    const bodyText = permissionContext
+      ? `${preamble}\n\n${permissionContext}\n\n${String(prompt).slice(0, 3000)}`
+      : `🤖 Otto needs approval\n\n${String(prompt).slice(0, 3800)}`;
+
     const body = {
       chat_id: chatId,
-      text: `🤖 Otto needs approval\n\n${String(prompt).slice(0, 3800)}`,
+      text: bodyText.slice(0, 4096),
       reply_markup: {
         inline_keyboard: [
           [
@@ -1889,7 +2064,7 @@ export function createMessengerSyncRouter({
     res.json({ formatted, target });
   });
 
-  return router;
+  return { router, discordListener, telegramListener };
 }
 
 /**

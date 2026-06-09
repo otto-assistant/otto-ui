@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { MessengerBridgeStore } from './messenger-bridge-store.js';
 import { executeMessengerCommand, parseLeadingCommand } from './messenger-commands.js';
 import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
-import { renderPartForMessenger, escapeMd, clipBlock } from './messenger-render.js';
+import { renderPartForMessenger, renderPermissionContext, escapeMd, clipBlock } from './messenger-render.js';
 
 /**
  * Bidirectional bridge between Discord/Telegram and OpenCode chat sessions.
@@ -123,6 +123,109 @@ async function sendTelegram({ token, chatId, threadId, content }) {
   return { ok: true, id: d.result?.message_id };
 }
 
+// ── Approval flow helpers ─────────────────────────────────────────────
+// Maps approvalId → { sessionID, requestID, directory, sdkDirectory }
+// so button clicks can be routed back to OpenCode's permission.reply API.
+export const approvalContexts = new Map();
+
+/** Generate a unique approval ID. */
+function generateApprovalId() {
+  return crypto.randomBytes(8).toString('hex');
+}
+
+/**
+ * Post an approval-request message with Approve / Deny buttons.
+ * Returns { ok, approvalId, messageId } or { ok, error }.
+ */
+async function sendApprovalToSurface({ type, token, channelId, threadId, permission }) {
+  const approvalId = generateApprovalId();
+  const tool = String(permission?.permission ?? 'approval');
+  const contextStr = renderPermissionContext(permission);
+  const preamble = `⚠️ **Permission Required** — \`${escapeMd(tool)}\``;
+  const content = contextStr
+    ? `${preamble}\n\n${contextStr}`
+    : `⚠️ **Permission Required** — \`${escapeMd(tool)}\``;
+
+  // Always show 3 buttons: Approve (once), Always Allow, Deny
+  // matching the web UI's PermissionCard behavior
+  const alwaysStr = Array.isArray(permission?.always) && permission.always.length > 0
+    ? permission.always.slice(0, 2).join(', ') + (permission.always.length > 2 ? '…' : '')
+    : '';
+
+  // Helper to store and auto-expire approval context
+  const storeApprovalContext = () => {
+    approvalContexts.set(approvalId, {
+      sessionID: permission?.sessionID,
+      requestID: permission?.id,
+      directory: permission?.metadata?.directory || null,
+      sdkDirectory: permission?.metadata?.sdkDirectory || null,
+      createdAt: Date.now(),
+    });
+    setTimeout(() => approvalContexts.delete(approvalId), 10 * 60 * 1000).unref();
+  };
+
+  if (type === 'discord') {
+    // Build Discord buttons: Approve, Always Allow, Deny
+    const buttons = [
+      { type: 2, style: 3, label: '✅ Allow Once', custom_id: `otto-approve:${approvalId}` },
+      { type: 2, style: 2, label: alwaysStr ? `Always: ${alwaysStr}` : '♻️ Always Allow', custom_id: `otto-approve-always:${approvalId}` },
+      { type: 2, style: 4, label: '❌ Deny', custom_id: `otto-deny:${approvalId}` },
+    ];
+
+    const ch = threadId ?? channelId;
+    const r = await fetch(
+      `https://discord.com/api/v10/channels/${encodeURIComponent(ch)}/messages`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: content.slice(0, DISCORD_LIMIT),
+          components: [{ type: 1, components: buttons }],
+        }),
+      },
+    );
+    if (!r.ok) {
+      console.error('[BRIDGE] Failed to send approval to Discord:', r.status, (await r.text()).slice(0, 200));
+      return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    }
+    // Only store context after the Discord API call succeeds
+    storeApprovalContext();
+    const data = await r.json();
+    return { ok: true, approvalId, messageId: data.id };
+  }
+
+  // Telegram
+  // Build Telegram inline keyboard: Approve, Always Allow, Deny
+  const tgButtons = [
+    { text: '✅ Allow Once', callback_data: `otto-approve:${approvalId}` },
+    { text: alwaysStr ? `Always: ${alwaysStr}` : '♻️ Always Allow', callback_data: `otto-approve-always:${approvalId}` },
+    { text: '❌ Deny', callback_data: `otto-deny:${approvalId}` },
+  ];
+
+  const tgBody = {
+    chat_id: channelId,
+    text: content.slice(0, TELEGRAM_LIMIT),
+    reply_markup: {
+      inline_keyboard: [tgButtons],
+    },
+  };
+  if (threadId) tgBody.message_thread_id = Number(threadId);
+
+  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(tgBody),
+  });
+  const d = await r.json();
+  if (!d.ok) {
+    console.error('[BRIDGE] Failed to send approval to Telegram:', d.description ?? `HTTP ${r.status}`);
+    return { ok: false, error: d.description ?? `Telegram ${r.status}` };
+  }
+  // Only store context after the Telegram API call succeeds
+  storeApprovalContext();
+  return { ok: true, approvalId, messageId: d.result?.message_id };
+}
+
 /**
  * Create a public Discord thread starting from a user's message. Returns
  * the new thread id, or null when the API call failed (we fall back to
@@ -187,6 +290,13 @@ export function createMessengerOpencodeBridge({
    * If unset, the bridge falls back to slug-matching / first-project.
    */
   bootstrapProject = null,
+  /**
+   * Optional lookup function for reverse-mapping a session ID to a
+   * messenger surface. Used by the permission.asked handler when the
+   * session is not tracked locally (e.g. gateway bot handles inbound).
+   * Signature: (sessionId) => { type, token, targetKey, threadId?, projectPath? } | null
+   */
+  lookupMessengerTarget = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
@@ -351,10 +461,15 @@ export function createMessengerOpencodeBridge({
       const r = await opencodeFetch('/provider');
       if (!r.ok) return [];
       const d = await r.json().catch(() => null);
-      // The endpoint returns { providers: [...], default: ... } on modern
-      // OpenCode and an array on older versions — be defensive.
-      const list = Array.isArray(d) ? d : Array.isArray(d?.providers) ? d.providers : [];
-      return list.map((p) => ({
+      // OpenCode returns { location, data: [...] } (w/ /api prefix),
+      // { all: [...], default: ..., connected: [...] } (w/o /api prefix),
+      // { providers: [...] }, or a bare array on older versions — be defensive.
+      const raw = Array.isArray(d) ? d
+        : Array.isArray(d?.data) ? d.data
+        : Array.isArray(d?.all) ? d.all
+        : Array.isArray(d?.providers) ? d.providers
+        : [];
+      return raw.map((p) => ({
         id: p.id ?? p.name,
         name: p.name ?? p.id,
         models: Array.isArray(p.models)
@@ -366,8 +481,8 @@ export function createMessengerOpencodeBridge({
       const r = await opencodeFetch('/agent');
       if (!r.ok) return [];
       const d = await r.json().catch(() => null);
-      const list = Array.isArray(d) ? d : Array.isArray(d?.agents) ? d.agents : [];
-      return list.map((a) => ({
+      const raw = Array.isArray(d) ? d : Array.isArray(d?.data) ? d.data : Array.isArray(d?.agents) ? d.agents : [];
+      return raw.map((a) => ({
         name: a.name,
         description: a.description,
         model: a.model,
@@ -380,7 +495,8 @@ export function createMessengerOpencodeBridge({
       const r = await opencodeFetch(`/session${params}`);
       if (!r.ok) return [];
       const d = await r.json().catch(() => null);
-      return Array.isArray(d) ? d : Array.isArray(d?.sessions) ? d.sessions : [];
+      const raw = Array.isArray(d) ? d : Array.isArray(d?.data) ? d.data : Array.isArray(d?.sessions) ? d.sessions : [];
+      return raw;
     },
     async abortSession(sessionId) {
       try {
@@ -599,9 +715,11 @@ export function createMessengerOpencodeBridge({
         // input + output; skip pending/running to keep one message per tool.
         if (status !== 'completed' && status !== 'error') return;
       } else {
-        // `normal`: skip "pending" (input unknown) and "completed" (the
-        // running line already conveyed it). Surface running + error.
-        if (status !== 'running' && status !== 'error') return;
+        // `normal`: show running (tool start) AND completed (result).
+        // The user needs to see tool output even at normal verbosity,
+        // especially when a permission was required to run the tool.
+        // Skip only "pending" (input not yet known).
+        if (status === 'pending') return;
       }
     }
     if (partType === 'reasoning') {
@@ -647,8 +765,74 @@ export function createMessengerOpencodeBridge({
       if (!ctx) return;
       stopTypingPulse(ctx);
       const ms = Date.now() - ctx.startedAt;
-      // Quiet footer — duration so the user knows the turn ended.
-      void postToSurface(ctx, `_done · ${ms < 1000 ? ms + 'ms' : Math.round(ms / 100) / 10 + 's'}_`);
+      const duration = ms < 1000 ? ms + 'ms' : Math.round(ms / 100) / 10 + 's';
+
+      // Fetch model + token + context limit from OpenCode API.
+      void (async () => {
+        let footer = `_done · ${duration}`;
+        try {
+          const dir = ctx.projectPath ? `?directory=${encodeURIComponent(ctx.projectPath)}` : '';
+          const [sessionRes, providersRes] = await Promise.all([
+            opencodeFetch(`/session/${encodeURIComponent(sessionId)}${dir}`),
+            opencodeFetch(`/provider`),
+          ]);
+          if (sessionRes.ok) {
+            const d = await sessionRes.json().catch(() => null);
+            const modelInfo = d?.model;
+            const tokensInfo = d?.tokens;
+
+            // Add model name
+            if (modelInfo) {
+              const modelId = modelInfo.id ?? '';
+              const providerId = modelInfo.providerID ?? '';
+              const modelStr = providerId ? `${providerId}/${modelId}` : modelId;
+              if (modelStr) footer += ` ⋅ \`${modelStr}\``;
+            }
+
+            // Add token count + context percentage
+            if (tokensInfo && typeof tokensInfo === 'object') {
+              const total =
+                (tokensInfo.input ?? 0) +
+                (tokensInfo.output ?? 0) +
+                (tokensInfo.reasoning ?? 0) +
+                (tokensInfo.cache?.read ?? 0) +
+                (tokensInfo.cache?.write ?? 0);
+
+              // Look up context limit from provider data
+              let contextLimit = null;
+              if (providersRes.ok) {
+                try {
+                  const pd = await providersRes.json();
+                  const allProviders = Array.isArray(pd?.all) ? pd.all : Array.isArray(pd?.data) ? pd.data : [];
+                  const targetProvider = allProviders.find((p) => p.id === modelInfo?.providerID);
+                  if (targetProvider?.models) {
+                    const models = Array.isArray(targetProvider.models)
+                      ? targetProvider.models
+                      : Object.values(targetProvider.models);
+                    const targetModel = models.find((m) => (m.id ?? m.name) === modelInfo?.id);
+                    if (targetModel?.limit?.context) {
+                      contextLimit = targetModel.limit.context;
+                    }
+                  }
+                } catch {}
+              }
+
+              if (total > 0) {
+                footer += ` ⋅ ${total.toLocaleString()} tokens`;
+                if (contextLimit && contextLimit > 0) {
+                  const pct = Math.round((total / contextLimit) * 100);
+                  footer += ` (${pct}%)`;
+                }
+              }
+            }
+          }
+        } catch {
+          // Best-effort — fall back to duration-only footer.
+        }
+        footer += '_';
+        void postToSurface(ctx, footer);
+      })();
+
       // Keep ctx around — follow-up messages in the same thread will reuse
       // the session id; but reset sentPartIds and startedAt for the next turn.
       ctx.sentPartIds.clear();
@@ -666,9 +850,94 @@ export function createMessengerOpencodeBridge({
       const ctx = sessionId ? sessionContexts.get(sessionId) : null;
       if (!ctx) return;
       stopTypingPulse(ctx);
-      const err = props?.error?.message ?? props?.error ?? 'OpenCode session error';
-      void postToSurface(ctx, `✗ session error: ${escapeMd(clipBlock(String(err), 300))}`);
+      const err = (() => {
+        const raw = props?.error;
+        if (!raw) return 'OpenCode session error';
+        if (typeof raw === 'string') return raw;
+        if (typeof raw?.message === 'string' && raw.message) return raw.message;
+        if (typeof raw?.cause === 'object' && raw.cause) {
+          const c = raw.cause;
+          const failures = c.failures ?? c;
+          if (Array.isArray(failures) && failures.length > 0) {
+            const first = failures[0];
+            const errMsg = first?.error?.message ?? first?.message ?? first?.error ?? '';
+            if (errMsg) return String(errMsg).slice(0, 200);
+          }
+        }
+        try { return JSON.stringify(raw).slice(0, 200); } catch { return String(raw).slice(0, 200); }
+      })();
+      void postToSurface(ctx, `✗ session error: ${escapeMd(clipBlock(err, 300))}`);
       ctx.sentPartIds.clear();
+      return;
+    }
+
+    // ── Permission requested — send Approve/Deny buttons ───────────
+    if (type === 'permission.asked') {
+      const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      let ctx = sessionId ? sessionContexts.get(sessionId) : null;
+
+      // If the session is not tracked locally (e.g. gateway bot handles inbound),
+      // try to look up the binding from the bridge store and messenger config.
+      if (!ctx && sessionId && lookupMessengerTarget) {
+        try {
+          const binding = lookupMessengerTarget(sessionId);
+          if (binding) {
+            // Build a temporary context so we can forward the permission
+            ctx = {
+              type: binding.type,
+              token: binding.token,
+              channelId: binding.targetKey,
+              threadId: binding.threadId ?? null,
+              projectPath: binding.projectPath ?? null,
+            };
+          }
+        } catch {
+          // lookup failed — fall through to the return below
+        }
+      }
+
+      if (!ctx) {
+        // No surface to post to — log and skip
+        console.log('[PERMISSION]', `No surface for session=${sessionId} — cannot forward to messenger`);
+        return;
+      }
+
+      // Permission requests are interactive UI — stop typing indicator
+      if (stopTypingPulse) stopTypingPulse(ctx);
+
+      const permission = {
+        id: props?.id ?? props?.requestID ?? props?.requestId ?? null,
+        sessionID: sessionId,
+        permission: props?.permission ?? props?.type ?? 'unknown',
+        patterns: Array.isArray(props?.patterns) ? props.patterns : [],
+        metadata: (props?.metadata && typeof props.metadata === 'object') ? props.metadata : {},
+        always: Array.isArray(props?.always) ? props.always : [],
+      };
+
+      // Add directory info to metadata for the renderer
+      if (!permission.metadata.directory && ctx.projectPath) {
+        permission.metadata.directory = ctx.projectPath;
+      }
+      if (!permission.metadata.sdkDirectory) {
+        permission.metadata.sdkDirectory = ctx.projectPath;
+      }
+
+      console.log('[PERMISSION]', `session=${sessionId} tool=${permission.permission} patterns=${permission.patterns.join(',')}`);
+
+      sendApprovalToSurface({
+        type: ctx.type,
+        token: ctx.token,
+        channelId: ctx.channelId,
+        threadId: ctx.threadId,
+        permission,
+      }).then((result) => {
+        if (result && !result.ok) {
+          console.error('[PERMISSION] Failed to send approval to surface:', result.error);
+        }
+      }).catch((err) => {
+        console.error('[PERMISSION] sendApprovalToSurface threw:', err?.message ?? err);
+      });
+      return;
     }
   }
 
@@ -1047,13 +1316,153 @@ export function createMessengerOpencodeBridge({
     return true;
   }
 
+  /**
+   * Fetch available providers from OpenCode.
+   * Returns { all: [...], connected: [...], default: string } or null.
+   */
+  async function fetchProviders() {
+    const r = await opencodeFetch('/provider');
+    if (!r.ok) return null;
+    try {
+      const d = await r.json();
+      // OpenCode may return { all: [...], connected: [...], default } or { data: [...] }
+      if (d && typeof d === 'object') {
+        if (Array.isArray(d.all)) return { all: d.all, connected: d.connected ?? [], default: d.default ?? null };
+        if (Array.isArray(d.data)) return { all: d.data, connected: d.data.map(p => p.id), default: d.default ?? null };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Execute a command directly and return the reply text, without posting to a surface.
+   * Used by the gateway listener to respond to native slash commands.
+   * Returns `{ reply: string }` on success, `null` if the command is not recognised.
+   */
+  async function runCommand({ type, token, channelId, threadId, commandName, args = '', from }) {
+    const text = `/${commandName}${args ? ' ' + args : ''}`;
+    const parsedCmd = parseLeadingCommand(text);
+    if (!parsedCmd) return null;
+
+    const hash = tokenHash(token);
+    const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
+    const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+    const projectDefaults = stored?.projectPath
+      ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
+      : null;
+    const surface = { type, token, channelId, threadId: threadId ?? null };
+
+    const result = await executeMessengerCommand({
+      command: parsedCmd,
+      ctx: surface,
+      opencode: opencodeAdapter,
+      binding: {
+        sessionId: stored?.sessionId || null,
+        projectPath: stored?.projectPath ?? null,
+        projectLabel: stored?.projectLabel ?? null,
+        modelOverride: stored?.modelOverride ?? null,
+        agentOverride: stored?.agentOverride ?? null,
+        verbosityOverride: stored?.verbosityOverride ?? null,
+        verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
+        projectDefaults,
+      },
+      surfaceMutators: {
+        async setOverrides(changes) {
+          bridgeStore.setOverrides({ type, botTokenHash: hash, targetKey: stableKey, ...changes });
+        },
+        async setVerbosityDefault(level) {
+          bridgeStore.setVerbosityDefault(type, level);
+        },
+        async unbindSession() {
+          bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
+        },
+        async setProjectDefaults(changes) {
+          if (!stored?.projectPath) return;
+          bridgeStore.setProjectDefaults({ projectPath: stored.projectPath, projectLabel: stored.projectLabel, ...changes });
+        },
+      },
+    });
+
+    return result ?? null;
+  }
+
+  /**
+   * Wire up the bridge to listen for approval button clicks from the
+   * Discord/Telegram listeners and respond to OpenCode.
+   *
+   * @param {Function} respondToOpenCode - async ({ sessionID, requestID, reply, directory }) => void
+   */
+  /**
+   * Direct handler for approval decisions from Discord/Telegram button clicks.
+   * Bypasses the global event hub to avoid routing issues.
+   * Called by the Discord/Telegram listeners directly or via initApprovalListener.
+   *
+   * @param {string} approvalId
+   * @param {'approve'|'approve-always'|'deny'} decision
+   */
+  function handleApprovalDecision(approvalId, decision) {
+    if (!approvalId || !decision) return;
+    const ctx = approvalContexts.get(approvalId);
+    if (!ctx) {
+      console.log('[BRIDGE] No approval context for', approvalId, '(expired or unknown) — likely already processed');
+      return;
+    }
+    // Delete immediately so duplicate calls (direct + event hub fallback)
+    // are idempotent. The 10-minute expiry timeout is harmless — deleting
+    // a non-existent key is a no-op.
+    approvalContexts.delete(approvalId);
+
+    const reply = decision === 'approve' ? 'once' : decision === 'approve-always' ? 'always' : 'reject';
+    console.log('[BRIDGE] Approval decision:', { approvalId, decision, reply, sessionID: ctx.sessionID, requestID: ctx.requestID });
+    // Call respondToOpenCode if available
+    if (typeof _respondToOpenCode === 'function') {
+      _respondToOpenCode({
+        sessionID: ctx.sessionID,
+        requestID: ctx.requestID,
+        reply,
+        directory: ctx.directory || ctx.sdkDirectory,
+      }).catch((err) => {
+        console.error('[BRIDGE] Failed to respond to permission:', err?.message ?? err);
+      });
+    }
+  }
+
+  // Store the respondToOpenCode callback for handleApprovalDecision
+  let _respondToOpenCode = null;
+
+  function initApprovalListener(respondToOpenCode) {
+    if (typeof respondToOpenCode !== 'function') return;
+    _respondToOpenCode = respondToOpenCode;
+    console.log('[BRIDGE] Approval listener initialized');
+
+    // Also subscribe to global event hub as a fallback
+    if (!globalEventHub) return;
+    const handler = (event) => {
+      const payload = event?.payload ?? event;
+      if (!payload || typeof payload !== 'object') return;
+      const type = payload.type ?? payload.event ?? null;
+      if (type !== 'messenger.discord.approval' && type !== 'messenger.telegram.approval') return;
+      handleApprovalDecision(payload.approvalId, payload.decision);
+    };
+    const unsub = globalEventHub.subscribeEvent?.(handler);
+    if (unsub) approvalContexts._cleanup = unsub;
+  }
+
   return {
     routeInbound,
+    runCommand,
+    fetchProviders,
     statusSnapshot,
     isEnabled,
     ensureSubscribed,
+    initApprovalListener,
+    handleApprovalDecision,
     /** Test seam — exposed so tests can drive events without an SSE stream. */
     _handleGlobalEvent: handleGlobalEvent,
     store: bridgeStore,
+    /** Shared approval context map — exposed so listeners can inspect it */
+    approvalContexts,
   };
 }
