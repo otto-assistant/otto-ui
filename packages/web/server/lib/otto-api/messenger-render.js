@@ -323,22 +323,9 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
 
   const level = normalizeVerbosity(verbosity);
 
-  // Show tool output at any verbosity (not just verbose) — the user needs
-  // to see results, especially after approving a permission request.
-  if (status === 'completed' && part.state?.output && typeof part.state.output === 'string' && part.state.output.trim()) {
-    const out = clipBlock(part.state.output.trim(), level === 'verbose' ? 1500 : 500);
-    // Use a compact code block for the output
-    line += `\n\`\`\`\n${out}\n\`\`\``;
-  } else if (status === 'completed' && part.state?.output && typeof part.state.output === 'object') {
-    try {
-      const out = clipBlock(JSON.stringify(part.state.output, null, 2), level === 'verbose' ? 1500 : 500);
-      line += `\n\`\`\`json\n${out}\n\`\`\``;
-    } catch {
-      // ignore
-    }
-  }
-
-  // At verbose verbosity, also append the full input under a spoiler
+  // `normal` stays a single compact one-liner (icon + tool + summary). The
+  // full input + output/error is only mirrored at `verbose`, collapsed under a
+  // click-to-reveal Discord spoiler so the channel feed stays scannable.
   if (level === 'verbose') {
     const detail = toolDetailSpoiler(part);
     if (detail) line += `\n${detail}`;
