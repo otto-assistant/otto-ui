@@ -148,6 +148,38 @@ export function useAllSessionStatuses(): Record<string, SessionStatus> {
   )
 }
 
+const EMPTY_PERMISSION_LIST: PermissionRequest[] = []
+
+const arePermissionListsEquivalent = (a: PermissionRequest[], b: PermissionRequest[]): boolean => {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].id !== b[i].id) return false
+  }
+  return true
+}
+
+/**
+ * Read a session's pending permission requests by scanning every already-
+ * loaded child store. Unlike `useSessionPermissions`, this does NOT
+ * create or bootstrap a child store for the session's directory — making
+ * it safe to call from sidebar list items, where hundreds of instances
+ * may be rendered at once for projects/worktrees that we don't yet (and
+ * may never) need to fully bootstrap.
+ */
+export function useGlobalSessionPermissions(sessionId: string): PermissionRequest[] {
+  return useLiveSyncSelector(
+    useCallback((states) => {
+      for (const state of states) {
+        const list = state.permission?.[sessionId]
+        if (list && list.length > 0) return list
+      }
+      return EMPTY_PERMISSION_LIST
+    }, [sessionId]),
+    arePermissionListsEquivalent,
+  )
+}
+
 type LiveSessionStatusCounts = {
   running: number
 }
