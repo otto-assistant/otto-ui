@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import crypto from 'node:crypto';
+import { createDiscordModelWizard } from './discord-model-wizard.js';
 
 /**
  * Discord Gateway listener registry, keyed by bot token.
@@ -235,228 +236,6 @@ const KNOWN_SLASH_COMMANDS = new Set([
   'model', 'agent', 'verbosity', 'sessions',
 ]);
 
-// ── Interactive model wizard ──────────────────────────────────────────────
-// State for multi-step /model wizard (provider → model → scope).
-// Keyed by random hash embedded in the select menu custom_id.
-const modelWizardTTL = 10 * 60 * 1000; // 10 minutes
-const modelWizardState = new Map();
-const modelWizardTimers = new Map();
-
-function setWizard(hash, data) {
-  const existing = modelWizardTimers.get(hash);
-  if (existing) clearTimeout(existing);
-  modelWizardState.set(hash, data);
-  const timer = setTimeout(() => { modelWizardState.delete(hash); modelWizardTimers.delete(hash); }, modelWizardTTL);
-  timer.unref();
-  modelWizardTimers.set(hash, timer);
-}
-
-function getWizard(hash) {
-  return modelWizardState.get(hash) ?? null;
-}
-
-function delWizard(hash) {
-  const timer = modelWizardTimers.get(hash);
-  if (timer) { clearTimeout(timer); modelWizardTimers.delete(hash); }
-  modelWizardState.delete(hash);
-}
-
-function stringSelect(label, customId, options, placeholder) {
-  return {
-    type: 1,
-    components: [{
-      type: 3,
-      custom_id: customId,
-      options: options.slice(0, 25),
-      placeholder: placeholder ?? 'Select...',
-    }],
-  };
-}
-
-async function startModelWizard(state, interaction, bridge) {
-  const hash = crypto.randomBytes(6).toString('hex');
-
-  // Fetch providers from OpenCode via the bridge
-  let providerData;
-  try { providerData = await bridge?.fetchProviders?.(); } catch {}
-  if (!providerData || !Array.isArray(providerData.all) || providerData.all.length === 0) {
-    // Fall back to text response if bridge unavailable
-    const result = await bridge?.runCommand?.({ type: 'discord', token: state.token, channelId: interaction.channel_id, commandName: 'model' });
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 4,
-      data: { content: result?.reply?.slice(0, 2000) ?? '_(no providers configured)_', flags: 64 },
-    });
-    return;
-  }
-
-  const { all, connected } = providerData;
-  const connectedSet = new Set(Array.isArray(connected) ? connected : []);
-  const available = all.filter((p) => connectedSet.has(p.id));
-
-  if (available.length === 0) {
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 4,
-      data: { content: 'No providers with credentials found. Use `/login` to connect a provider.', flags: 64 },
-    });
-    return;
-  }
-
-  const options = available.map((p) => {
-    const count = p.models ? (Array.isArray(p.models) ? p.models.length : Object.keys(p.models).length) : 0;
-    return {
-      label: (p.name ?? p.id).slice(0, 100),
-      value: p.id,
-      description: `${count} model${count !== 1 ? 's' : ''}`.slice(0, 100),
-    };
-  });
-
-  // Store wizard context
-  setWizard(hash, {
-    token: state.token,
-    channelId: interaction.channel_id,
-    guildId: interaction.guild_id,
-    appId: interaction.application_id,
-    interactionToken: interaction.token,
-    providers: available,
-  });
-
-  // Respond with provider select menu
-  await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-    type: 4,
-    data: {
-      content: '**Set Model Preference**\nSelect a provider:',
-      flags: 64,
-      components: [stringSelect('Select a provider', `otto-model-provider:${hash}`, options, 'Select a provider')],
-    },
-  });
-}
-
-async function handleModelProviderSelect(state, interaction, customId, hash) {
-  const wizard = getWizard(hash);
-  if (!wizard) {
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 4,
-      data: { content: 'Selection expired. Please run /model again.', flags: 64 },
-    });
-    return;
-  }
-
-  const selectedProviderId = interaction.data?.values?.[0];
-  if (!selectedProviderId) return;
-
-  const provider = wizard.providers.find((p) => p.id === selectedProviderId);
-  if (!provider) return;
-
-  const models = provider.models
-    ? (Array.isArray(provider.models) ? provider.models : Object.values(provider.models))
-    : [];
-
-  const modelOptions = models.map((m) => ({
-    label: (m.name ?? m.id ?? String(m)).slice(0, 100),
-    value: m.id ?? m.name ?? String(m),
-    description: (m.release_date ? new Date(m.release_date).toLocaleDateString() : ' ').slice(0, 100),
-  }));
-
-  if (modelOptions.length === 0) {
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 7,
-      data: {
-        content: `Provider **${provider.name ?? provider.id}** has no models available.`,
-        flags: 64,
-        components: [],
-      },
-    });
-    return;
-  }
-
-  // Update wizard state with provider info
-  wizard.providerId = provider.id;
-  wizard.providerName = provider.name ?? provider.id;
-  wizard.models = models;
-  setWizard(hash, wizard);
-
-  await restCall(wizard.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-    type: 7,
-    data: {
-      content: `**Set Model Preference**\nProvider: **${wizard.providerName}**\nSelect a model:`,
-      flags: 64,
-      components: [stringSelect('Select a model', `otto-model-model:${hash}`, modelOptions, 'Select a model')],
-    },
-  });
-}
-
-async function handleModelModelSelect(state, interaction, customId, hash) {
-  const wizard = getWizard(hash);
-  if (!wizard) {
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 7,
-      data: { content: 'Selection expired. Please run /model again.', flags: 64, components: [] },
-    });
-    return;
-  }
-
-  const selectedModelId = interaction.data?.values?.[0];
-  if (!selectedModelId) return;
-
-  wizard.selectedModelId = `${wizard.providerId}/${selectedModelId}`;
-  wizard.selectedModelLocal = selectedModelId;
-  setWizard(hash, wizard);
-
-  // Show scope select menu
-  const scopeOptions = [
-    { label: 'This channel only', value: 'channel', description: 'Override for this channel only' },
-    { label: 'Global default', value: 'global', description: 'Set as default for all channels' },
-  ];
-
-  await restCall(wizard.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-    type: 7,
-    data: {
-      content: `**Set Model Preference**\nModel: **${wizard.providerName}** / **${selectedModelId}**\n\`${wizard.selectedModelId}\`\nApply to:`,
-      flags: 64,
-      components: [stringSelect('Apply to', `otto-model-scope:${hash}`, scopeOptions, 'Apply to...')],
-    },
-  });
-}
-
-async function handleModelScopeSelect(state, interaction, customId, hash, bridge) {
-  const wizard = getWizard(hash);
-  if (!wizard) {
-    await restCall(state.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-      type: 7,
-      data: { content: 'Selection expired. Please run /model again.', flags: 64, components: [] },
-    });
-    return;
-  }
-
-  const scope = interaction.data?.values?.[0];
-  if (!scope) return;
-
-  const modelId = wizard.selectedModelId;
-  const modelDisplay = wizard.selectedModelLocal ?? modelId;
-  const reply =
-    scope === 'channel'
-      ? `✓ Model set for this channel:\n**${wizard.providerName}** / **${modelDisplay}**\n\`${modelId}\``
-      : `✓ Model set as global default:\n**${wizard.providerName}** / **${modelDisplay}**\n\`${modelId}\``;
-
-  // Save to bridge store
-  if (bridge?.store) {
-    try {
-      const hash2 = crypto.createHash('sha256').update(wizard.token).digest('hex').slice(0, 12);
-      const key = String(wizard.channelId);
-      bridge.store.setOverrides({ type: 'discord', botTokenHash: hash2, targetKey: key, modelOverride: modelId });
-    } catch {
-      // Best effort
-    }
-  }
-
-  delWizard(hash);
-
-  await restCall(wizard.token, 'POST', `/interactions/${interaction.id}/${interaction.token}/callback`, {
-    type: 7,
-    data: { content: reply, flags: 64, components: [] },
-  });
-}
-
 async function handleApplicationCommand(state, interaction, broadcastEvent, bridge) {
   const cmdName = interaction.data?.name;
   if (!cmdName || typeof cmdName !== 'string') return;
@@ -465,8 +244,8 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
   if (!KNOWN_SLASH_COMMANDS.has(cmdName)) return;
 
   // Interactive wizard commands — handle with select menus instead of text.
-  if (cmdName === 'model') {
-    await startModelWizard(state, interaction, bridge);
+  if (cmdName === 'model' && state.modelWizard) {
+    await state.modelWizard.start(state, interaction);
     return;
   }
 
@@ -534,20 +313,9 @@ async function dispatchInteractionCreate(state, interaction, broadcastEvent, bri
 
   const customId = interaction.data?.custom_id ?? '';
 
-  // ── Model wizard select menus ──────────────────────────────────────
-  if (customId.startsWith('otto-model-provider:')) {
-    const hash = customId.replace('otto-model-provider:', '');
-    await handleModelProviderSelect(state, interaction, customId, hash);
-    return;
-  }
-  if (customId.startsWith('otto-model-model:')) {
-    const hash = customId.replace('otto-model-model:', '');
-    await handleModelModelSelect(state, interaction, customId, hash);
-    return;
-  }
-  if (customId.startsWith('otto-model-scope:')) {
-    const hash = customId.replace('otto-model-scope:', '');
-    await handleModelScopeSelect(state, interaction, customId, hash, bridge);
+  // ── Model wizard select menus (provider → model → scope, paged) ────
+  if (state.modelWizard?.ownsComponent(customId)) {
+    await state.modelWizard.handleComponent(state, interaction, customId);
     return;
   }
 
@@ -792,6 +560,10 @@ function scheduleReconnect(state, broadcastEvent, bridge) {
 }
 
 export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } = {}) {
+  // One paged `/model` wizard per registry; wizard state is keyed by hash so a
+  // single instance safely serves every listener token started here.
+  const modelWizard = createDiscordModelWizard({ restCall, bridge });
+
   function start(token, opts = {}) {
     const key = tokenKey(token);
     const existing = listeners.get(key);
@@ -832,6 +604,7 @@ export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } 
       lastFilteredGuildId: null,
       recent: [],
       reconnectTimer: null,
+      modelWizard,
     };
     listeners.set(key, state);
     startSession(state, broadcastEvent, bridge);

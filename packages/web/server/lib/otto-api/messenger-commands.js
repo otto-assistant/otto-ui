@@ -204,24 +204,30 @@ export async function executeMessengerCommand({
       lines.push(`Session: ${sessionId ? `\`${sessionId}\`` : '_none yet — first prompt creates one_'}`);
       const surfaceModel = binding?.modelOverride;
       const projectModel = binding?.projectDefaults?.modelDefault;
+      const globalModel = binding?.globalDefaultModel;
       lines.push(
         `Model: ${
           surfaceModel
             ? `\`${surfaceModel}\` _(this conversation)_`
             : projectModel
               ? `\`${projectModel}\` _(project default)_`
-              : '_OpenCode default_'
+              : globalModel
+                ? `\`${globalModel}\` _(OpenChamber default)_`
+                : '_OpenCode default_'
         }`,
       );
       const surfaceAgent = binding?.agentOverride;
       const projectAgent = binding?.projectDefaults?.agentDefault;
+      const globalAgent = binding?.globalDefaultAgent;
       lines.push(
         `Agent: ${
           surfaceAgent
             ? `\`${surfaceAgent}\` _(this conversation)_`
             : projectAgent
               ? `\`${projectAgent}\` _(project default)_`
-              : '_OpenCode default_'
+              : globalAgent
+                ? `\`${globalAgent}\` _(OpenChamber default)_`
+                : '_OpenCode default_'
         }`,
       );
       lines.push(`Surface: ${ctx.type} · channel \`${ctx.channelId}\`${ctx.threadId ? ` thread \`${ctx.threadId}\`` : ''}`);
@@ -312,6 +318,16 @@ export async function executeMessengerCommand({
         }
         if (binding?.projectDefaults?.modelDefault) {
           lines.push(`Project default: \`${binding.projectDefaults.modelDefault}\``);
+        }
+        if (binding?.globalDefaultModel) {
+          lines.push(`OpenChamber default: \`${binding.globalDefaultModel}\``);
+        }
+        if (
+          !binding?.modelOverride &&
+          !binding?.projectDefaults?.modelDefault &&
+          !binding?.globalDefaultModel
+        ) {
+          lines.push('', '_No default set — OpenCode picks the model. Set one above or in Settings → Defaults._');
         }
         return { reply: lines.join('\n') };
       }

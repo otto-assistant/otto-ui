@@ -137,7 +137,7 @@ function generateApprovalId() {
  * Post an approval-request message with Approve / Deny buttons.
  * Returns { ok, approvalId, messageId } or { ok, error }.
  */
-async function sendApprovalToSurface({ type, token, channelId, threadId, permission }) {
+async function sendApprovalToSurface({ type, token, channelId, threadId, permission, directory }) {
   const approvalId = generateApprovalId();
   const tool = String(permission?.permission ?? 'approval');
   const contextStr = renderPermissionContext(permission);
@@ -157,8 +157,8 @@ async function sendApprovalToSurface({ type, token, channelId, threadId, permiss
     approvalContexts.set(approvalId, {
       sessionID: permission?.sessionID,
       requestID: permission?.id,
-      directory: permission?.metadata?.directory || null,
-      sdkDirectory: permission?.metadata?.sdkDirectory || null,
+      directory: directory || permission?.metadata?.directory || null,
+      sdkDirectory: permission?.metadata?.sdkDirectory || directory || null,
       createdAt: Date.now(),
     });
     setTimeout(() => approvalContexts.delete(approvalId), 10 * 60 * 1000).unref();
@@ -297,8 +297,36 @@ export function createMessengerOpencodeBridge({
    * Signature: (sessionId) => { type, token, targetKey, threadId?, projectPath? } | null
    */
   lookupMessengerTarget = null,
+  /**
+   * Optional accessor for the OpenChamber-wide defaults the rest of the UI
+   * uses (Settings → Defaults). Lets the messenger fall back to the SAME
+   * default model/agent the web chat uses instead of whatever OpenCode would
+   * pick on its own. Signature: () => { model?: string|null, agent?: string|null }
+   * (may be async).
+   */
+  getGlobalDefaults = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
+
+  /**
+   * Resolve the OpenChamber-wide default model/agent (Settings → Defaults).
+   * Best-effort: returns `{ model: null, agent: null }` when unavailable so
+   * callers can fall through to OpenCode's own default.
+   */
+  async function resolveGlobalDefaults() {
+    if (!getGlobalDefaults) return { model: null, agent: null };
+    try {
+      const d = await getGlobalDefaults();
+      const model =
+        typeof d?.model === 'string' && /^[^/]+\/[^/]+$/.test(d.model.trim())
+          ? d.model.trim()
+          : null;
+      const agent = typeof d?.agent === 'string' && d.agent.trim() ? d.agent.trim() : null;
+      return { model, agent };
+    } catch {
+      return { model: null, agent: null };
+    }
+  }
 
   // Per-session live context. Holds the messenger surface (channel/thread)
   // OpenCode events should be routed to, and the set of part ids we've
@@ -710,17 +738,12 @@ export function createMessengerOpencodeBridge({
       // `quiet` suppresses tool activity entirely.
       if (verbosity === 'quiet') return;
       const status = part.state?.status ?? 'running';
-      if (verbosity === 'verbose') {
-        // Wait for the terminal state so the spoiler can carry the real
-        // input + output; skip pending/running to keep one message per tool.
-        if (status !== 'completed' && status !== 'error') return;
-      } else {
-        // `normal`: show running (tool start) AND completed (result).
-        // The user needs to see tool output even at normal verbosity,
-        // especially when a permission was required to run the tool.
-        // Skip only "pending" (input not yet known).
-        if (status === 'pending') return;
-      }
+      // One message per tool, at the terminal state. Posting a separate
+      // "running" line and then a "completed" line doubled every tool into
+      // two messages and made the feed unreadable. Waiting for the terminal
+      // state also lets the one-liner include result metadata (match counts,
+      // error text) and, at `verbose`, the real input + output spoiler.
+      if (status !== 'completed' && status !== 'error') return;
     }
     if (partType === 'reasoning') {
       if (verbosity === 'quiet') return;
@@ -746,6 +769,15 @@ export function createMessengerOpencodeBridge({
     if (!payload || typeof payload !== 'object') return;
     const type = payload.type ?? payload.event ?? null;
     const props = payload.properties ?? payload.props ?? payload;
+    // The SSE envelope carries the authoritative directory the event belongs
+    // to. This is the directory OpenCode expects when we reply to a permission
+    // request — more reliable than guessing from the session's project path.
+    const envelopeDirectory =
+      typeof normalized?.directory === 'string' &&
+      normalized.directory.length > 0 &&
+      normalized.directory !== 'global'
+        ? normalized.directory
+        : null;
 
     if (type === 'message.part.updated') {
       const part = props?.part;
@@ -914,15 +946,20 @@ export function createMessengerOpencodeBridge({
         always: Array.isArray(props?.always) ? props.always : [],
       };
 
-      // Add directory info to metadata for the renderer
-      if (!permission.metadata.directory && ctx.projectPath) {
-        permission.metadata.directory = ctx.projectPath;
-      }
-      if (!permission.metadata.sdkDirectory) {
-        permission.metadata.sdkDirectory = ctx.projectPath;
+      // Resolve the directory OpenCode needs for the reply. Priority:
+      //   1. the event envelope's directory (authoritative)
+      //   2. directory already present on the permission metadata
+      //   3. the surface's bound project path
+      // Without a correct directory, POST /permission/{id}/reply silently
+      // targets the wrong workspace and the request stays pending forever.
+      const replyDirectory =
+        envelopeDirectory || permission.metadata.directory || ctx.projectPath || null;
+      if (replyDirectory) {
+        permission.metadata.directory = permission.metadata.directory || replyDirectory;
+        permission.metadata.sdkDirectory = permission.metadata.sdkDirectory || replyDirectory;
       }
 
-      console.log('[PERMISSION]', `session=${sessionId} tool=${permission.permission} patterns=${permission.patterns.join(',')}`);
+      console.log('[PERMISSION]', `session=${sessionId} tool=${permission.permission} dir=${replyDirectory ?? 'none'} patterns=${permission.patterns.join(',')}`);
 
       sendApprovalToSurface({
         type: ctx.type,
@@ -930,6 +967,7 @@ export function createMessengerOpencodeBridge({
         channelId: ctx.channelId,
         threadId: ctx.threadId,
         permission,
+        directory: replyDirectory,
       }).then((result) => {
         if (result && !result.ok) {
           console.error('[PERMISSION] Failed to send approval to surface:', result.error);
@@ -998,6 +1036,7 @@ export function createMessengerOpencodeBridge({
       const projectDefaults = stored?.projectPath
         ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
         : null;
+      const globals = await resolveGlobalDefaults();
       const surface = { type, token, channelId, threadId: threadId ?? null };
       const result = await executeMessengerCommand({
         command: parsedCmd,
@@ -1012,6 +1051,8 @@ export function createMessengerOpencodeBridge({
           verbosityOverride: stored?.verbosityOverride ?? null,
           verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
           projectDefaults,
+          globalDefaultModel: globals.model,
+          globalDefaultAgent: globals.agent,
         },
         surfaceMutators: {
           async setOverrides(changes) {
@@ -1204,6 +1245,9 @@ export function createMessengerOpencodeBridge({
       existingCtx.sentPartIds.clear();
       existingCtx.startedAt = Date.now();
       existingCtx.lastError = null;
+      // Keep the resolved directory current — it's needed for the session.idle
+      // footer and (critically) for replying to permission requests.
+      if (effectiveProjectPath) existingCtx.projectPath = effectiveProjectPath;
     } else {
       const ctx = {
         sessionId,
@@ -1211,6 +1255,7 @@ export function createMessengerOpencodeBridge({
         token,
         channelId,
         threadId: effectiveThreadId,
+        projectPath: effectiveProjectPath,
         sentPartIds: new Set(),
         startedAt: Date.now(),
         lastError: null,
@@ -1267,6 +1312,15 @@ export function createMessengerOpencodeBridge({
           modelOverride = modelOverride ?? pd.modelDefault ?? null;
           agentOverride = agentOverride ?? pd.agentDefault ?? null;
         }
+      }
+
+      // OpenChamber-wide default fallback — the same Settings → Defaults model
+      // the web chat uses. Applied before letting OpenCode pick on its own, so
+      // the messenger doesn't silently run on some unexpected provider default.
+      if (!modelOverride || !agentOverride) {
+        const globals = await resolveGlobalDefaults();
+        modelOverride = modelOverride ?? globals.model ?? null;
+        agentOverride = agentOverride ?? globals.agent ?? null;
       }
     } catch {
       // ignore — overrides are optional
@@ -1352,6 +1406,7 @@ export function createMessengerOpencodeBridge({
     const projectDefaults = stored?.projectPath
       ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
       : null;
+    const globals = await resolveGlobalDefaults();
     const surface = { type, token, channelId, threadId: threadId ?? null };
 
     const result = await executeMessengerCommand({
@@ -1367,6 +1422,8 @@ export function createMessengerOpencodeBridge({
         verbosityOverride: stored?.verbosityOverride ?? null,
         verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
         projectDefaults,
+        globalDefaultModel: globals.model,
+        globalDefaultAgent: globals.agent,
       },
       surfaceMutators: {
         async setOverrides(changes) {
