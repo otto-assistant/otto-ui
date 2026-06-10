@@ -84,6 +84,12 @@ const COMMAND_HELP = [
       'How much Otto streams back. `verbose` shows every tool call + result under a spoiler. `default <level>` sets the messenger-wide default.',
   },
   {
+    name: 'skill',
+    usage: '/skill [name]',
+    summary:
+      'List the skills available to the agent / hand one to Otto for the next turn. On Discord, run `/skill` for a dropdown picker.',
+  },
+  {
     name: 'sessions',
     usage: '/sessions',
     summary: 'List recent OpenCode sessions for this project',
@@ -485,6 +491,53 @@ export async function executeMessengerCommand({
       await surfaceMutators.setOverrides({ verbosityOverride: level });
       return {
         reply: `✓ Verbosity set to \`${level}\` for this conversation — ${VERBOSITY_DESCRIPTIONS[level]}.`,
+      };
+    }
+
+    case 'skill': {
+      const projectPath = binding?.projectPath ?? null;
+      const skills = await (opencode.listSkills
+        ? opencode.listSkills(projectPath)
+        : Promise.resolve([])
+      ).catch(() => []);
+      if (!command.args) {
+        if (!skills || skills.length === 0) {
+          return {
+            reply:
+              '_(no skills available for this conversation — install some via the Skills catalog in the web UI.)_',
+          };
+        }
+        const lines = [
+          '**Available skills** — hand one to Otto with `/skill <name>` (on Discord, `/skill` opens a dropdown)',
+          '',
+        ];
+        for (const s of skills.slice(0, 25)) {
+          const desc = (s.description || '').trim();
+          lines.push(`\`${s.name}\`${desc ? ` — ${desc}` : ''}`);
+        }
+        return { reply: lines.join('\n') };
+      }
+      const wanted = command.args.trim();
+      const match =
+        skills.find((s) => s.name === wanted) ||
+        skills.find((s) => (s.name ?? '').toLowerCase() === wanted.toLowerCase());
+      if (!match) {
+        return { reply: `✗ Unknown skill \`${wanted}\`. Run \`/skill\` to see what's available.` };
+      }
+      if (!sessionId) {
+        return {
+          reply: `✗ Send a regular message first so I can spin up a session, then \`/skill ${match.name}\`.`,
+        };
+      }
+      const desc = (match.description || '').trim();
+      const prompt = desc
+        ? `Use the "${match.name}" skill for this task.\n\nSkill: ${match.name} — ${desc}`
+        : `Use the "${match.name}" skill for this task.`;
+      const r = await opencode.sendPrompt(sessionId, projectPath, prompt);
+      return {
+        reply: r.ok
+          ? `▶ Handed the \`${match.name}\` skill to Otto.`
+          : `✗ Could not run skill: ${r.error ?? 'unknown error'}`,
       };
     }
 

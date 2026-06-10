@@ -1,6 +1,8 @@
 import WebSocket from 'ws';
 import crypto from 'node:crypto';
 import { createDiscordModelWizard } from './discord-model-wizard.js';
+import { createDiscordCommandWizards } from './discord-command-wizards.js';
+import { registerApplicationCommands } from './discord-commands.js';
 
 /**
  * Discord Gateway listener registry, keyed by bot token.
@@ -269,7 +271,7 @@ function dispatchThreadDelete(state, data, bridge) {
 const KNOWN_SLASH_COMMANDS = new Set([
   'help', 'status', 'abort', 'new', 'undo', 'redo',
   'compact', 'summary', 'init', 'review',
-  'model', 'agent', 'verbosity', 'sessions',
+  'model', 'agent', 'verbosity', 'skill', 'sessions',
 ]);
 
 async function handleApplicationCommand(state, interaction, broadcastEvent, bridge) {
@@ -284,6 +286,20 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
     await state.modelWizard.start(state, interaction);
     return;
   }
+  if (state.commandWizards) {
+    if (cmdName === 'verbosity') {
+      await state.commandWizards.startVerbosity(state, interaction);
+      return;
+    }
+    if (cmdName === 'agent') {
+      await state.commandWizards.startAgent(state, interaction);
+      return;
+    }
+    if (cmdName === 'skill') {
+      await state.commandWizards.startSkill(state, interaction);
+      return;
+    }
+  }
 
   // Ack immediately with a deferred ephemeral response so Discord doesn't
   // show "The application did not respond". We'll edit the message once
@@ -297,6 +313,15 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
     return; // Can't ack — interaction already expired
   }
 
+  // Slash-command options (e.g. `/summary topic:foo`) are forwarded to the text
+  // pipeline as the command's argument string.
+  const args = Array.isArray(interaction.data?.options)
+    ? interaction.data.options
+        .map((o) => (o?.value == null ? '' : String(o.value)))
+        .filter(Boolean)
+        .join(' ')
+    : '';
+
   // Run the command through the bridge's command pipeline.
   if (bridge?.runCommand) {
     try {
@@ -306,7 +331,7 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
         channelId: interaction.channel_id,
         threadId: null,
         commandName: cmdName,
-        args: '',
+        args,
         from: {
           id: interaction.member?.user?.id,
           username: interaction.member?.user?.username,
@@ -352,6 +377,12 @@ async function dispatchInteractionCreate(state, interaction, broadcastEvent, bri
   // ── Model wizard select menus (provider → model → scope, paged) ────
   if (state.modelWizard?.ownsComponent(customId)) {
     await state.modelWizard.handleComponent(state, interaction, customId);
+    return;
+  }
+
+  // ── Verbosity / agent / skill wizard select menus ──────────────────
+  if (state.commandWizards?.ownsComponent(customId)) {
+    await state.commandWizards.handleComponent(state, interaction, customId);
     return;
   }
 
@@ -447,6 +478,38 @@ function send(ws, payload) {
   }
 }
 
+/**
+ * Register the Otto slash commands for this listener's bot, once per process.
+ * Guild-scoped when a guildId is configured (instant), otherwise global.
+ */
+async function ensureSlashCommandsRegistered(state) {
+  if (state.slashCommandsRegistered) return;
+  if (!state.applicationId) return;
+  state.slashCommandsRegistered = true; // mark up-front so we don't double-fire
+  try {
+    const result = await registerApplicationCommands({
+      restCall,
+      token: state.token,
+      applicationId: state.applicationId,
+      guildId: state.guildId || null,
+    });
+    if (result.ok) {
+      console.log(`[DISCORD] Registered slash commands (${result.scope} scope).`);
+    } else {
+      // Allow a retry on the next READY (e.g. transient 5xx or missing scope
+      // that the user fixes by re-inviting the bot with applications.commands).
+      state.slashCommandsRegistered = false;
+      console.warn(
+        `[DISCORD] Slash command registration failed (${result.scope}):`,
+        result.error ?? `HTTP ${result.status}`,
+      );
+    }
+  } catch (err) {
+    state.slashCommandsRegistered = false;
+    console.warn('[DISCORD] Slash command registration threw:', err?.message ?? err);
+  }
+}
+
 function startSession(state, broadcastEvent, bridge) {
   if (state.stopRequested) return;
   let ws;
@@ -522,8 +585,15 @@ function startSession(state, broadcastEvent, bridge) {
           state.sessionId = payload.d?.session_id ?? null;
           state.botId = payload.d?.user?.id ?? null;
           state.botUsername = payload.d?.user?.username ?? null;
+          // Bots authenticate with the application id baked into the token, so
+          // the bot user id doubles as the application id for command registration.
+          state.applicationId = payload.d?.application?.id ?? state.botId ?? null;
           state.connected = true;
           state.lastError = null;
+          // Register native slash commands so dropdown wizards + autocomplete
+          // suggestions are available. Best-effort and idempotent (Discord
+          // upserts by name); only run once per process per bot.
+          void ensureSlashCommandsRegistered(state);
           broadcastEvent?.('messenger.discord.listener_ready', {
             botId: state.botId,
             botUsername: state.botUsername,
@@ -625,9 +695,10 @@ function scheduleReconnect(state, broadcastEvent, bridge) {
 }
 
 export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } = {}) {
-  // One paged `/model` wizard per registry; wizard state is keyed by hash so a
-  // single instance safely serves every listener token started here.
+  // Interactive select-menu wizards, shared across every listener token started
+  // by this registry; wizard state is keyed by hash so one instance is safe.
   const modelWizard = createDiscordModelWizard({ restCall, bridge });
+  const commandWizards = createDiscordCommandWizards({ restCall, bridge });
 
   function start(token, opts = {}) {
     const key = tokenKey(token);
@@ -672,7 +743,10 @@ export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } 
       totalThreadsDeleted: 0,
       recent: [],
       reconnectTimer: null,
+      applicationId: null,
+      slashCommandsRegistered: false,
       modelWizard,
+      commandWizards,
     };
     listeners.set(key, state);
     startSession(state, broadcastEvent, bridge);

@@ -8,6 +8,7 @@ import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
 import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js';
 import { bootstrapProject as bootstrapProjectFn } from '../projects/project-bootstrap.js';
 import { renderPermissionContext, escapeMd, clipBlock } from './messenger-render.js';
+import { discoverSkills } from '../opencode/skills.js';
 
 /**
  * Unified messenger sync routes for Discord and Telegram.
@@ -149,6 +150,13 @@ export function createMessengerSyncRouter({
     const token = discord?.botToken;
     if (!token) return null;
 
+    // The configured Discord owner is auto-added to web-created threads so the
+    // thread shows up under the channel for them (a bot-only thread is hidden).
+    const userId =
+      typeof discord.defaultUserId === 'string' && discord.defaultUserId.trim().length > 0
+        ? discord.defaultUserId.trim()
+        : null;
+
     // Prefer the project's own channel so web conversations land in the right
     // place (and in a per-session thread) instead of dumping into #general.
     const projectChannel = resolveProjectChannel({ discord, projectPath });
@@ -160,6 +168,7 @@ export function createMessengerSyncRouter({
         threadId: null,
         projectPath: projectPath ?? null,
         projectLabel: projectChannel.projectLabel ?? null,
+        userId,
       };
     }
 
@@ -200,6 +209,7 @@ export function createMessengerSyncRouter({
       threadId: null,
       projectPath: projectPath ?? null,
       projectLabel: null,
+      userId,
     };
   }
 
@@ -214,6 +224,15 @@ export function createMessengerSyncRouter({
           bootstrapProject: projectBootstrap,
           lookupMessengerTarget: makeLookupMessengerTarget(),
           getDefaultMessengerTarget: readSettings ? resolveDefaultDiscordTarget : null,
+          // Powers the Discord `/skill` picker — list skills available to the
+          // agent in the surface's bound project (or user-level when unbound).
+          listSkills: ({ projectPath } = {}) => {
+            try {
+              return discoverSkills(projectPath || undefined);
+            } catch {
+              return [];
+            }
+          },
           // Fall back to the same Settings → Defaults model/agent the web chat
           // uses when a surface/project hasn't set its own override.
           getGlobalDefaults: readSettings
@@ -1170,7 +1189,7 @@ export function createMessengerSyncRouter({
   });
 
   router.post('/discord/listener/start', async (req, res) => {
-    const { token, guildId, autoReply, scopeToGuild, bridgeEnabled, projectBindings, defaultChannelId } =
+    const { token, guildId, autoReply, scopeToGuild, bridgeEnabled, projectBindings, defaultChannelId, defaultUserId } =
       req.body ?? {};
     if (!token) return res.status(400).json({ error: 'token required' });
     const bindingMap = new Map(
@@ -1222,6 +1241,7 @@ export function createMessengerSyncRouter({
             scopeToGuild: Boolean(scopeToGuild),
             bridgeEnabled: bridgeEnabled !== false,
             defaultChannelId: defaultChannelId || prev.defaultChannelId || undefined,
+            defaultUserId: defaultUserId || prev.defaultUserId || undefined,
             projectBindings:
               normalizedBindings && normalizedBindings.length > 0
                 ? normalizedBindings
@@ -1259,7 +1279,7 @@ export function createMessengerSyncRouter({
    * Body matches the start endpoint: { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId }.
    */
   router.post('/discord/save-config', async (req, res) => {
-    const { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId, projectBindings } =
+    const { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId, defaultUserId, projectBindings } =
       req.body ?? {};
     try {
       // Merge with the previous discord block so this best-effort save (fired
@@ -1285,6 +1305,7 @@ export function createMessengerSyncRouter({
           scopeToGuild: Boolean(scopeToGuild),
           bridgeEnabled: bridgeEnabled !== false,
           defaultChannelId: defaultChannelId || prev.defaultChannelId || undefined,
+          defaultUserId: defaultUserId || prev.defaultUserId || undefined,
           projectBindings:
             normalizedBindings && normalizedBindings.length > 0
               ? normalizedBindings

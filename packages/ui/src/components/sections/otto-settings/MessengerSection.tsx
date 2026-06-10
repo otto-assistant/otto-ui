@@ -1998,6 +1998,26 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         </div>
       )}
 
+      {/* Optional: Discord owner user ID — auto-joins web-created threads so
+          they appear under the channel for you (a bot-only thread stays hidden). */}
+      {token && conn.type === 'discord' && (
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-foreground">Your Discord user ID (optional)</div>
+          <div className="text-[11px] text-muted-foreground leading-snug">
+            Threads Otto opens from the web UI are auto-joined by this user, so they show up under the
+            channel for you. Enable Developer Mode, then right-click your name → "Copy User ID".
+          </div>
+          <input
+            type="text"
+            value={conn.defaultUserId ?? ''}
+            onChange={(e) => updateConnection('discord', { defaultUserId: e.target.value.trim() })}
+            onBlur={() => setTimeout(() => saveDiscordConfig(), 0)}
+            placeholder="e.g. 123456789012345678"
+            className={inputClass}
+          />
+        </div>
+      )}
+
       {/* Step 3: Action buttons - the visible "what next" call to action.
           For Discord, server-id alone also unlocks the CTA (Sync now works with just guildId). */}
       {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (

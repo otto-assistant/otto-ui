@@ -227,6 +227,34 @@ async function sendApprovalToSurface({ type, token, channelId, threadId, permiss
 }
 
 /**
+ * Add a Discord user to a thread so it shows up under the channel for them
+ * immediately (Discord only lists threads in the channel sidebar for members).
+ * Best-effort: a failure here never breaks thread creation — the user can still
+ * open the thread manually. `userIds` may be a single id or an array of ids.
+ */
+async function addThreadMembers({ token, threadId, userIds }) {
+  if (!threadId || !userIds) return;
+  const ids = (Array.isArray(userIds) ? userIds : [userIds])
+    .map((id) => (id == null ? '' : String(id).trim()))
+    .filter(Boolean);
+  for (const userId of ids) {
+    try {
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(threadId)}/thread-members/${encodeURIComponent(userId)}`,
+        { method: 'PUT', headers: { Authorization: `Bot ${token}` } },
+      );
+      if (!r.ok) {
+        console.warn(
+          `[BRIDGE] Failed to add user ${userId} to thread ${threadId}: Discord ${r.status} — ${(await r.text()).slice(0, 200)}`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[BRIDGE] Failed to add user ${userId} to thread ${threadId}: ${err?.message ?? err}`);
+    }
+  }
+}
+
+/**
  * Create a public Discord thread starting from a user's message. Returns
  * the new thread id, or null when the API call failed (we fall back to
  * the channel in that case so the user still gets a reply).
@@ -249,26 +277,7 @@ async function startDiscordThread({ token, channelId, messageId, name, userId })
   if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
   const data = await r.json();
   const threadId = data.id ?? null;
-
-  // Add the user to the thread so it appears under the channel for them
-  // immediately. Best-effort — if this fails the thread still works, the
-  // user just needs to click into it manually once.
-  if (threadId && userId) {
-    try {
-      const r = await fetch(
-        `https://discord.com/api/v10/channels/${encodeURIComponent(threadId)}/thread-members/${encodeURIComponent(userId)}`,
-        { method: 'PUT', headers: { Authorization: `Bot ${token}` } },
-      );
-      if (!r.ok) {
-        console.warn(
-          `[BRIDGE] Failed to add user ${userId} to thread ${threadId}: Discord ${r.status} — ${(await r.text()).slice(0, 200)}`,
-        );
-      }
-    } catch (err) {
-      console.warn(`[BRIDGE] Failed to add user ${userId} to thread ${threadId}: ${err?.message ?? err}`);
-    }
-  }
-
+  if (threadId && userId) await addThreadMembers({ token, threadId, userIds: userId });
   return { ok: true, threadId: threadId ?? null, threadName: data.name ?? safeName };
 }
 
@@ -279,7 +288,7 @@ async function startDiscordThread({ token, channelId, messageId, name, userId })
  * stays clean. type 11 = GUILD_PUBLIC_THREAD. Returns the new thread id or an
  * error (callers fall back to posting in the channel itself).
  */
-async function startStandaloneDiscordThread({ token, channelId, name }) {
+async function startStandaloneDiscordThread({ token, channelId, name, userIds }) {
   const safeName = (name || 'Otto').replace(/\s+/g, ' ').slice(0, 90) || 'Otto';
   const r = await fetch(
     `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/threads`,
@@ -291,7 +300,12 @@ async function startStandaloneDiscordThread({ token, channelId, name }) {
   );
   if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
   const data = await r.json();
-  return { ok: true, threadId: data.id ?? null, threadName: data.name ?? safeName };
+  const threadId = data.id ?? null;
+  // A web-UI conversation has no Discord author to anchor on, so the thread
+  // would otherwise stay invisible in the channel sidebar for the human owner.
+  // Add the configured owner id(s) so the thread shows up for them immediately.
+  if (threadId && userIds) await addThreadMembers({ token, threadId, userIds });
+  return { ok: true, threadId, threadName: data.name ?? safeName };
 }
 
 async function discordTyping({ token, channelId }) {
@@ -359,6 +373,12 @@ export function createMessengerOpencodeBridge({
    * Signature: ({ sessionId, projectPath }) => { type, token, channelId, threadId?, projectPath? } | null
    */
   getDefaultMessengerTarget = null,
+  /**
+   * Optional accessor for the locally-discovered skills available to the agent
+   * in a given project. Powers the Discord `/skill` picker. Signature:
+   *   ({ projectPath }) => Array<{ name, description?, scope?, source? }> (sync or async)
+   */
+  listSkills = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
@@ -476,6 +496,42 @@ export function createMessengerOpencodeBridge({
   // the user and assistant parts arrive nearly simultaneously.
   /** @type {Map<string, Promise<object|null>>} */
   const pendingContextCreations = new Map();
+
+  // Prompts that arrived FROM a messenger (Discord/Telegram inbound). OpenCode
+  // echoes every prompt back as a `user` part; when the session also mirrors web
+  // activity into the messenger (a thread that was created from the web UI but is
+  // later answered from Discord), that echo would re-post the user's own message
+  // right back at them. We remember each inbound prompt per session and consume
+  // the matching `user` part so it is never mirrored back to its own author.
+  /** @type {Map<string, string[]>} */
+  const messengerInboundPrompts = new Map();
+  const MESSENGER_INBOUND_CACHE_MAX = 200;
+  function rememberMessengerInbound(sessionId, text) {
+    if (!sessionId || typeof text !== 'string') return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const queue = messengerInboundPrompts.get(sessionId) ?? [];
+    queue.push(trimmed);
+    // Bound per-session queue so a chatty session can't grow it without limit.
+    if (queue.length > 16) queue.splice(0, queue.length - 16);
+    messengerInboundPrompts.set(sessionId, queue);
+    if (messengerInboundPrompts.size > MESSENGER_INBOUND_CACHE_MAX) {
+      const oldest = messengerInboundPrompts.keys().next().value;
+      if (oldest !== undefined && oldest !== sessionId) messengerInboundPrompts.delete(oldest);
+    }
+  }
+  /** Consume a remembered inbound prompt; returns true when the text matched. */
+  function consumeMessengerInbound(sessionId, text) {
+    if (!sessionId || typeof text !== 'string') return false;
+    const queue = messengerInboundPrompts.get(sessionId);
+    if (!queue || queue.length === 0) return false;
+    const trimmed = text.trim();
+    const idx = queue.indexOf(trimmed);
+    if (idx === -1) return false;
+    queue.splice(idx, 1);
+    if (queue.length === 0) messengerInboundPrompts.delete(sessionId);
+    return true;
+  }
 
   // Per-surface project bootstrap dialogue state. When a new channel sends
   // its first message and we have no slug-match (and the user has not yet
@@ -738,6 +794,15 @@ export function createMessengerOpencodeBridge({
         return { ok: false, error: e?.message ?? 'prompt failed' };
       }
     },
+    async listSkills(projectPath) {
+      if (typeof listSkills !== 'function') return [];
+      try {
+        const skills = await listSkills({ projectPath: projectPath ?? null });
+        return Array.isArray(skills) ? skills : [];
+      } catch {
+        return [];
+      }
+    },
   };
 
   // --- Session resolution -------------------------------------------------
@@ -898,7 +963,15 @@ export function createMessengerOpencodeBridge({
         }
         if (!threadId) {
           const name = threadName || target.threadName || `Otto · ${target.projectLabel ?? 'web'}`;
-          const created = await startStandaloneDiscordThread({ token, channelId, name });
+          const created = await startStandaloneDiscordThread({
+            token,
+            channelId,
+            name,
+            // Add the configured Discord owner(s) so the thread is visible to
+            // them under the channel right away (issue: UI-created threads were
+            // invisible because the bot was the only member).
+            userIds: target.userIds ?? target.userId ?? null,
+          });
           if (created.ok && created.threadId) {
             threadId = created.threadId;
             try {
@@ -961,6 +1034,11 @@ export function createMessengerOpencodeBridge({
 
   async function emitWebUserPart(sessionId, part, { projectPath = null } = {}) {
     const text = typeof part?.text === 'string' ? part.text.trim() : '';
+    // Never mirror a prompt that originated from a messenger surface back to the
+    // same surface. This stops the "I reply from Discord and my own message
+    // bounces straight back to me" duplication on web-created threads that are
+    // later continued from Discord.
+    if (consumeMessengerInbound(sessionId, text)) return;
     // Name the thread (when one is created) after the user's first line so the
     // Discord thread list is meaningful instead of a wall of "Otto · web".
     const threadName = text ? clipBlock(text.split('\n')[0], 80) : null;
@@ -1311,6 +1389,71 @@ export function createMessengerOpencodeBridge({
     unsubscribe = globalEventHub.subscribeEvent(handleGlobalEvent);
   }
 
+  /**
+   * Run a parsed slash command against a messenger surface and return the
+   * command handler's result (`{ reply }` or `null` for "not a command").
+   *
+   * This is the single source of truth for wiring the bridge store (bindings,
+   * project defaults, global defaults) and the OpenCode adapter into
+   * {@link executeMessengerCommand}. Both the inbound text pipeline
+   * (`routeInbound` step 0) and the native slash-command pipeline
+   * (`runCommand`) delegate here so the two can never drift apart.
+   */
+  async function executeSurfaceCommand({
+    command,
+    type,
+    token,
+    channelId,
+    threadId = null,
+    sourceMessageId = null,
+  }) {
+    const hash = tokenHash(token);
+    const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
+    const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+    const projectDefaults = stored?.projectPath
+      ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
+      : null;
+    const globals = await resolveGlobalDefaults();
+    const surface = { type, token, channelId, threadId: threadId ?? null };
+
+    return executeMessengerCommand({
+      command,
+      ctx: sourceMessageId ? { ...surface, sourceMessageId } : surface,
+      opencode: opencodeAdapter,
+      binding: {
+        sessionId: stored?.sessionId || null,
+        projectPath: stored?.projectPath ?? null,
+        projectLabel: stored?.projectLabel ?? null,
+        modelOverride: stored?.modelOverride ?? null,
+        agentOverride: stored?.agentOverride ?? null,
+        verbosityOverride: stored?.verbosityOverride ?? null,
+        verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
+        projectDefaults,
+        globalDefaultModel: globals.model,
+        globalDefaultAgent: globals.agent,
+      },
+      surfaceMutators: {
+        async setOverrides(changes) {
+          bridgeStore.setOverrides({ type, botTokenHash: hash, targetKey: stableKey, ...changes });
+        },
+        async setVerbosityDefault(level) {
+          bridgeStore.setVerbosityDefault(type, level);
+        },
+        async unbindSession() {
+          bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
+        },
+        async setProjectDefaults(changes) {
+          if (!stored?.projectPath) return;
+          bridgeStore.setProjectDefaults({
+            projectPath: stored.projectPath,
+            projectLabel: stored.projectLabel,
+            ...changes,
+          });
+        },
+      },
+    });
+  }
+
   // --- Inbound: bridge a messenger message into OpenCode -----------------
   /**
    * @param {object} args
@@ -1355,54 +1498,14 @@ export function createMessengerOpencodeBridge({
     // -----------------------------------------------------------------
     const parsedCmd = parseLeadingCommand(text);
     if (parsedCmd) {
-      const hash = tokenHash(token);
-      const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
-      const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
-      const projectDefaults = stored?.projectPath
-        ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
-        : null;
-      const globals = await resolveGlobalDefaults();
       const surface = { type, token, channelId, threadId: threadId ?? null };
-      const result = await executeMessengerCommand({
+      const result = await executeSurfaceCommand({
         command: parsedCmd,
-        ctx: { ...surface, sourceMessageId },
-        opencode: opencodeAdapter,
-        binding: {
-          sessionId: stored?.sessionId || null,
-          projectPath: stored?.projectPath ?? null,
-          projectLabel: stored?.projectLabel ?? null,
-          modelOverride: stored?.modelOverride ?? null,
-          agentOverride: stored?.agentOverride ?? null,
-          verbosityOverride: stored?.verbosityOverride ?? null,
-          verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
-          projectDefaults,
-          globalDefaultModel: globals.model,
-          globalDefaultAgent: globals.agent,
-        },
-        surfaceMutators: {
-          async setOverrides(changes) {
-            bridgeStore.setOverrides({
-              type,
-              botTokenHash: hash,
-              targetKey: stableKey,
-              ...changes,
-            });
-          },
-          async setVerbosityDefault(level) {
-            bridgeStore.setVerbosityDefault(type, level);
-          },
-          async unbindSession() {
-            bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
-          },
-          async setProjectDefaults(changes) {
-            if (!stored?.projectPath) return;
-            bridgeStore.setProjectDefaults({
-              projectPath: stored.projectPath,
-              projectLabel: stored.projectLabel,
-              ...changes,
-            });
-          },
-        },
+        type,
+        token,
+        channelId,
+        threadId: threadId ?? null,
+        sourceMessageId,
       });
       if (result) {
         await postMessengerSurface(surface, result.reply);
@@ -1562,6 +1665,10 @@ export function createMessengerOpencodeBridge({
     } catch (err) {
       return { ok: false, error: err?.message ?? 'session resolve failed' };
     }
+
+    // Remember this prompt so OpenCode's `user` part echo isn't mirrored back
+    // into the originating messenger surface (see consumeMessengerInbound).
+    rememberMessengerInbound(sessionId, text);
 
     // Bind context so the SSE handler routes outbound parts here.
     const existingCtx = sessionContexts.get(sessionId);
@@ -1724,53 +1831,46 @@ export function createMessengerOpencodeBridge({
    * Used by the gateway listener to respond to native slash commands.
    * Returns `{ reply: string }` on success, `null` if the command is not recognised.
    */
-  async function runCommand({ type, token, channelId, threadId, commandName, args = '', from }) {
+  /**
+   * List the skills available to the agent for a messenger surface. Resolves
+   * the surface's bound project path (so project-scoped skills show up) and
+   * delegates to the injected `listSkills` accessor. Returns `[]` when no
+   * accessor is wired or discovery fails.
+   */
+  async function listSurfaceSkills({ type, token, channelId, threadId = null }) {
+    if (typeof listSkills !== 'function') return [];
+    let projectPath = null;
+    try {
+      const hash = tokenHash(token);
+      const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
+      const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      projectPath = stored?.projectPath ?? null;
+      if (!projectPath && stableKey !== String(channelId)) {
+        const parent = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: String(channelId) });
+        projectPath = parent?.projectPath ?? null;
+      }
+    } catch {
+      // best-effort — fall back to project-less (user-level) skill discovery
+    }
+    try {
+      const skills = await listSkills({ projectPath });
+      return Array.isArray(skills) ? skills : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function runCommand({ type, token, channelId, threadId, commandName, args = '' }) {
     const text = `/${commandName}${args ? ' ' + args : ''}`;
     const parsedCmd = parseLeadingCommand(text);
     if (!parsedCmd) return null;
-
-    const hash = tokenHash(token);
-    const stableKey = targetKey({ type, channelId, threadId: threadId ?? null });
-    const stored = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
-    const projectDefaults = stored?.projectPath
-      ? bridgeStore.getProjectDefaults?.(stored.projectPath) ?? null
-      : null;
-    const globals = await resolveGlobalDefaults();
-    const surface = { type, token, channelId, threadId: threadId ?? null };
-
-    const result = await executeMessengerCommand({
+    const result = await executeSurfaceCommand({
       command: parsedCmd,
-      ctx: surface,
-      opencode: opencodeAdapter,
-      binding: {
-        sessionId: stored?.sessionId || null,
-        projectPath: stored?.projectPath ?? null,
-        projectLabel: stored?.projectLabel ?? null,
-        modelOverride: stored?.modelOverride ?? null,
-        agentOverride: stored?.agentOverride ?? null,
-        verbosityOverride: stored?.verbosityOverride ?? null,
-        verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
-        projectDefaults,
-        globalDefaultModel: globals.model,
-        globalDefaultAgent: globals.agent,
-      },
-      surfaceMutators: {
-        async setOverrides(changes) {
-          bridgeStore.setOverrides({ type, botTokenHash: hash, targetKey: stableKey, ...changes });
-        },
-        async setVerbosityDefault(level) {
-          bridgeStore.setVerbosityDefault(type, level);
-        },
-        async unbindSession() {
-          bridgeStore.unbindSession({ type, botTokenHash: hash, targetKey: stableKey });
-        },
-        async setProjectDefaults(changes) {
-          if (!stored?.projectPath) return;
-          bridgeStore.setProjectDefaults({ projectPath: stored.projectPath, projectLabel: stored.projectLabel, ...changes });
-        },
-      },
+      type,
+      token,
+      channelId,
+      threadId: threadId ?? null,
     });
-
     return result ?? null;
   }
 
@@ -1869,6 +1969,9 @@ export function createMessengerOpencodeBridge({
   return {
     routeInbound,
     runCommand,
+    listSurfaceSkills,
+    /** List configured OpenCode agents (for the Discord `/agent` picker). */
+    listAgents: () => opencodeAdapter.listAgents(),
     fetchProviders,
     statusSnapshot,
     isEnabled,

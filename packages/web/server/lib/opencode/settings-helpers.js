@@ -720,6 +720,12 @@ export const createSettingsHelpers = (dependencies) => {
       if (typeof d.defaultChannelId === 'string' && d.defaultChannelId.length > 0) {
         sanitized.defaultChannelId = d.defaultChannelId;
       }
+      // Discord user id of the bot's human owner. Web-created threads are
+      // auto-joined by this user so they appear under the channel for them
+      // (a thread with only the bot as a member stays hidden in the sidebar).
+      if (typeof d.defaultUserId === 'string' && d.defaultUserId.trim().length > 0) {
+        sanitized.defaultUserId = d.defaultUserId.trim();
+      }
       // Per-project channel bindings: lets the OpenCode↔Discord bridge route a
       // web-UI conversation into the project's own channel (in a thread).
       if (Array.isArray(d.projectBindings)) {
