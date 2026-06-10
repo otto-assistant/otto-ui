@@ -720,6 +720,29 @@ export const createSettingsHelpers = (dependencies) => {
       if (typeof d.defaultChannelId === 'string' && d.defaultChannelId.length > 0) {
         sanitized.defaultChannelId = d.defaultChannelId;
       }
+      // Per-project channel bindings: lets the OpenCode↔Discord bridge route a
+      // web-UI conversation into the project's own channel (in a thread).
+      if (Array.isArray(d.projectBindings)) {
+        const bindings = d.projectBindings
+          .filter(
+            (b) =>
+              b &&
+              typeof b.channelId === 'string' &&
+              b.channelId.length > 0 &&
+              typeof b.projectPath === 'string' &&
+              b.projectPath.length > 0,
+          )
+          .map((b) => {
+            const entry = { channelId: b.channelId, projectPath: b.projectPath };
+            if (typeof b.projectLabel === 'string' && b.projectLabel.length > 0) {
+              entry.projectLabel = b.projectLabel;
+            }
+            return entry;
+          });
+        if (bindings.length > 0) {
+          sanitized.projectBindings = bindings;
+        }
+      }
       if (Object.keys(sanitized).length > 0) {
         result.discord = sanitized;
       }

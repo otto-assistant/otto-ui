@@ -6,9 +6,9 @@
  * streaming/session plumbing and imports the renderers from here.
  *
  * Verbosity (`quiet` | `normal` | `verbose`) controls how much detail is
- * mirrored back — see `messenger-verbosity.js`. At `verbose`, each tool call's
- * full input + output/error is appended under a Discord spoiler (`||…||`) so
- * the details stay collapsed "under a cut" until a reader expands them.
+ * mirrored back — see `messenger-verbosity.js`. Reasoning and tool details are
+ * always shown inline (never hidden behind a Discord spoiler), so thoughts and
+ * tool usage are visible as-is without a click-to-reveal step.
  */
 
 import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
@@ -44,8 +44,8 @@ export function spoilerBlock(raw, limit = 700) {
   return `||\`\`\`\n${safe}\n\`\`\`||`;
 }
 
-/** Build the collapsed detail spoiler (input + output/error) for a tool part. */
-export function toolDetailSpoiler(part) {
+/** Build the shared tool detail lines (input + output/error) for a tool part. */
+export function buildToolDetailLines(part) {
   const state = part.state ?? {};
   const lines = [];
   const input = state.input;
@@ -63,8 +63,23 @@ export function toolDetailSpoiler(part) {
   } else if (state.status === 'error' && state.error) {
     lines.push(`error: ${clipBlock(String(state.error).trim(), 700)}`);
   }
+  return lines;
+}
+
+/** Build the collapsed detail spoiler (input + output/error) for a tool part. */
+export function toolDetailSpoiler(part) {
+  const lines = buildToolDetailLines(part);
   if (lines.length === 0) return '';
   return spoilerBlock(lines.join('\n\n'), 1500);
+}
+
+/** Build inline detail (input + output/error) for a tool part, no spoiler. */
+export function toolDetailInline(part) {
+  const lines = buildToolDetailLines(part);
+  if (lines.length === 0) return '';
+  // Neutralise any embedded code-fence so it can't terminate ours early.
+  const safe = clipBlock(lines.join('\n\n').replace(/```/g, "'''"), 1500);
+  return '```\n' + safe + '\n```';
 }
 
 /**
@@ -192,11 +207,11 @@ export function renderPermissionContext(permission) {
  * Render an OpenCode message part for a Discord/Telegram surface. Returns
  * `null` when nothing should be posted (e.g. empty text, pending tools).
  *
- * `verbosity` controls how much detail is mirrored:
- *   - `quiet`   — only assistant text (reasoning/tool parts return null here)
- *   - `normal`  — text + a `┣ thinking` marker + compact tool one-liners
- *   - `verbose` — same, plus a collapsed Discord spoiler with the full tool
- *                 input + output/error appended under each tool line
+  * `verbosity` controls how much detail is mirrored:
+  *   - `quiet`   — only assistant text (reasoning/tool parts return null here)
+  *   - `normal`  — text + full reasoning text + tool one-liner with input/output inline
+  *   - `verbose` — same as normal; reasoning + tool details are shown inline (never
+  *                 hidden behind a collapsed Discord spoiler)
  */
 export function renderPartForMessenger(part, verbosity = DEFAULT_VERBOSITY) {
   if (!part || typeof part !== 'object') return null;
@@ -205,11 +220,10 @@ export function renderPartForMessenger(part, verbosity = DEFAULT_VERBOSITY) {
   if (part.type === 'reasoning') {
     if (level === 'quiet') return null;
     if (!part.text || !String(part.text).trim()) return null;
-    if (level === 'verbose') {
-      const spoiler = spoilerBlock(String(part.text));
-      return spoiler ? `┣ thinking\n${spoiler}` : '┣ thinking';
-    }
-    return '┣ thinking';
+    // normal + verbose: show full reasoning text inline (never hidden behind a spoiler).
+    // Neutralise any embedded code-fence so it can't terminate ours early.
+    const text = clipBlock(String(part.text).trim().replace(/```/g, "'''"), 1500);
+    return `┣ thinking\n\`\`\`\n${text}\n\`\`\``;
   }
 
   if (part.type === 'text') {
@@ -321,14 +335,9 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
     if (errMsg) line += ` — ${escapeMd(clipBlock(String(errMsg), 200))}`;
   }
 
-  const level = normalizeVerbosity(verbosity);
-
-  // `normal` stays a single compact one-liner (icon + tool + summary). The
-  // full input + output/error is only mirrored at `verbose`, collapsed under a
-  // click-to-reveal Discord spoiler so the channel feed stays scannable.
-  if (level === 'verbose') {
-    const detail = toolDetailSpoiler(part);
-    if (detail) line += `\n${detail}`;
-  }
+  // `normal` + `verbose` both show the one-liner + full input/output inline
+  // (never hidden behind a click-to-reveal Discord spoiler).
+  const detail = toolDetailInline(part);
+  if (detail) line += `\n${detail}`;
   return line;
 }

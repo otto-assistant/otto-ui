@@ -84,6 +84,7 @@ export interface MessengerConnection {
   /** Per-project results from the most recent Discord guild sync. */
   lastSyncChannels?: {
     projectId: string;
+    projectPath?: string | null;
     projectLabel: string;
     channelId: string | null;
     channelName: string | null;
@@ -1202,6 +1203,20 @@ export const useMessengerStore = create<MessengerState>()(
       saveDiscordConfig: async () => {
         const conn = get().connections.find((c) => c.type === 'discord');
         if (!conn?.botToken) return;
+        const projects = useProjectsStore.getState().projects;
+        const projectBindings = get()
+          .projectMappings.flatMap((m) => {
+            if (!m.discord?.channelId) return [];
+            const project = projects.find((p) => p.id === m.projectId);
+            if (!project) return [];
+            return [
+              {
+                channelId: m.discord.channelId,
+                projectPath: project.path,
+                projectLabel: project.label ?? project.path,
+              },
+            ];
+          });
         try {
           await postJson('/api/otto/messenger/discord/save-config', {
             botToken: conn.botToken,
@@ -1210,6 +1225,7 @@ export const useMessengerStore = create<MessengerState>()(
             scopeToGuild: Boolean(conn.discordListenerScopeToGuild),
             bridgeEnabled: conn.bridgeEnabled !== false,
             defaultChannelId: conn.defaultChannelId,
+            projectBindings,
           });
         } catch {
           // silent — config save is best-effort
@@ -1250,6 +1266,7 @@ export const useMessengerStore = create<MessengerState>()(
           }>('/api/otto/messenger/discord/listener/start', {
             token: conn.botToken,
             guildId: conn.discordGuildId,
+            defaultChannelId: conn.defaultChannelId,
             // Default OFF — we'd rather show every message the gateway
             // delivers than silently drop messages from a different guild
             // because the saved Server ID is wrong by one digit.

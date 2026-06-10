@@ -34,8 +34,8 @@ import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js'
 
 const VERBOSITY_DESCRIPTIONS = {
   quiet: 'final answer only — hides reasoning and tool activity',
-  normal: 'answer + thinking marker + compact tool one-liners (default)',
-  verbose: 'everything, with full tool input/output collapsed under spoilers',
+  normal: 'answer + full reasoning + tool calls with input/output visible (default)',
+  verbose: 'same as normal, but tool details wrapped under click-to-reveal spoilers',
 };
 
 // Commands we recognise. The `usage` text is shown by /help so order matters.
@@ -152,7 +152,7 @@ function fmtTable(rows, columns) {
  *   listProviders: () => Promise<Array<{ id, name, models: Array<{ id, name }> }>>,
  *   listAgents: () => Promise<Array<{ name, description?, model?, hidden? }>>,
  *   listSessions: (directory?: string) => Promise<Array<any>>,
- *   abortSession: (sessionId: string) => Promise<{ ok, error? }>,
+ *   abortSession: (sessionId: string, directory?: string) => Promise<{ ok, error? }>,
  *   revertSession: (sessionId: string, messageId?: string) => Promise<{ ok, error? }>,
  *   unrevertSession: (sessionId: string) => Promise<{ ok, error? }>,
  *   summarizeSession: (sessionId: string, modelRef: string) => Promise<{ ok, error? }>,
@@ -236,7 +236,7 @@ export async function executeMessengerCommand({
 
     case 'abort': {
       if (!sessionId) return { reply: '✗ No session is active on this conversation.' };
-      const r = await opencode.abortSession(sessionId);
+      const r = await opencode.abortSession(sessionId, binding?.projectPath ?? undefined);
       return { reply: r.ok ? `✓ Aborted session \`${sessionId}\`.` : `✗ Could not abort: ${r.error ?? 'unknown error'}` };
     }
 

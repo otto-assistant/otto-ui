@@ -26,6 +26,8 @@ import { createDiscordModelWizard } from './discord-model-wizard.js';
 
 const RECENT_BUFFER_SIZE = 25;
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30_000;
 
 const INTENT_GUILDS = 1 << 0;
 const INTENT_GUILD_MESSAGES = 1 << 9;
@@ -84,8 +86,11 @@ function buildAutoReply(message) {
   if (text.toLowerCase().startsWith('!status')) {
     return `Otto listener is online. Reply received from ${fromName}.`;
   }
-  const preview = text.length > 80 ? text.slice(0, 80) + '…' : text || '(non-text message)';
-  return `Otto received: "${preview}"`;
+  // No echo. Only explicit `!cmd` shortcuts get a reply. We deliberately do NOT
+  // mirror arbitrary user text back ("Otto received: ...") — when a user writes
+  // from Discord they should only ever see Otto's real OpenCode responses, never
+  // a quoted copy of their own message.
+  return null;
 }
 
 function inboundFromMessage(message) {
@@ -154,7 +159,9 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
   // is forwarded to OpenCode and the streaming response is mirrored back
   // into the same channel/thread. This is what makes Discord a real
   // OpenChamber chat surface.
-  if (bridge && state.bridgeEnabled !== false && text.length > 0 && !text.startsWith('!')) {
+  const isBridgeable =
+    bridge && state.bridgeEnabled !== false && text.length > 0 && !text.startsWith('!');
+  if (isBridgeable) {
     try {
       const project = state.resolveProject?.({
         channelId: message.channel_id,
@@ -194,6 +201,12 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
     } catch (err) {
       state.lastError = err?.message ?? 'bridge failed';
     }
+    // Bridge was attempted but failed — do NOT fall through to auto-reply.
+    // The auto-reply sends a quoted message (message_reference) which would
+    // duplicate the user's message in Discord. The bridge may have also
+    // partially succeeded (OpenCode received the prompt) and will respond
+    // via the SSE stream. We return silently to avoid the duplicate.
+    return;
   }
 
   // Auto-reply fallback for `!cmd` shortcuts or when the bridge is off.
@@ -223,6 +236,29 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
     }
   } catch (err) {
     state.lastError = err?.message ?? 'auto-reply failed';
+  }
+}
+
+/**
+ * Handle a Discord thread deletion or archival.
+ * Cleans up the bridge state (session context, store binding) when a thread
+ * is deleted or archived in Discord, so the OpenCode session doesn't stay
+ * alive on the server for a thread that no longer exists.
+ */
+function dispatchThreadDelete(state, data, bridge) {
+  const threadId = data?.id;
+  if (!threadId) return;
+
+  state.totalThreadsDeleted = (state.totalThreadsDeleted || 0) + 1;
+
+  try {
+    bridge?.handleThreadDeleted?.({
+      type: 'discord',
+      threadId,
+      token: state.token,
+    });
+  } catch (err) {
+    state.lastError = err?.message ?? 'thread cleanup failed';
   }
 }
 
@@ -502,6 +538,20 @@ function startSession(state, broadcastEvent, bridge) {
           void dispatchInteractionCreate(state, payload.d, broadcastEvent, bridge);
           return;
         }
+        if (t === 'THREAD_DELETE') {
+          void dispatchThreadDelete(state, payload.d, bridge);
+          return;
+        }
+        if (t === 'THREAD_UPDATE') {
+          // When a thread is archived (not just edited), treat it as deleted.
+          // This catches manual archival by users and auto-archival after
+          // auto_archive_duration expires.
+          const meta = payload.d?.thread_metadata;
+          if (meta?.archived === true) {
+            void dispatchThreadDelete(state, payload.d, bridge);
+          }
+          return;
+        }
         return;
       }
       default:
@@ -515,6 +565,8 @@ function startSession(state, broadcastEvent, bridge) {
       state.heartbeatTimer = null;
     }
     state.connected = false;
+    state.lastDisconnectAt = Date.now();
+    if (state.totalReconnects === undefined) state.totalReconnects = 0;
     state.ws = null;
     if (codeOrErr instanceof Error) state.lastError = codeOrErr.message;
     if (state.stopRequested) {
@@ -552,7 +604,20 @@ function scheduleReconnect(state, broadcastEvent, bridge) {
     state.running = false;
     return;
   }
-  const delay = Math.min(30_000, 1000 * Math.max(1, state.consecutiveErrors));
+
+  // Exponential backoff with jitter: base * 2^consecutiveErrors, capped at max,
+  // then ±25% jitter to avoid thundering herd if multiple listeners reconnect.
+  const exponential = RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.min(state.consecutiveErrors, 10));
+  const clamped = Math.min(exponential, RECONNECT_MAX_DELAY_MS);
+  const jitter = clamped * (0.75 + Math.random() * 0.5); // ±25%
+  const delay = Math.round(jitter);
+
+  console.log(
+    `[DISCORD] Reconnecting in ${delay}ms ` +
+    `(attempt #${(state.totalReconnects || 0) + 1}, consecutiveErrors=${state.consecutiveErrors}, ` +
+    `lastError=${state.lastError?.slice(0, 80) || 'none'})`
+  );
+
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null;
     startSession(state, broadcastEvent, bridge);
@@ -593,8 +658,10 @@ export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } 
       stopRequested: false,
       startedAt: Date.now(),
       lastUpdateAt: null,
+      lastDisconnectAt: null,
       lastError: null,
       consecutiveErrors: 0,
+      totalReconnects: 0,
       totalReceived: 0,
       totalReplied: 0,
       totalRawMessages: 0,
@@ -602,6 +669,7 @@ export function createDiscordListenerRegistry({ broadcastEvent, bridge = null } 
       lastRawMessageGuildId: null,
       filteredOutCount: 0,
       lastFilteredGuildId: null,
+      totalThreadsDeleted: 0,
       recent: [],
       reconnectTimer: null,
       modelWizard,

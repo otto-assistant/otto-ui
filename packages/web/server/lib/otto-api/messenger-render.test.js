@@ -21,43 +21,45 @@ describe('renderPartForMessenger — verbosity gating', () => {
     expect(renderPartForMessenger(toolPart(), 'quiet')).toBeNull();
   });
 
-  it('normal: text + thinking marker + compact tool one-liner (no spoiler, no raw output dump)', () => {
+  it('normal: shows reasoning text + tool details inline (no spoilers)', () => {
     expect(renderPartForMessenger({ type: 'text', text: 'hi' }, 'normal')).toBe('hi');
-    expect(renderPartForMessenger({ type: 'reasoning', text: 'x' }, 'normal')).toBe('┣ thinking');
+    const reasoning = renderPartForMessenger({ type: 'reasoning', text: 'deep thoughts' }, 'normal');
+    expect(reasoning).toContain('┣ thinking');
+    expect(reasoning).toContain('deep thoughts');  // full reasoning text visible inline
+    expect(reasoning).not.toContain('||');          // no spoiler at normal
+
     const line = renderPartForMessenger(toolPart(), 'normal');
     expect(line).toContain('bash');
-    expect(line).toContain('ls -la'); // command summary stays
-    expect(line).not.toContain('||'); // no spoiler at normal
-    // The raw tool output must NOT be dumped inline at normal verbosity — it
-    // only belongs under the verbose spoiler, keeping the channel feed compact.
-    expect(line).not.toContain('total 0');
-    // A single compact line, not a multi-line code-block dump.
-    expect(line.split('\n').length).toBe(1);
+    expect(line).toContain('ls -la');    // command summary stays
+    expect(line).toContain('total 0');   // output now visible inline at normal
+    expect(line).not.toContain('||');    // no spoiler at normal
+    // Multi-line now: one-liner + code block with tool details
+    expect(line.split('\n').length).toBeGreaterThan(1);
   });
 
-  it('verbose: appends a collapsed spoiler with input + output', () => {
+  it('verbose: appends input + output inline (never hidden behind a spoiler)', () => {
     const line = renderPartForMessenger(toolPart(), 'verbose');
     expect(line).toContain('⬦ bash');
-    // Spoiler markers + the captured input/output.
-    expect(line).toContain('||```');
-    expect(line).toContain('```||');
+    // Details are visible inline as-is, no click-to-reveal spoiler.
+    expect(line).not.toContain('||');
     expect(line).toContain('"command": "ls -la"');
     expect(line).toContain('total 0');
   });
 
-  it('verbose: error tools show the error under the spoiler', () => {
+  it('verbose: error tools show the error inline', () => {
     const line = renderPartForMessenger(
       toolPart({ state: { status: 'error', input: { command: 'boom' }, error: 'exit 1' } }),
       'verbose',
     );
     expect(line.startsWith('✗ bash')).toBe(true);
+    expect(line).not.toContain('||');
     expect(line).toContain('error: exit 1');
   });
 
-  it('verbose: reasoning shows the thinking text under a spoiler', () => {
+  it('verbose: reasoning shows the thinking text inline (no spoiler)', () => {
     const out = renderPartForMessenger({ type: 'reasoning', text: 'deep thoughts' }, 'verbose');
     expect(out.startsWith('┣ thinking')).toBe(true);
-    expect(out).toContain('||```');
+    expect(out).not.toContain('||');
     expect(out).toContain('deep thoughts');
   });
 
@@ -67,8 +69,8 @@ describe('renderPartForMessenger — verbosity gating', () => {
   });
 });
 
-describe('renderToolPart — spoiler safety', () => {
-  it('neutralises embedded code fences so the spoiler cannot break early', () => {
+describe('renderToolPart — code fence safety', () => {
+  it('neutralises embedded code fences so the inline block cannot break early', () => {
     const line = renderToolPart(
       {
         tool: 'write',
@@ -80,7 +82,7 @@ describe('renderToolPart — spoiler safety', () => {
       },
       'verbose',
     );
-    // The only real fences are the spoiler's own; embedded ``` is replaced.
+    // The only real fences are the inline block's own; embedded ``` is replaced.
     expect(line).not.toContain('```js');
     expect(line).toContain("'''js");
   });

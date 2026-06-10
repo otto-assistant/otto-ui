@@ -128,11 +128,11 @@ const SYNC_MODES: { id: SyncMode; label: string; desc: string }[] = [
 
 const VERBOSITY_OPTIONS: { id: MessengerVerbosity; label: string; desc: string }[] = [
   { id: 'quiet', label: 'Quiet', desc: 'Final answer only — hides reasoning and tool activity' },
-  { id: 'normal', label: 'Normal', desc: 'Answer + thinking marker + compact tool one-liners' },
+  { id: 'normal', label: 'Normal', desc: 'Answer + full reasoning + tool calls with input/output visible' },
   {
     id: 'verbose',
     label: 'Verbose',
-    desc: 'Everything, with full tool calls + results collapsed under spoilers',
+    desc: 'Same as Normal, but tool details wrapped under click-to-reveal spoilers',
   },
 ];
 
@@ -1427,7 +1427,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const inputClass =
     'w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring';
 
-  const buildProjectPayloads = (): { id: string; label: string; body: string }[] => {
+  const buildProjectPayloads = (): { id: string; path: string; label: string; body: string }[] => {
     const now = new Date().toLocaleString();
     return projects.map((p) => {
       const label = p.label || p.path.split('/').pop() || p.path;
@@ -1456,7 +1456,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         }
       }
       lines.push('', `Last synced ${now}`);
-      return { id: p.id, label, body: lines.join('\n') };
+      return { id: p.id, path: p.path, label, body: lines.join('\n') };
     });
   };
 

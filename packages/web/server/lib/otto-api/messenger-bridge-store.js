@@ -305,6 +305,23 @@ export class MessengerBridgeStore {
   }
 
   /**
+   * Find bindings by target key (thread ID for Discord, chat ID for Telegram).
+   * Used by the thread-cleanup flow when a Discord thread is deleted, so we
+   * can look up the bound session without knowing the bot token hash.
+   */
+  findByTargetKey({ type, targetKey }) {
+    if (!type || !targetKey) return [];
+    return this.db
+      .prepare(
+        `SELECT session_id AS sessionId, bot_token_hash AS botTokenHash,
+                project_path AS projectPath
+           FROM messenger_session_bindings
+          WHERE type = ? AND target_key = ?`,
+      )
+      .all(type, targetKey);
+  }
+
+  /**
    * Lookup every messenger target bound to a given OpenCode session, so the
    * outbound fan-out can mirror assistant deltas to all of them (e.g. one
    * channel + one DM both subscribed to the same session).

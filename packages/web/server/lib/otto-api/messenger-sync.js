@@ -102,6 +102,107 @@ export function createMessengerSyncRouter({
     };
   };
 
+  /**
+   * Find the Discord channel a project's web conversations should mirror into.
+   * Resolution order:
+   *   1. persisted per-project binding (settings.discord.projectBindings) — the
+   *      authoritative project→channel map the Settings UI sends at start.
+   *   2. a channel binding recorded in the bridge store for this project path.
+   *   3. null (caller falls back to the guild/default channel).
+   * Returns { channelId, projectLabel } or null.
+   */
+  function resolveProjectChannel({ discord, projectPath }) {
+    if (!projectPath) return null;
+    const bindings = Array.isArray(discord?.projectBindings) ? discord.projectBindings : [];
+    const match = bindings.find(
+      (b) => b && b.channelId && b.projectPath && b.projectPath === projectPath,
+    );
+    if (match?.channelId) {
+      return { channelId: String(match.channelId), projectLabel: match.projectLabel ?? null };
+    }
+    // Fallback: the bridge store may already hold a channel↔project binding
+    // (e.g. created by /bridge/project-added). Pick the most-recently-used one.
+    try {
+      if (bridge?.store?.list) {
+        const rows = bridge.store
+          .list({ type: 'discord' })
+          .filter((r) => r.projectPath === projectPath && r.targetKey && r.sessionId === '');
+        if (rows[0]?.targetKey) {
+          return { channelId: String(rows[0].targetKey), projectLabel: rows[0].projectLabel ?? null };
+        }
+      }
+    } catch {
+      // best-effort
+    }
+    return null;
+  }
+
+  async function resolveDefaultDiscordTarget({ projectPath } = {}) {
+    if (!readSettings) return null;
+    let settings;
+    try {
+      settings = await readSettings();
+    } catch {
+      return null;
+    }
+    const discord = settings?.discord;
+    const token = discord?.botToken;
+    if (!token) return null;
+
+    // Prefer the project's own channel so web conversations land in the right
+    // place (and in a per-session thread) instead of dumping into #general.
+    const projectChannel = resolveProjectChannel({ discord, projectPath });
+    if (projectChannel?.channelId) {
+      return {
+        type: 'discord',
+        token,
+        channelId: projectChannel.channelId,
+        threadId: null,
+        projectPath: projectPath ?? null,
+        projectLabel: projectChannel.projectLabel ?? null,
+      };
+    }
+
+    let channelId = discord.defaultChannelId || null;
+    if (!channelId && discord.guildId) {
+      try {
+        const resp = await fetch(
+          `https://discord.com/api/v10/guilds/${encodeURIComponent(discord.guildId)}/channels`,
+          { headers: { Authorization: `Bot ${token}` } },
+        );
+        if (resp.ok) {
+          const channels = await resp.json();
+          const candidate = Array.isArray(channels)
+            ? channels
+                .filter((ch) => [0, 5, 15].includes(ch?.type))
+                .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0]
+            : null;
+          channelId = candidate?.id ?? null;
+          if (channelId && persistSettings) {
+            await persistSettings({
+              discord: {
+                ...discord,
+                defaultChannelId: channelId,
+              },
+            }).catch(() => {});
+          }
+        }
+      } catch {
+        // best-effort fallback; without a channel there is no default target
+      }
+    }
+
+    if (!channelId) return null;
+    return {
+      type: 'discord',
+      token,
+      channelId,
+      threadId: null,
+      projectPath: projectPath ?? null,
+      projectLabel: null,
+    };
+  }
+
   const bridge =
     globalEventHub && buildOpenCodeUrl
       ? createMessengerOpencodeBridge({
@@ -112,6 +213,7 @@ export function createMessengerSyncRouter({
           listProjects,
           bootstrapProject: projectBootstrap,
           lookupMessengerTarget: makeLookupMessengerTarget(),
+          getDefaultMessengerTarget: readSettings ? resolveDefaultDiscordTarget : null,
           // Fall back to the same Settings → Defaults model/agent the web chat
           // uses when a surface/project hasn't set its own override.
           getGlobalDefaults: readSettings
@@ -609,6 +711,18 @@ export function createMessengerSyncRouter({
       }
     }
 
+    const settingsProjectPathById = new Map();
+    if (readSettings) {
+      try {
+        const settings = await readSettings();
+        for (const project of Array.isArray(settings?.projects) ? settings.projects : []) {
+          if (project?.id && project?.path) settingsProjectPathById.set(String(project.id), String(project.path));
+        }
+      } catch {
+        // best-effort; newer clients send project.path in the sync payload
+      }
+    }
+
     const channelResults = [];
 
     for (const project of projectList) {
@@ -730,8 +844,14 @@ export function createMessengerSyncRouter({
         }
       }
 
+      const projectPath =
+        typeof project.path === 'string' && project.path
+          ? project.path
+          : settingsProjectPathById.get(String(project.id)) ?? null;
+
       channelResults.push({
         projectId: project.id,
+        projectPath,
         projectLabel: label,
         channelId: channel?.id ?? null,
         channelName: channel?.name ?? null,
@@ -744,6 +864,33 @@ export function createMessengerSyncRouter({
         error: entryError,
         threadError,
       });
+    }
+
+    if (persistSettings) {
+      const projectBindings = channelResults
+        .filter((c) => c.channelId && c.projectPath && !c.error)
+        .map((c) => ({
+          channelId: String(c.channelId),
+          projectPath: String(c.projectPath),
+          projectLabel: c.projectLabel ? String(c.projectLabel) : undefined,
+        }));
+      if (projectBindings.length > 0) {
+        try {
+          const current = readSettings ? await readSettings() : null;
+          const prev = current?.discord ?? {};
+          await persistSettings({
+            discord: {
+              ...prev,
+              botToken: token || prev.botToken || undefined,
+              guildId: guildId || prev.guildId || undefined,
+              defaultChannelId: prev.defaultChannelId || undefined,
+              projectBindings,
+            },
+          });
+        } catch {
+          // best-effort — sync succeeded, but settings persistence failed
+        }
+      }
     }
 
     broadcastEvent?.('messenger.discord.synced', {
@@ -1022,8 +1169,8 @@ export function createMessengerSyncRouter({
     }
   });
 
-  router.post('/discord/listener/start', (req, res) => {
-    const { token, guildId, autoReply, scopeToGuild, bridgeEnabled, projectBindings } =
+  router.post('/discord/listener/start', async (req, res) => {
+    const { token, guildId, autoReply, scopeToGuild, bridgeEnabled, projectBindings, defaultChannelId } =
       req.body ?? {};
     if (!token) return res.status(400).json({ error: 'token required' });
     const bindingMap = new Map(
@@ -1037,15 +1184,56 @@ export function createMessengerSyncRouter({
         : [],
     );
     const resolveProject = ({ channelId }) => bindingMap.get(String(channelId)) ?? null;
-    res.json(
-      discordListener.start(token, {
-        guildId,
-        autoReply: autoReply !== false,
-        scopeToGuild: Boolean(scopeToGuild),
-        bridgeEnabled: bridgeEnabled !== false && Boolean(bridge),
-        resolveProject,
-      }),
-    );
+    const result = discordListener.start(token, {
+      guildId,
+      autoReply: autoReply !== false,
+      scopeToGuild: Boolean(scopeToGuild),
+      bridgeEnabled: bridgeEnabled !== false && Boolean(bridge),
+      resolveProject,
+    });
+
+    // Persist the listener config (including the bot token) to settings.json so
+    // the server auto-starts the listener on the next boot. We do this here —
+    // server-side, at start time — rather than relying on the frontend's
+    // separate best-effort saveDiscordConfig() call, which previously left the
+    // `discord` block absent from settings.json and broke auto-start on restart.
+    if (persistSettings) {
+      try {
+        const current = readSettings ? await readSettings() : null;
+        const prev = current?.discord ?? {};
+        // Persist the project→channel bindings so the OpenCode↔Discord bridge
+        // can route web-UI conversations into each project's own channel
+        // (instead of #general). Keep the previous map when none is sent.
+        const normalizedBindings = Array.isArray(projectBindings)
+          ? projectBindings
+              .filter((b) => b && b.channelId && b.projectPath)
+              .map((b) => ({
+                channelId: String(b.channelId),
+                projectPath: String(b.projectPath),
+                projectLabel: b.projectLabel ? String(b.projectLabel) : undefined,
+              }))
+          : null;
+        await persistSettings({
+          discord: {
+            ...prev,
+            botToken: token,
+            guildId: guildId || prev.guildId || undefined,
+            autoReply: autoReply !== false,
+            scopeToGuild: Boolean(scopeToGuild),
+            bridgeEnabled: bridgeEnabled !== false,
+            defaultChannelId: defaultChannelId || prev.defaultChannelId || undefined,
+            projectBindings:
+              normalizedBindings && normalizedBindings.length > 0
+                ? normalizedBindings
+                : prev.projectBindings || undefined,
+          },
+        });
+      } catch {
+        // best-effort — a failed persist must not block starting the listener
+      }
+    }
+
+    res.json(result);
   });
 
   router.post('/discord/listener/stop', (req, res) => {
@@ -1071,17 +1259,36 @@ export function createMessengerSyncRouter({
    * Body matches the start endpoint: { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId }.
    */
   router.post('/discord/save-config', async (req, res) => {
-    const { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId } =
+    const { botToken, guildId, autoReply, scopeToGuild, bridgeEnabled, defaultChannelId, projectBindings } =
       req.body ?? {};
     try {
+      // Merge with the previous discord block so this best-effort save (fired
+      // by the frontend right after listener start) doesn't clobber the
+      // project→channel bindings the start request just persisted.
+      const current = readSettings ? await readSettings() : null;
+      const prev = current?.discord ?? {};
+      const normalizedBindings = Array.isArray(projectBindings)
+        ? projectBindings
+            .filter((b) => b && b.channelId && b.projectPath)
+            .map((b) => ({
+              channelId: String(b.channelId),
+              projectPath: String(b.projectPath),
+              projectLabel: b.projectLabel ? String(b.projectLabel) : undefined,
+            }))
+        : null;
       await persistSettings({
         discord: {
-          botToken: botToken || undefined,
-          guildId: guildId || undefined,
+          ...prev,
+          botToken: botToken || prev.botToken || undefined,
+          guildId: guildId || prev.guildId || undefined,
           autoReply: autoReply !== false,
           scopeToGuild: Boolean(scopeToGuild),
           bridgeEnabled: bridgeEnabled !== false,
-          defaultChannelId: defaultChannelId || undefined,
+          defaultChannelId: defaultChannelId || prev.defaultChannelId || undefined,
+          projectBindings:
+            normalizedBindings && normalizedBindings.length > 0
+              ? normalizedBindings
+              : prev.projectBindings || undefined,
         },
       });
       res.json({ ok: true });

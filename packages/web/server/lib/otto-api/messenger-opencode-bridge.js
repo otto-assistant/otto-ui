@@ -230,8 +230,12 @@ async function sendApprovalToSurface({ type, token, channelId, threadId, permiss
  * Create a public Discord thread starting from a user's message. Returns
  * the new thread id, or null when the API call failed (we fall back to
  * the channel in that case so the user still gets a reply).
+ *
+ * When `userId` is provided, the user is added to the thread immediately
+ * so the thread shows up under the channel for them (Discord only shows
+ * threads in the channel list for members).
  */
-async function startDiscordThread({ token, channelId, messageId, name }) {
+async function startDiscordThread({ token, channelId, messageId, name, userId }) {
   if (!messageId) return { ok: false, error: 'no source message id' };
   const safeName = (name || 'Otto').replace(/\s+/g, ' ').slice(0, 80) || 'Otto';
   const r = await fetch(
@@ -240,6 +244,49 @@ async function startDiscordThread({ token, channelId, messageId, name }) {
       method: 'POST',
       headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: safeName, auto_archive_duration: 1440 }),
+    },
+  );
+  if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+  const data = await r.json();
+  const threadId = data.id ?? null;
+
+  // Add the user to the thread so it appears under the channel for them
+  // immediately. Best-effort — if this fails the thread still works, the
+  // user just needs to click into it manually once.
+  if (threadId && userId) {
+    try {
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(threadId)}/thread-members/${encodeURIComponent(userId)}`,
+        { method: 'PUT', headers: { Authorization: `Bot ${token}` } },
+      );
+      if (!r.ok) {
+        console.warn(
+          `[BRIDGE] Failed to add user ${userId} to thread ${threadId}: Discord ${r.status} — ${(await r.text()).slice(0, 200)}`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[BRIDGE] Failed to add user ${userId} to thread ${threadId}: ${err?.message ?? err}`);
+    }
+  }
+
+  return { ok: true, threadId: threadId ?? null, threadName: data.name ?? safeName };
+}
+
+/**
+ * Create a Discord thread that is NOT anchored to an existing message
+ * (the "Start Thread without Message" endpoint). Used to give each web-UI
+ * conversation its own thread inside the project channel, so the channel feed
+ * stays clean. type 11 = GUILD_PUBLIC_THREAD. Returns the new thread id or an
+ * error (callers fall back to posting in the channel itself).
+ */
+async function startStandaloneDiscordThread({ token, channelId, name }) {
+  const safeName = (name || 'Otto').replace(/\s+/g, ' ').slice(0, 90) || 'Otto';
+  const r = await fetch(
+    `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/threads`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: safeName, type: 11, auto_archive_duration: 1440 }),
     },
   );
   if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
@@ -305,6 +352,13 @@ export function createMessengerOpencodeBridge({
    * (may be async).
    */
   getGlobalDefaults = null,
+  /**
+   * Optional default messenger target for web-originated OpenCode sessions.
+   * Discord/Telegram-originated sessions already have a bound context; this
+   * lets unbound web UI sessions mirror into the configured messenger space.
+   * Signature: ({ sessionId, projectPath }) => { type, token, channelId, threadId?, projectPath? } | null
+   */
+  getDefaultMessengerTarget = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
@@ -343,6 +397,85 @@ export function createMessengerOpencodeBridge({
    * }>}
    */
   const sessionContexts = new Map();
+
+  // messageID → role ('user' | 'assistant'). OpenCode's `message.part.updated`
+  // events do NOT carry the message role — it lives on the separate
+  // `message.updated` event (`properties.info.role`). We cache it here so the
+  // part handler can tell a user's own prompt apart from assistant output and
+  // mirror the former into the messenger as a **Web** block. Bounded so it can
+  // never grow without limit on a long-lived server.
+  /** @type {Map<string, 'user'|'assistant'>} */
+  const messageRoles = new Map();
+  const MESSAGE_ROLE_CACHE_MAX = 2000;
+  function rememberMessageRole(messageId, role) {
+    if (!messageId || (role !== 'user' && role !== 'assistant')) return;
+    if (messageRoles.has(messageId)) {
+      messageRoles.set(messageId, role);
+      return;
+    }
+    if (messageRoles.size >= MESSAGE_ROLE_CACHE_MAX) {
+      // Drop the oldest entry (insertion order) to keep the cache bounded.
+      const oldest = messageRoles.keys().next().value;
+      if (oldest !== undefined) messageRoles.delete(oldest);
+    }
+    messageRoles.set(messageId, role);
+  }
+  function getMessageId(value) {
+    return value?.id ?? value?.messageID ?? value?.messageId ?? value?.message?.id ?? value?.message?.messageID ?? value?.message?.messageId ?? null;
+  }
+
+  function getPartMessageId(part) {
+    return part?.messageID ?? part?.messageId ?? part?.message?.id ?? part?.message?.messageID ?? part?.message?.messageId ?? null;
+  }
+
+  function getPartSessionId(part, props) {
+    return (
+      part?.sessionID ??
+      part?.sessionId ??
+      part?.session?.id ??
+      part?.message?.sessionID ??
+      part?.message?.sessionId ??
+      props?.sessionID ??
+      props?.sessionId ??
+      props?.session?.id ??
+      props?.message?.sessionID ??
+      props?.message?.sessionId ??
+      null
+    );
+  }
+
+  /**
+   * Resolve a part's message role. OpenCode has used multiple payload shapes:
+   * role may live on the part, on a nested message, or only on message.updated.
+   */
+  function resolvePartRole(part, props = null) {
+    const role = part?.role ?? part?.message?.role ?? props?.role ?? props?.message?.role ?? null;
+    if (role === 'user' || role === 'assistant') return role;
+    const messageId = getPartMessageId(part);
+    if (messageId && messageRoles.has(messageId)) return messageRoles.get(messageId);
+    return null;
+  }
+
+  // Part events may arrive before the matching message.updated event that
+  // declares the message role. Keep the latest part briefly, keyed by messageID,
+  // then replay it once the role arrives.
+  /** @type {Map<string, { part: object, projectPath: string|null }>} */
+  const pendingPartsByMessageId = new Map();
+  const PENDING_PART_CACHE_MAX = 2000;
+  function rememberPendingPart(part, projectPath) {
+    const messageId = getPartMessageId(part);
+    if (!messageId) return;
+    if (!pendingPartsByMessageId.has(messageId) && pendingPartsByMessageId.size >= PENDING_PART_CACHE_MAX) {
+      const oldest = pendingPartsByMessageId.keys().next().value;
+      if (oldest !== undefined) pendingPartsByMessageId.delete(oldest);
+    }
+    pendingPartsByMessageId.set(messageId, { part, projectPath });
+  }
+
+  // Guards against creating two threads / contexts for the same session when
+  // the user and assistant parts arrive nearly simultaneously.
+  /** @type {Map<string, Promise<object|null>>} */
+  const pendingContextCreations = new Map();
 
   // Per-surface project bootstrap dialogue state. When a new channel sends
   // its first message and we have no slug-match (and the user has not yet
@@ -526,9 +659,13 @@ export function createMessengerOpencodeBridge({
       const raw = Array.isArray(d) ? d : Array.isArray(d?.data) ? d.data : Array.isArray(d?.sessions) ? d.sessions : [];
       return raw;
     },
-    async abortSession(sessionId) {
+    async abortSession(sessionId, directory) {
       try {
-        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/abort`, {
+        // Some OpenCode API versions require directory as query param
+        const query = directory && typeof directory === 'string' && directory.length > 0
+          ? `?directory=${encodeURIComponent(directory)}`
+          : '';
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/abort${query}`, {
           method: 'POST',
           body: JSON.stringify({}),
         });
@@ -720,6 +857,127 @@ export function createMessengerOpencodeBridge({
     }
   }
 
+  async function ensureDefaultSessionContext(sessionId, { projectPath = null, threadName = null } = {}) {
+    if (!sessionId) return null;
+    const existing = sessionContexts.get(sessionId);
+    if (existing) return existing;
+    if (typeof getDefaultMessengerTarget !== 'function') return null;
+
+    // Coalesce concurrent creations for the same session so the user part and
+    // the first assistant part don't each spawn their own Discord thread.
+    const inflight = pendingContextCreations.get(sessionId);
+    if (inflight) return inflight;
+
+    const creation = (async () => {
+      let target = null;
+      try {
+        target = await getDefaultMessengerTarget({ sessionId, projectPath });
+      } catch {
+        return null;
+      }
+      if (!target?.type || !target?.token || !target?.channelId) return null;
+
+      const type = target.type;
+      const token = target.token;
+      const channelId = String(target.channelId);
+      const effectiveProjectPath = target.projectPath ?? projectPath ?? null;
+      let threadId = target.threadId ? String(target.threadId) : null;
+
+      // For Discord, give each web conversation its own thread inside the
+      // project channel. Reuse a thread already bound to this session (so a
+      // continued conversation keeps the same thread), otherwise create one.
+      if (type === 'discord' && !threadId) {
+        const hash = tokenHash(token);
+        try {
+          const bound = bridgeStore
+            .lookupBySessionId(sessionId)
+            .find((b) => b.type === 'discord' && b.targetKey);
+          if (bound?.targetKey) threadId = String(bound.targetKey);
+        } catch {
+          // best-effort — fall through to creating a fresh thread
+        }
+        if (!threadId) {
+          const name = threadName || target.threadName || `Otto · ${target.projectLabel ?? 'web'}`;
+          const created = await startStandaloneDiscordThread({ token, channelId, name });
+          if (created.ok && created.threadId) {
+            threadId = created.threadId;
+            try {
+              bridgeStore.bind({
+                type: 'discord',
+                botTokenHash: hash,
+                targetKey: threadId,
+                sessionId,
+                projectPath: effectiveProjectPath,
+                projectLabel: target.projectLabel ?? null,
+              });
+            } catch {
+              // binding is an optimization (continue-existing across restarts)
+            }
+          }
+          // If thread creation failed, threadId stays null and we post into
+          // the channel directly — degraded but functional.
+        }
+      }
+
+      const ctx = {
+        sessionId,
+        type,
+        token,
+        channelId,
+        threadId: threadId ? String(threadId) : null,
+        projectPath: effectiveProjectPath,
+        sentPartIds: new Set(),
+        startedAt: Date.now(),
+        lastError: null,
+        verbosity: DEFAULT_VERBOSITY,
+        from: null,
+        webMirror: true,
+        source: 'web',
+      };
+      ctx.verbosity = resolveVerbosity({
+        type: ctx.type,
+        token: ctx.token,
+        channelId: ctx.channelId,
+        threadId: ctx.threadId,
+      });
+      sessionContexts.set(sessionId, ctx);
+      broadcastEvent?.('messenger.bridge.web_session_bound', {
+        type: ctx.type,
+        channelId: ctx.channelId,
+        threadId: ctx.threadId,
+        sessionId,
+        projectPath: ctx.projectPath,
+      });
+      return ctx;
+    })();
+
+    pendingContextCreations.set(sessionId, creation);
+    try {
+      return await creation;
+    } finally {
+      pendingContextCreations.delete(sessionId);
+    }
+  }
+
+  async function emitWebUserPart(sessionId, part, { projectPath = null } = {}) {
+    const text = typeof part?.text === 'string' ? part.text.trim() : '';
+    // Name the thread (when one is created) after the user's first line so the
+    // Discord thread list is meaningful instead of a wall of "Otto · web".
+    const threadName = text ? clipBlock(text.split('\n')[0], 80) : null;
+    const ctx = await ensureDefaultSessionContext(sessionId, { projectPath, threadName });
+    if (!ctx?.webMirror) return;
+    if (!text) return;
+    const dedupKey = part?.id ? `${part.id}:user` : null;
+    if (dedupKey && ctx.sentPartIds.has(dedupKey)) return;
+    const safe = clipBlock(text.replace(/```/g, "'''"), 1500);
+    const sent = await postToSurface(ctx, `**Web**\n\`\`\`\n${safe}\n\`\`\``);
+    if (!sent.ok) {
+      ctx.lastError = sent.error;
+      return;
+    }
+    if (dedupKey) ctx.sentPartIds.add(dedupKey);
+  }
+
   async function emitPart(sessionId, part) {
     const ctx = sessionContexts.get(sessionId);
     if (!ctx) return;
@@ -747,7 +1005,10 @@ export function createMessengerOpencodeBridge({
     }
     if (partType === 'reasoning') {
       if (verbosity === 'quiet') return;
-      // Post a single thinking marker per reasoning block — once.
+      // Wait until the reasoning text is non-empty before posting.
+      // The first update often arrives with empty text while the model
+      // is still generating — posting then creates an empty code block.
+      if (!part?.text || !String(part.text).trim()) return;
     }
 
     const dedupKey = partId ? `${partId}:${partType}:${part?.state?.status ?? ''}` : null;
@@ -764,7 +1025,7 @@ export function createMessengerOpencodeBridge({
     if (dedupKey) ctx.sentPartIds.add(dedupKey);
   }
 
-  function handleGlobalEvent(normalized) {
+  async function handleGlobalEvent(normalized) {
     const payload = normalized.payload ?? normalized;
     if (!payload || typeof payload !== 'object') return;
     const type = payload.type ?? payload.event ?? null;
@@ -781,20 +1042,76 @@ export function createMessengerOpencodeBridge({
 
     if (type === 'message.part.updated') {
       const part = props?.part;
-      const sessionId = part?.sessionID ?? part?.sessionId ?? props?.sessionID ?? null;
-      if (!sessionId || !sessionContexts.has(sessionId)) return;
-      if (part?.role === 'user') return;
-      void emitPart(sessionId, part);
+      const sessionId = getPartSessionId(part, props);
+      if (!sessionId) return;
+      const role = resolvePartRole(part, props);
+      const partMessageId = getPartMessageId(part);
+      if (!role) {
+        if (partMessageId) rememberPendingPart(part, envelopeDirectory);
+        return;
+      }
+      if (role === 'user') {
+        // Mirror the user's own prompt into the messenger as a **Web** block.
+        // Only for web-originated sessions: a session already bound to a
+        // Discord/Telegram surface had its prompt typed there already, so
+        // echoing it back would duplicate it.
+        const ctx = sessionContexts.get(sessionId);
+        if (!ctx) {
+          // Check the bridge store: if this session has a Discord/Telegram
+          // binding, the user's prompt came from a messenger, not the web.
+          // This handles edge cases where the in-memory context was lost
+          // (e.g. server restart while a session was actively streaming).
+          const messengerBindings = bridgeStore
+            .lookupBySessionId(sessionId)
+            .filter((b) => b.type === 'discord' || b.type === 'telegram');
+          if (messengerBindings.length === 0) {
+            await emitWebUserPart(sessionId, part, { projectPath: envelopeDirectory });
+          }
+        } else if (ctx.source === 'web' || ctx.webMirror) {
+          await emitWebUserPart(sessionId, part, { projectPath: envelopeDirectory });
+        }
+        return;
+      }
+      if (!sessionContexts.has(sessionId)) {
+        const ctx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
+        if (ctx) await emitPart(sessionId, part);
+        return;
+      }
+      await emitPart(sessionId, part);
       return;
     }
     if (type === 'message.updated') {
-      // We rely on part.updated for line-by-line streaming; nothing to do here.
+      // Cache the message role so the part handler (whose events don't carry a
+      // role) can tell user prompts apart from assistant output. If the part
+      // arrived first, replay it now that the role is known.
+      const info = props?.info ?? props?.message ?? null;
+      const messageId = getMessageId(info);
+      const role = info?.role ?? info?.message?.role ?? props?.role ?? props?.message?.role ?? null;
+      if (messageId && role) {
+        rememberMessageRole(messageId, role);
+        const pending = pendingPartsByMessageId.get(messageId);
+        if (pending) {
+          pendingPartsByMessageId.delete(messageId);
+          await handleGlobalEvent({
+            ...normalized,
+            directory: pending.projectPath ?? envelopeDirectory ?? normalized?.directory,
+            payload: {
+              type: 'message.part.updated',
+              properties: { part: pending.part },
+            },
+          });
+        }
+      }
       return;
     }
     if (type === 'session.idle') {
       const sessionId = props?.sessionID ?? props?.sessionId ?? null;
       const ctx = sessionId ? sessionContexts.get(sessionId) : null;
-      if (!ctx) return;
+      if (!ctx) {
+        const defaultCtx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
+        if (defaultCtx) await handleGlobalEvent(normalized);
+        return;
+      }
       stopTypingPulse(ctx);
       const ms = Date.now() - ctx.startedAt;
       const duration = ms < 1000 ? ms + 'ms' : Math.round(ms / 100) / 10 + 's';
@@ -880,7 +1197,11 @@ export function createMessengerOpencodeBridge({
     if (type === 'session.error') {
       const sessionId = props?.sessionID ?? props?.sessionId ?? null;
       const ctx = sessionId ? sessionContexts.get(sessionId) : null;
-      if (!ctx) return;
+      if (!ctx) {
+        const defaultCtx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
+        if (defaultCtx) await handleGlobalEvent(normalized);
+        return;
+      }
       stopTypingPulse(ctx);
       const err = (() => {
         const raw = props?.error;
@@ -926,6 +1247,10 @@ export function createMessengerOpencodeBridge({
         } catch {
           // lookup failed — fall through to the return below
         }
+      }
+
+      if (!ctx) {
+        ctx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
       }
 
       if (!ctx) {
@@ -1211,6 +1536,7 @@ export function createMessengerOpencodeBridge({
         channelId,
         messageId: sourceMessageId,
         name: threadName,
+        userId: from?.id,
       });
       if (thread.ok && thread.threadId) {
         effectiveThreadId = thread.threadId;
@@ -1261,6 +1587,9 @@ export function createMessengerOpencodeBridge({
         lastError: null,
         verbosity: DEFAULT_VERBOSITY,
         from,
+        // Mark origin surface so we never echo user parts back to the
+        // same messenger they came from (prevents duplication).
+        source: type,
       };
       sessionContexts.set(sessionId, ctx);
     }
@@ -1507,6 +1836,36 @@ export function createMessengerOpencodeBridge({
     if (unsub) approvalContexts._cleanup = unsub;
   }
 
+  /**
+   * Clean up bridge state when a Discord thread is deleted (or archived).
+   * Removes the in-memory session context, deletes the store binding, and
+   * optionally aborts the OpenCode session so it doesn't stay alive on the
+   * server. Called from the Discord listener on THREAD_DELETE / THREAD_UPDATE
+   * (archived) gateway events.
+   */
+  function handleThreadDeleted({ type, threadId, token }) {
+    const bindings = bridgeStore.findByTargetKey({ type, targetKey: threadId });
+
+    for (const b of bindings) {
+      // Clean up in-memory session context (stop typing pulse, remove)
+      const ctx = b.sessionId ? sessionContexts.get(b.sessionId) : null;
+      if (ctx) {
+        stopTypingPulse(ctx);
+        sessionContexts.delete(b.sessionId);
+        broadcastEvent?.('messenger.bridge.thread_cleaned', {
+          type,
+          threadId,
+          sessionId: b.sessionId,
+        });
+      }
+
+      // Remove the store binding using the original binding's hash.
+      // This is correct even when multiple bot tokens share the same
+      // targetKey — each binding is removed independently.
+      bridgeStore.unbind({ type, botTokenHash: b.botTokenHash, targetKey: threadId });
+    }
+  }
+
   return {
     routeInbound,
     runCommand,
@@ -1516,6 +1875,7 @@ export function createMessengerOpencodeBridge({
     ensureSubscribed,
     initApprovalListener,
     handleApprovalDecision,
+    handleThreadDeleted,
     /** Test seam — exposed so tests can drive events without an SSE stream. */
     _handleGlobalEvent: handleGlobalEvent,
     store: bridgeStore,

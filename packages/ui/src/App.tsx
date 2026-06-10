@@ -445,7 +445,7 @@ function App({ apis }: AppProps) {
         return;
       }
       // Fast first retry, gentle backoff: 400ms, 800ms, 1.2s, 1.6s, 2s... cap 8s
-      const delay = Math.min(400 * retryCount, 8000);
+      const delay = Math.min(BASE_DELAY_MS * retryCount, 8000);
       retryTimer = setTimeout(retryInitialization, delay);
     };
 

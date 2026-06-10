@@ -1349,42 +1349,96 @@ async function main(options = {}) {
   // This lets the integration survive server restarts without manual re-start.
   // The bridge is enabled by default, routing all incoming messages through OpenCode
   // and streaming responses back into the originating channel/thread.
+  // Includes retry logic and periodic health checks to recover from disconnects.
   (async () => {
+    const AUTO_START_RETRIES = 5;
+    const AUTO_START_RETRY_DELAY_MS = 3000;
+    const HEALTH_CHECK_INTERVAL_MS = 60_000;
+
+    // Resolve project bindings once, outside the retry loop.
+    let projects = [];
     try {
       const settings = await readSettingsFromDiskMigrated();
-      const discord = settings?.discord;
-      if (discord?.botToken) {
-        // Build a resolveProject function from saved projects + channel bindings.
-        // If no explicit bindings exist, the bridge falls back to auto-resolve
-        // by slug-matching the Discord channel name against project labels/paths.
-        const projects = sanitizeProjects(settings?.projects || []);
-        const resolveProject = ({ channelId, guildId }) => {
-          // No channel-level bindings saved on server — channel-to-project
-          // mappings live in the UI's localStorage. The bridge auto-resolves
-          // by slug name, so this is only used as an optimisation.
-          // If there's exactly one project, bind all messages to it.
-          if (projects.length === 1) {
-            const p = projects[0];
-            return p?.path ? { path: p.path, label: p.label ?? p.path } : null;
-          }
-          return null;
-        };
+      projects = sanitizeProjects(settings?.projects || []);
+    } catch {
+      // ignore — defaults to empty
+    }
 
-        const result = discordListener.start(discord.botToken, {
-          guildId: discord.guildId || undefined,
-          autoReply: discord.autoReply !== false,
-          scopeToGuild: Boolean(discord.scopeToGuild),
-          bridgeEnabled: true, // Always enable bridge on auto-start
-          resolveProject,
-        });
-        if (result?.alreadyRunning) {
-          console.log('[Discord] Listener already running (from saved config)');
-        } else {
-          console.log('[Discord] Listener auto-started from saved config');
-        }
+    const resolveProject = ({ channelId, guildId }) => {
+      if (projects.length === 1) {
+        const p = projects[0];
+        return p?.path ? { path: p.path, label: p.label ?? p.path } : null;
       }
-    } catch (err) {
-      console.warn('[Discord] Failed to auto-start listener:', err?.message ?? err);
+      return null;
+    };
+
+    // Try auto-start with retries
+    let discordConfig = null;
+    for (let attempt = 1; attempt <= AUTO_START_RETRIES; attempt++) {
+      try {
+        const settings = await readSettingsFromDiskMigrated();
+        discordConfig = settings?.discord;
+        if (discordConfig?.botToken) {
+          const result = discordListener.start(discordConfig.botToken, {
+            guildId: discordConfig.guildId || undefined,
+            autoReply: discordConfig.autoReply !== false,
+            scopeToGuild: Boolean(discordConfig.scopeToGuild),
+            bridgeEnabled: true,
+            resolveProject,
+          });
+          console.log(
+            '[Discord] Listener auto-start:',
+            result?.alreadyRunning ? 'already running' : 'started',
+            '(connected=' + result?.connected + ')'
+          );
+          break; // Success — exit retry loop
+        } else {
+          console.log('[Discord] No bot token in saved config — skipping auto-start');
+          break; // No token, nothing to retry
+        }
+      } catch (err) {
+        const isLastAttempt = attempt === AUTO_START_RETRIES;
+        console.warn(
+          `[Discord] Auto-start attempt ${attempt}/${AUTO_START_RETRIES} failed:`, err?.message ?? err,
+          isLastAttempt ? ' — giving up' : ` — retrying in ${AUTO_START_RETRY_DELAY_MS}ms`,
+        );
+        if (isLastAttempt) break;
+        await new Promise((r) => setTimeout(r, AUTO_START_RETRY_DELAY_MS));
+      }
+    }
+
+    // Periodic health check — reconnects the listener if it became disconnected.
+    // This handles cases where:
+    //   - The gateway connection drops and the built-in reconnect fails
+    //   - The process recovers from a suspend/resume cycle
+    //   - The listener process crashes and the state is stale
+    if (discordConfig?.botToken) {
+      const healthCheckTimer = setInterval(async () => {
+        try {
+          const status = discordListener.status(discordConfig.botToken);
+          if (!status.running || !status.connected) {
+            console.log(
+              '[Discord] Health check: listener not connected (running=' + status.running +
+              ', connected=' + status.connected + ') — restarting...'
+            );
+            discordListener.stop(discordConfig.botToken);
+            const startResult = discordListener.start(discordConfig.botToken, {
+              guildId: discordConfig.guildId || undefined,
+              autoReply: discordConfig.autoReply !== false,
+              scopeToGuild: Boolean(discordConfig.scopeToGuild),
+              bridgeEnabled: true,
+              resolveProject,
+            });
+            console.log(
+              '[Discord] Health check: restart result — running=' + startResult.running +
+              ', connected=' + startResult.connected
+            );
+          }
+        } catch (err) {
+          console.warn('[Discord] Health check error:', err?.message ?? err);
+        }
+      }, HEALTH_CHECK_INTERVAL_MS);
+      healthCheckTimer.unref();
     }
   })();
 
