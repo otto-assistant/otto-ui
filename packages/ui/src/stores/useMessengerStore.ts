@@ -20,6 +20,11 @@ export interface MessengerConnection {
   guildName?: string;
   /** Default Discord channel id that summary / test messages are sent to. */
   defaultChannelId?: string;
+  /**
+   * Discord user id of the bot's human owner. Web-created threads are
+   * auto-joined by this user so they appear under the channel for them.
+   */
+  defaultUserId?: string;
   discordBotId?: string;
   discordBotUsername?: string;
   discordBotDiscriminator?: string;
@@ -1225,6 +1230,7 @@ export const useMessengerStore = create<MessengerState>()(
             scopeToGuild: Boolean(conn.discordListenerScopeToGuild),
             bridgeEnabled: conn.bridgeEnabled !== false,
             defaultChannelId: conn.defaultChannelId,
+            defaultUserId: conn.defaultUserId,
             projectBindings,
           });
         } catch {
@@ -1267,6 +1273,7 @@ export const useMessengerStore = create<MessengerState>()(
             token: conn.botToken,
             guildId: conn.discordGuildId,
             defaultChannelId: conn.defaultChannelId,
+            defaultUserId: conn.defaultUserId,
             // Default OFF — we'd rather show every message the gateway
             // delivers than silently drop messages from a different guild
             // because the saved Server ID is wrong by one digit.

@@ -124,10 +124,49 @@ describe('/model + /status surface the OpenChamber default model', () => {
   });
 });
 
-describe('/help includes verbosity', () => {
-  it('lists the /verbosity command', async () => {
+describe('/help includes verbosity and skill', () => {
+  it('lists the /verbosity and /skill commands', async () => {
     const { result } = await run('/help');
     expect(result.reply).toContain('/verbosity');
+    expect(result.reply).toContain('/skill');
+  });
+});
+
+describe('/skill command', () => {
+  const opencode = {
+    listSkills: async () => [
+      { name: 'theme-system', description: 'theme tokens' },
+      { name: 'drag-to-reorder', description: 'dnd-kit lists' },
+    ],
+    sendPrompt: vi.fn(async () => ({ ok: true })),
+  };
+
+  it('lists available skills with no args', async () => {
+    const { result } = await run('/skill', { opencode, binding: { projectPath: '/p' } });
+    expect(result.reply).toContain('Available skills');
+    expect(result.reply).toContain('theme-system');
+    expect(result.reply).toContain('drag-to-reorder');
+  });
+
+  it('hands a named skill to the agent when a session exists', async () => {
+    const sendPrompt = vi.fn(async () => ({ ok: true }));
+    const { result } = await run('/skill theme-system', {
+      opencode: { ...opencode, sendPrompt },
+      binding: { sessionId: 'ses-1', projectPath: '/p' },
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(sendPrompt.mock.calls[0][2]).toContain('theme-system');
+    expect(result.reply).toMatch(/Handed the `theme-system` skill/);
+  });
+
+  it('rejects an unknown skill name', async () => {
+    const { result } = await run('/skill nope', { opencode, binding: { sessionId: 'ses-1' } });
+    expect(result.reply).toMatch(/Unknown skill/);
+  });
+
+  it('asks for a message first when no session is bound', async () => {
+    const { result } = await run('/skill theme-system', { opencode, binding: { sessionId: null } });
+    expect(result.reply).toMatch(/Send a regular message first/);
   });
 });
 

@@ -534,4 +534,94 @@ describe('discord inbound mirroring', () => {
       .map(([, init]) => JSON.parse(init.body).content);
     expect(threadMessages).toEqual(['assistant reply']);
   });
+
+  it('does not echo a Discord reply back into a web-created thread (mixed surface)', async () => {
+    // Scenario: a thread was created from the web UI (so the session ctx is a
+    // web-mirror), but the user then answers FROM Discord inside that thread.
+    // The user's own prompt must NOT bounce straight back to them.
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push([String(url), init]);
+      const u = String(url);
+      if (u === 'http://opencode/session') {
+        return { ok: true, status: 200, json: async () => ({ id: 'mixed-ses' }), text: async () => '' };
+      }
+      if (u.includes('/session/mixed-ses/prompt_async')) {
+        return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+      }
+      // Discord thread message posts + standalone thread creation.
+      if (u.endsWith('/threads')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'web-thread', name: 'web' }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({ id: 'm' }), text: async () => '' };
+    });
+
+    // A store that binds the web thread to the session, so the inbound Discord
+    // reply resolves to the SAME session created by the web flow.
+    const bound = { sessionId: 'mixed-ses', projectPath: '/web/project', projectLabel: 'Web' };
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        // The inbound Discord reply resolves to the SAME session the web flow
+        // created (bound to the web thread's id). lookupBySessionId stays empty
+        // so the first web user message still creates + mirrors into the thread.
+        lookup: ({ targetKey }) => (targetKey === 'web-thread' ? bound : null),
+      },
+      getDefaultMessengerTarget: async ({ projectPath }) => ({
+        type: 'discord',
+        token: 'bot-token',
+        channelId: 'project-chan',
+        threadId: null,
+        projectPath,
+        projectLabel: 'Web',
+      }),
+    });
+
+    // 1. Web user message → creates the web thread + mirrors a **Web** block.
+    await bridge._handleGlobalEvent({
+      directory: '/web/project',
+      payload: { type: 'message.updated', properties: { info: { id: 'm-web', role: 'user', sessionID: 'mixed-ses' } } },
+    });
+    await bridge._handleGlobalEvent({
+      directory: '/web/project',
+      payload: {
+        type: 'message.part.updated',
+        properties: { part: { id: 'p-web', type: 'text', messageID: 'm-web', sessionID: 'mixed-ses', text: 'from web' } },
+      },
+    });
+
+    const beforeReply = calls.filter(([url]) => url.includes('/channels/web-thread/messages')).length;
+
+    // 2. The user now replies FROM Discord inside that same thread.
+    await bridge.routeInbound({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'web-thread',
+      threadId: null,
+      sourceMessageId: null,
+      text: 'reply from discord',
+      from: { id: 'user-1', username: 'alice' },
+    });
+
+    // 3. OpenCode echoes that prompt back as a `user` part on the same session.
+    await bridge._handleGlobalEvent({
+      directory: '/web/project',
+      payload: { type: 'message.updated', properties: { info: { id: 'm-dc', role: 'user', sessionID: 'mixed-ses' } } },
+    });
+    await bridge._handleGlobalEvent({
+      directory: '/web/project',
+      payload: {
+        type: 'message.part.updated',
+        properties: { part: { id: 'p-dc', type: 'text', messageID: 'm-dc', sessionID: 'mixed-ses', text: 'reply from discord' } },
+      },
+    });
+
+    const threadMessages = calls
+      .filter(([url]) => url.includes('/channels/web-thread/messages'))
+      .map(([, init]) => JSON.parse(init.body).content);
+    // The Discord-originated prompt must not be mirrored back into the thread.
+    expect(threadMessages.some((c) => c.includes('reply from discord'))).toBe(false);
+    // ...while the earlier genuine web prompt still was mirrored once.
+    expect(beforeReply).toBeGreaterThan(0);
+  });
 });

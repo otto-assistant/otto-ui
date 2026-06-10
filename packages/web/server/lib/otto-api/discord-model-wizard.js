@@ -1,4 +1,14 @@
 import crypto from 'node:crypto';
+import {
+  WIZARD_TTL_MS,
+  PAGE_SIZE,
+  PREV_VALUE,
+  NEXT_VALUE,
+  buildPagedOptions,
+  stringSelect,
+  botHashFor,
+  createWizardStore,
+} from './discord-wizard-shared.js';
 
 /**
  * Interactive `/model` wizard for the Discord gateway listener.
@@ -6,9 +16,9 @@ import crypto from 'node:crypto';
  * Discord string-select menus are capped at 25 options, so a provider with
  * dozens of models (or an account connected to many providers) overflowed the
  * old single-page menu and silently dropped everything past the 25th entry.
- * This module renders the provider / model lists as PAGED select menus: each
- * page shows up to {@link PAGE_SIZE} real choices plus `◀ Previous` / `More ▶`
- * navigation entries when there is more to show.
+ * The shared paging helpers render the provider / model lists as PAGED select
+ * menus: each page shows up to {@link PAGE_SIZE} real choices plus
+ * `◀ Previous` / `More ▶` navigation entries when there is more to show.
  *
  * Flow: `/model` → pick provider → pick model → pick scope (channel / global).
  * Wizard state is keyed by a short random hash embedded in each select's
@@ -18,13 +28,8 @@ import crypto from 'node:crypto';
  * isolation; the listener just delegates the matching interactions here.
  */
 
-export const WIZARD_TTL_MS = 10 * 60 * 1000;
-// Real choices per page. Up to two slots are reserved for prev/next navigation,
-// so the rendered menu never exceeds Discord's hard limit of 25 select options.
-export const PAGE_SIZE = 23;
-
-const PREV_VALUE = '__otto_prev';
-const NEXT_VALUE = '__otto_next';
+// Re-exported for callers/tests that import the paging helpers from here.
+export { WIZARD_TTL_MS, PAGE_SIZE, buildPagedOptions };
 
 const PROVIDER_PREFIX = 'otto-model-provider:';
 const MODEL_PREFIX = 'otto-model-model:';
@@ -36,81 +41,11 @@ export function modelsOf(provider) {
   return Array.isArray(provider.models) ? provider.models : Object.values(provider.models);
 }
 
-/**
- * Build a paged set of Discord select options from `items`.
- *
- * @param {Array<{label:string,value:string,description?:string}>} items
- * @param {number} page zero-based page index (clamped into range)
- * @returns {{ options: Array, page: number, totalPages: number }}
- */
-export function buildPagedOptions(items, page) {
-  const total = Array.isArray(items) ? items.length : 0;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const safePage = Math.min(Math.max(0, page | 0), totalPages - 1);
-  const start = safePage * PAGE_SIZE;
-  const options = items.slice(start, start + PAGE_SIZE).map((o) => ({ ...o }));
-  if (safePage > 0) {
-    options.unshift({
-      label: '◀ Previous',
-      value: PREV_VALUE,
-      description: `Page ${safePage} of ${totalPages}`,
-    });
-  }
-  if (safePage < totalPages - 1) {
-    options.push({
-      label: 'More ▶',
-      value: NEXT_VALUE,
-      description: `Page ${safePage + 2} of ${totalPages}`,
-    });
-  }
-  return { options, page: safePage, totalPages };
-}
-
-/** A single-row string-select component. Options are clamped to Discord's 25 max. */
-function stringSelect(customId, options, placeholder) {
-  return {
-    type: 1,
-    components: [
-      {
-        type: 3,
-        custom_id: customId,
-        options: options.slice(0, 25),
-        placeholder: placeholder ?? 'Select…',
-      },
-    ],
-  };
-}
-
-function botHashFor(token) {
-  return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 12);
-}
-
 export function createDiscordModelWizard({ restCall, bridge }) {
-  const wizardState = new Map();
-  const wizardTimers = new Map();
-
-  function setWizard(hash, data) {
-    const existing = wizardTimers.get(hash);
-    if (existing) clearTimeout(existing);
-    wizardState.set(hash, data);
-    const timer = setTimeout(() => {
-      wizardState.delete(hash);
-      wizardTimers.delete(hash);
-    }, WIZARD_TTL_MS);
-    timer.unref?.();
-    wizardTimers.set(hash, timer);
-  }
-
-  const getWizard = (hash) => wizardState.get(hash) ?? null;
-
-  function delWizard(hash) {
-    const timer = wizardTimers.get(hash);
-    if (timer) {
-      clearTimeout(timer);
-      wizardTimers.delete(hash);
-    }
-    wizardState.delete(hash);
-  }
+  const wizards = createWizardStore();
+  const setWizard = wizards.set;
+  const getWizard = wizards.get;
+  const delWizard = wizards.del;
 
   /** Send an interaction callback using the bot token. */
   function respond(token, interaction, data) {
