@@ -551,7 +551,7 @@ const ensureModelsMetadataFetch = (
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const CONNECTION_PROBE_TIMEOUT_MS = 800;
+const CONNECTION_PROBE_TIMEOUT_MS = 400;
 
 const probeOpenCodeHealth = async (timeoutMs = CONNECTION_PROBE_TIMEOUT_MS): Promise<boolean> => {
     return Promise.race([
@@ -2361,7 +2361,7 @@ export const useConfigStore = create<ConfigStore>()(
 
                 checkConnection: async () => {
                     markStartupTrace('checkConnection:start');
-                    const maxAttempts = 5;
+                    const maxAttempts = 6;
                     let attempt = 0;
                     let lastError: unknown = null;
 
@@ -2381,7 +2381,7 @@ export const useConfigStore = create<ConfigStore>()(
                                     lastDisconnectReason: 'health_check_unhealthy',
                                 });
                                 attempt += 1;
-                                await sleep(400 * attempt);
+                                await sleep(100 * attempt); // faster retry: 100ms, 200ms, 300ms...
                                 continue;
                             }
 
@@ -2398,7 +2398,7 @@ export const useConfigStore = create<ConfigStore>()(
                         } catch (error) {
                             lastError = error;
                             attempt += 1;
-                            const delay = 400 * attempt;
+                            const delay = 100 * attempt;
                             await sleep(delay);
                         }
                     }
@@ -2462,8 +2462,10 @@ export const useConfigStore = create<ConfigStore>()(
                             if (debug) console.log("App initialized successfully");
                         } catch (error) {
                             console.error("Failed to initialize app:", error);
+                            // Do NOT set isInitialized here — that would block the
+                            // App.tsx retry loop. The retry loop handles re-invocation
+                            // with exponential backoff up to MAX_RETRIES.
                             set({
-                                isInitialized: false,
                                 isConnected: false,
                                 connectionPhase: get().hasEverConnected ? "reconnecting" : "connecting",
                                 lastDisconnectReason: 'init_error',

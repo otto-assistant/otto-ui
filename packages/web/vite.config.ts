@@ -117,19 +117,29 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined;
 
-          const match = id.split('node_modules/')[1];
-          if (!match) return undefined;
+          // Use the LAST occurrence of `node_modules/` so we extract the real
+          // package name regardless of resolver layout. Bun stores packages
+          // under `node_modules/.bun/<pkg>@<ver>/node_modules/<pkg>/...`,
+          // and naïvely splitting on the first `node_modules/` makes every
+          // dep look like the `.bun` "package" — collapsing the entire dep
+          // graph into one 17 MB chunk and crippling first paint on mobile.
+          const segments = id.split('node_modules/');
+          const tail = segments[segments.length - 1];
+          if (!tail) return undefined;
 
-          const segments = match.split('/');
-          const packageName = match.startsWith('@') ? `${segments[0]}/${segments[1]}` : segments[0];
+          const parts = tail.split('/');
+          const packageName = tail.startsWith('@') ? `${parts[0]}/${parts[1]}` : parts[0];
 
-          if (packageName === 'react' || packageName === 'react-dom') return 'vendor-react';
+          if (packageName === 'react' || packageName === 'react-dom' || packageName === 'scheduler') return 'vendor-react';
           if (packageName === 'zustand' || packageName === 'zustand/middleware') return 'vendor-zustand';
 
           if (packageName === '@opencode-ai/sdk') return 'vendor-opencode-sdk';
-          if (packageName.includes('remark') || packageName.includes('rehype') || packageName === 'react-markdown') return 'vendor-markdown';
+          if (packageName.includes('remark') || packageName.includes('rehype') || packageName === 'react-markdown' || packageName === 'micromark' || packageName.startsWith('micromark-') || packageName.startsWith('mdast-util-')) return 'vendor-markdown';
           if (packageName === '@base-ui/react' || packageName.startsWith('@base-ui')) return 'vendor-base-ui';
-          if (packageName.includes('react-syntax-highlighter') || packageName.includes('highlight.js')) return 'vendor-syntax';
+          if (packageName.includes('react-syntax-highlighter') || packageName.includes('highlight.js') || packageName === 'lowlight') return 'vendor-syntax';
+          if (packageName.startsWith('@radix-ui')) return 'vendor-radix';
+          if (packageName === 'motion' || packageName === 'framer-motion') return 'vendor-motion';
+          if (packageName === 'ghostty-web' || packageName.startsWith('xterm') || packageName === '@xterm') return 'vendor-terminal';
 
           const sanitized = packageName.replace(/^@/, '').replace(/\//g, '-');
           return `vendor-${sanitized}`;

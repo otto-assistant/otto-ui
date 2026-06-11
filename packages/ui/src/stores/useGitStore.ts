@@ -232,6 +232,8 @@ const hasStatusChanged = (oldStatus: GitStatus | null, newStatus: GitStatus | nu
   if (oldStatus.current !== newStatus.current) return true;
   if (oldStatus.tracking !== newStatus.tracking) return true;
   if (oldStatus.isClean !== newStatus.isClean) return true;
+  if ((oldStatus.totalChangedFiles ?? oldFiles.length) !== (newStatus.totalChangedFiles ?? newFiles.length)) return true;
+  if (Boolean(oldStatus.truncated) !== Boolean(newStatus.truncated)) return true;
   if (
     newStatus.upstreamComparison !== undefined
     && haveRemoteComparisonChanged(oldStatus.upstreamComparison, newStatus.upstreamComparison)
@@ -637,6 +639,9 @@ export const useGitStore = create<GitStore>()(
       },
 
       fetchBranches: async (directory, git) => {
+        const existing = get().directories.get(directory);
+        if (existing?.isGitRepo === false) return;
+
         {
           const newDirectories = new Map(get().directories);
           const d = newDirectories.get(directory) ?? createEmptyDirectoryState();
@@ -650,8 +655,8 @@ export const useGitStore = create<GitStore>()(
           const dirState = newDirectories.get(directory) ?? createEmptyDirectoryState();
           newDirectories.set(directory, { ...dirState, branches, isLoadingBranches: false, lastBranchesFetch: Date.now() });
           set({ directories: newDirectories });
-        } catch (error) {
-          console.error('Failed to fetch git branches:', error);
+        } catch {
+          // non-git directories or server errors are expected — don't pollute console
           const newDirectories = new Map(get().directories);
           const d = newDirectories.get(directory) ?? createEmptyDirectoryState();
           newDirectories.set(directory, { ...d, isLoadingBranches: false });

@@ -126,6 +126,7 @@ export async function bootstrapDirectory(input: {
     config: Record<string, unknown>
     projects: Project[]
     providers: { all: unknown[]; connected: unknown[]; default: Record<string, unknown> }
+    path?: unknown
   }
   loadSessions: (directory: string) => Promise<void> | void
 }) {
@@ -136,32 +137,54 @@ export async function bootstrapDirectory(input: {
   // Seed from global state while we fetch directory-specific data
   const seededProject = projectID(directory, g.projects)
   if (seededProject) set({ project: seededProject })
-  if (state.provider.all.length === 0 && g.providers.all.length > 0) {
+  const seededProviders = state.provider.all.length === 0 && g.providers.all.length > 0
+  if (seededProviders) {
     set({ provider: g.providers as State["provider"] })
   }
   if (Object.keys(state.config ?? {}).length === 0 && Object.keys(g.config ?? {}).length > 0) {
     set({ config: g.config as State["config"] })
+  }
+  const seededPath = !!g.path
+  if (seededPath) {
+    set({ path: g.path as State["path"] })
   }
   if (loading) set({ status: "partial" })
 
   // ---------------------------------------------------------------------------
   // Phase 1: Critical path — block until these resolve so the UI can render.
   // These are the minimum data needed to show a functional chat interface.
+  //
+  // We deliberately skip fetches whose data is fully global (provider.list,
+  // path.get) when `bootstrapGlobal` already populated them. Re-fetching the
+  // same multi-hundred-KB provider catalog and path metadata per directory
+  // doubled startup network volume for no benefit.
   // ---------------------------------------------------------------------------
+  const providerListTask = seededProviders || g.providers.all.length > 0
+    ? Promise.resolve()
+    : retry(() => sdk.provider.list().then((x) => set({ provider: unwrap(x, "provider.list") })))
+  const pathGetTask = seededPath
+    ? Promise.resolve().then(() => {
+        // Still refresh the per-directory project mapping using the
+        // already-loaded global path data.
+        const next = projectID((g.path as { directory?: string })?.directory ?? directory, g.projects)
+        if (next) set({ project: next })
+      })
+    : retry(() =>
+        sdk.path.get().then((x) => {
+          const data = unwrap(x, "path.get")
+          set({ path: data })
+          const next = projectID(data?.directory ?? directory, g.projects)
+          if (next) set({ project: next })
+        }),
+      )
+
   const phase1Results = await Promise.allSettled([
     seededProject
       ? Promise.resolve()
       : retry(() => sdk.project.current().then((x) => set({ project: unwrap(x, "project.current").id }))),
-    retry(() => sdk.provider.list().then((x) => set({ provider: unwrap(x, "provider.list") }))),
+    providerListTask,
     retry(() => sdk.config.get().then((x) => set({ config: unwrap(x, "config.get") }))),
-    retry(() =>
-      sdk.path.get().then((x) => {
-        const data = unwrap(x, "path.get")
-        set({ path: data })
-        const next = projectID(data?.directory ?? directory, g.projects)
-        if (next) set({ project: next })
-      }),
-    ),
+    pathGetTask,
     retry(() => sdk.session.status().then((x) => set({ session_status: unwrap(x, "session.status") }))),
   ])
 
@@ -172,8 +195,10 @@ export async function bootstrapDirectory(input: {
   // path.get and session.status have no global-state fallback.
   // If either fails, the UI cannot safely advance to "complete".
   const [, , , pathResult, sessionStatusResult] = phase1Results
+  // If we used the seeded path (no network call), we already have the data;
+  // only treat path as critical when we actually had to fetch it.
   const criticalPhase1Failed =
-    pathResult.status === "rejected" || sessionStatusResult.status === "rejected"
+    (!seededPath && pathResult.status === "rejected") || sessionStatusResult.status === "rejected"
 
   if (phase1Errors.length === phase1Results.length || criticalPhase1Failed) {
     console.error(`[bootstrap] directory bootstrap failed for ${directory}`, phase1Errors[0])

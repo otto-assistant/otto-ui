@@ -1511,6 +1511,42 @@ export async function setLocalIdentity(directory, profile) {
   }
 }
 
+// Hard caps applied to git status output so that repositories with a huge
+// untracked file set (e.g. a `node_modules` mistakenly outside `.gitignore`,
+// build artifacts, or a clone of a monorepo with hundreds of thousands of
+// generated files) cannot DoS the server or the client. Without these, a
+// status fetch can return >100 MB of JSON, spawn 600k+ parallel file reads
+// to compute line counts, and freeze the client when it tries to render or
+// iterate the list. The cutoffs are intentionally generous: any real-world
+// "show me what changed" workflow fits well under 5000 entries.
+const STATUS_FILES_HARD_CAP = 5000;
+const STATUS_LINE_COUNT_THRESHOLD = 500;
+const STATUS_NEW_FILE_READ_CONCURRENCY = 16;
+const STATUS_NEW_FILE_MAX_BYTES = 2 * 1024 * 1024;
+
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = cursor;
+      if (index >= items.length) return;
+      cursor = index + 1;
+      try {
+        results[index] = await fn(items[index], index);
+      } catch (error) {
+        results[index] = undefined;
+        // Per-file errors are swallowed — getStatus already treats them as best-effort.
+        if (error) {
+          console.warn('[git.getStatus] file work failed:', error?.message ?? error);
+        }
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function getStatus(directory, options = {}) {
   const lightMode = options.mode === 'light';
 
@@ -1520,8 +1556,18 @@ export async function getStatus(directory, options = {}) {
     // Use -uall to show all untracked files individually, not just directories
     const status = await git.status(['-uall']);
 
-    // Light mode: skip numstat + new-file line counting for faster response
-    const [stagedStatsRaw, workingStatsRaw] = lightMode
+    const totalChangedFiles = status.files.length;
+    const truncated = totalChangedFiles > STATUS_FILES_HARD_CAP;
+    const cappedFiles = truncated
+      ? status.files.slice(0, STATUS_FILES_HARD_CAP)
+      : status.files;
+
+    // Light mode: skip numstat + new-file line counting for faster response.
+    // Full mode also skips numstat when the working set is huge — diff numstat
+    // for hundreds of thousands of files is extremely expensive and the
+    // resulting payload is unusable in the UI anyway.
+    const skipDiffStats = lightMode || truncated;
+    const [stagedStatsRaw, workingStatsRaw] = skipDiffStats
       ? ['', '']
       : await Promise.all([
           git.raw(['diff', '--cached', '--numstat']).catch(() => ''),
@@ -1764,9 +1810,12 @@ export async function getStatus(directory, options = {}) {
         working_dir: f.working_dir,
       })),
       isClean: status.isClean(),
-      diffStats: lightMode ? undefined : diffStats,
+      diffStats: skipDiffStats ? undefined : diffStats,
       mergeInProgress,
       rebaseInProgress,
+      totalChangedFiles,
+      truncated,
+      truncatedCount: truncated ? totalChangedFiles - cappedFiles.length : 0,
     };
   } catch (error) {
     if (!isNotGitRepositoryError(error)) {
