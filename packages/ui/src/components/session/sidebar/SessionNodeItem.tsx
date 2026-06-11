@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Icon } from "@/components/icon/Icon";
 import { buildExportFilename, downloadAsMarkdown, formatSessionAsMarkdown, getExportRevealLabelKey, revealExportedMarkdown, saveAsMarkdownDesktop } from '@/lib/exportSession';
 import type { ChildSessionExport } from '@/lib/exportSession';
-import { buildSessionMessageRecordsSnapshot, useChildStoreManager, useGlobalSessionPermissions, useGlobalSessionStatus, useSession } from '@/sync/sync-context';
+import { buildSessionMessageRecordsSnapshot, useDirectoryStore, useGlobalSessionStatus, useSession, useSessionPermissions } from '@/sync/sync-context';
 import { useSync } from '@/sync/use-sync';
 import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
 import { DraggableSessionRow } from './sessionFolderDnd';
@@ -301,12 +301,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const sessionDirectory =
     normalizePath((session as Session & { directory?: string | null }).directory ?? null)
     ?? normalizePath(groupDirectory ?? null);
-  // Hold a manager reference instead of calling useDirectoryStore() —
-  // useDirectoryStore() would ensure+bootstrap the session's directory
-  // on every render, which fans out into a 50-directory bootstrap storm
-  // when many projects/worktrees are visible in the sidebar. Bootstrap
-  // is deferred to the export callbacks where it's actually needed.
-  const childStoreManager = useChildStoreManager();
+  const directoryStore = useDirectoryStore(sessionDirectory ?? undefined);
   const sync = useSync();
 
   const selectionModeEnabled = useSessionMultiSelectStore((state) => state.enabled);
@@ -336,12 +331,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     React.useCallback((state) => Boolean(state.sessionMemoryState.get(viewportSessionKey(session.id))?.isZombie), [session.id]),
   );
   const sessionStatus = useGlobalSessionStatus(session.id);
-  // Permissions for sidebar rows are read via the non-bootstrapping global
-  // aggregator. Pulling permissions per-row with `useSessionPermissions`
-  // would ensure+bootstrap a child store for every visible session's
-  // directory; with many projects/worktrees that's hundreds of redundant
-  // bootstraps just to display a pending-permission badge.
-  const sessionPermissions = useGlobalSessionPermissions(session.id);
+  const sessionPermissions = useSessionPermissions(session.id, sessionDirectory ?? undefined);
   const directoryState = sessionDirectory ? directoryStatus.get(sessionDirectory) : null;
   const isMissingDirectory = directoryState === 'missing';
   const isActive = currentSessionId === session.id;
@@ -373,12 +363,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     for (const child of children) {
       try {
         await sync.ensureSessionRenderable(child.session.id);
-        if (!sessionDirectory) {
-          skipped += 1;
-          continue;
-        }
-        const childDirectoryStore = childStoreManager.ensureChild(sessionDirectory);
-        const childRecords = buildSessionMessageRecordsSnapshot(childDirectoryStore.getState(), child.session.id).list;
+        const childRecords = buildSessionMessageRecordsSnapshot(directoryStore.getState(), child.session.id).list;
         const childTitle = child.session.title || t('sessions.sidebar.session.export.untitledSubagent');
         const childAgent = (child.session as Session & { agent?: string }).agent;
         const grandChildren = await collectChildExports(child.children);
@@ -394,7 +379,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
       }
     }
     return { children: results, skipped };
-  }, [childStoreManager, collectNodeDescendantIds, sessionDirectory, sync, t]);
+  }, [collectNodeDescendantIds, directoryStore, sync, t]);
 
   const showSkippedSubtasksWarning = React.useCallback((count: number) => {
     if (count <= 0) return;
@@ -411,7 +396,6 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
 
     await sync.ensureSessionRenderable(session.id);
 
-    const directoryStore = childStoreManager.ensureChild(sessionDirectory);
     const records = buildSessionMessageRecordsSnapshot(directoryStore.getState(), session.id).list;
     if (records.length === 0) {
       toast.error(t('sessions.sidebar.session.export.nothingToExport'));
@@ -450,7 +434,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     downloadAsMarkdown(markdown, filename);
     toast.success(t('sessions.sidebar.session.export.success'));
     showSkippedSubtasksWarning(skippedSubtaskCount);
-  }, [childStoreManager, collectChildExports, node.children, resolvedSession.title, session.id, sessionDirectory, showSkippedSubtasksWarning, sync, t]);
+  }, [collectChildExports, directoryStore, node.children, resolvedSession.title, session.id, sessionDirectory, showSkippedSubtasksWarning, sync, t]);
   const handleExportSession = React.useCallback(async () => {
     if (node.children.length > 0) {
       setExportIncludeSubtasks(true);

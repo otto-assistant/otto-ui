@@ -149,28 +149,13 @@ export const extractChangedFiles = (parts: ToolPart[]): ChangedFile[] => {
     return files;
 };
 
-/**
- * Hard ceiling on entries returned by extractGitChangedFiles.
- *
- * The server already caps `git status` payloads, but a defense-in-depth
- * limit here protects every consumer (`PendingChangesBar`, `ChatInput`,
- * etc.) from pathological cases where an old cached status sneaks through
- * with hundreds of thousands of entries — that single iteration alone
- * pegs the main thread and blocks paint.
- */
-export const EXTRACT_GIT_CHANGED_FILES_LIMIT = 5000;
-
 export const extractGitChangedFiles = (
     files: Array<{ path: string; index: string; working_dir: string }>,
     diffStats: Record<string, { insertions: number; deletions: number }> | undefined,
     directory: string,
-    options?: { limit?: number },
 ): GitChangedFile[] => {
-    const limit = options?.limit ?? EXTRACT_GIT_CHANGED_FILES_LIMIT;
     const result: GitChangedFile[] = [];
-    for (let i = 0; i < files.length; i += 1) {
-        if (result.length >= limit) break;
-        const file = files[i];
+    for (const file of files) {
         const indexStatus = file.index?.trim() ?? '';
         const workingStatus = file.working_dir?.trim() ?? '';
         const hasStagedChanges = Boolean(indexStatus && indexStatus !== '?');
@@ -189,22 +174,6 @@ export const extractGitChangedFiles = (
         });
     }
     return result;
-};
-
-/**
- * Cheap "does this status have any changes I care about?" check. Avoids
- * allocating + iterating the full changed-file list (which is the killer
- * cost when a repo reports hundreds of thousands of changes).
- */
-export const hasAnyGitChangedFiles = (
-    files: Array<{ path: string; index: string; working_dir: string }>,
-): boolean => {
-    for (let i = 0; i < files.length; i += 1) {
-        const file = files[i];
-        const code = file.working_dir !== ' ' ? file.working_dir : file.index;
-        if (code !== '!' && code !== ' ') return true;
-    }
-    return false;
 };
 
 export const toRelativePath = (absolutePath: string, baseDirectory: string): string => {

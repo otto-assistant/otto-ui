@@ -15,7 +15,6 @@ export type SettingsPageSlug =
   | 'skills.catalog'
   | 'git'
   | 'integrations'
-  | 'memory'
   | 'appearance'
   | 'chat'
   | 'shortcuts'
@@ -163,14 +162,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     title: 'Integrations',
     group: 'general',
     kind: 'single',
-    keywords: ['integrations', 'discord', 'telegram', 'messenger', 'sync', 'relay', 'connection'],
-  },
-  {
-    slug: 'memory',
-    title: 'Memory',
-    group: 'general',
-    kind: 'single',
-    keywords: ['memory', 'mempalace', 'mem palace', 'memory palace', 'knowledge', 'recall', 'notes', 'graph'],
+    keywords: ['integrations', 'discord', 'messenger', 'bridge', 'sync', 'bot', 'connection'],
   },
   {
     slug: 'appearance',

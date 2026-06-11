@@ -1,5 +1,5 @@
 /**
- * Pure rendering of OpenCode message parts into Discord/Telegram markdown.
+ * Pure rendering of OpenCode message parts into Discord markdown.
  *
  * Kept free of any I/O (no SQLite, no fetch) so it can be unit-tested in
  * isolation and reused by the bridge. `messenger-opencode-bridge.js` owns the
@@ -83,7 +83,7 @@ export function toolDetailInline(part) {
 }
 
 /**
- * Render a PermissionRequest into a rich Discord/Telegram prompt.
+ * Render a PermissionRequest into a rich Discord prompt.
  * Mirrors the same tool-specific context as the web UI's PermissionCard.
  * Returns a plain text + markdown string suitable for an approval message footer.
  */
@@ -204,7 +204,7 @@ export function renderPermissionContext(permission) {
 }
 
 /**
- * Render an OpenCode message part for a Discord/Telegram surface. Returns
+ * Render an OpenCode message part for a Discord surface. Returns
  * `null` when nothing should be posted (e.g. empty text, pending tools).
  *
   * `verbosity` controls how much detail is mirrored:

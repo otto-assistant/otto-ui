@@ -27,42 +27,15 @@ export async function execCommands(commands: string[], cwd: string): Promise<Exe
     return runtimeFiles.execCommands(commands, cwd);
   }
 
-  // Guard rails: the server rejects empty cwd/commands with 400. Bail out
-  // locally with a structured failure so probing callers (e.g. worktree/git
-  // detection) don't have to defend against unhandled promise rejections.
-  if (!Array.isArray(commands) || commands.length === 0 || typeof cwd !== 'string' || cwd.trim() === '') {
-    return {
-      success: false,
-      results: commands.map((command) => ({
-        command,
-        success: false,
-        error: 'execCommands requires non-empty commands and cwd',
-      })),
-    };
-  }
-
-  let response: Response;
-  try {
-    response = await runtimeFetch(`${getBaseUrl()}/fs/exec`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ commands, cwd, background: false }),
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Network error';
-    return {
-      success: false,
-      results: commands.map((command) => ({ command, success: false, error: message })),
-    };
-  }
+  const response = await runtimeFetch(`${getBaseUrl()}/fs/exec`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commands, cwd, background: false }),
+  });
 
   if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({ error: response.statusText }));
-    const message = (errorBody as { error?: string }).error || `HTTP ${response.status}`;
-    return {
-      success: false,
-      results: commands.map((command) => ({ command, success: false, error: message })),
-    };
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error((error as { error?: string }).error || 'Command exec failed');
   }
 
   const payload = (await response.json().catch(() => null)) as

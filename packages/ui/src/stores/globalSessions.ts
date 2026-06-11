@@ -95,13 +95,6 @@ export const isMissingGlobalSessionsEndpointError = (error: unknown): boolean =>
     return status === 404;
 };
 
-/** Optional first-page seed used to skip the initial round-trip when an
- *  out-of-band prefetch (e.g. from `index.html`) has already fetched it. */
-export type InitialSessionPage = {
-    data: GlobalSessionRecord[];
-    nextCursor: number | null;
-};
-
 export async function listGlobalSessionPages(
     apiClient: OpencodeClient,
     options: {
@@ -110,49 +103,11 @@ export async function listGlobalSessionPages(
         roots?: boolean;
         pageSize: number;
         onPage?: (sessions: GlobalSessionRecord[]) => void;
-        initialPage?: InitialSessionPage | null;
     },
 ): Promise<GlobalSessionRecord[]> {
     const all: GlobalSessionRecord[] = [];
     const seenIds = new Set<string>();
     let cursor: number | undefined;
-
-    const ingest = (payload: GlobalSessionRecord[]): { appended: number } => {
-        let appended = 0;
-        for (const session of payload) {
-            if (!session?.id || seenIds.has(session.id)) continue;
-            seenIds.add(session.id);
-            all.push(session);
-            appended += 1;
-        }
-        if (appended > 0) {
-            options.onPage?.(payload);
-        }
-        return { appended };
-    };
-
-    // Seed with a pre-fetched first page when available so we skip the
-    // initial network round-trip entirely.
-    if (options.initialPage && Array.isArray(options.initialPage.data)) {
-        const seed = options.initialPage.data;
-        const { appended } = ingest(seed);
-        const seedFull = seed.length >= options.pageSize;
-        if (!seedFull) {
-            return all;
-        }
-        if (options.initialPage.nextCursor !== null && Number.isFinite(options.initialPage.nextCursor)) {
-            cursor = options.initialPage.nextCursor;
-        } else if (appended > 0) {
-            const lastUpdated = seed[seed.length - 1]?.time?.updated;
-            if (typeof lastUpdated === "number" && Number.isFinite(lastUpdated)) {
-                cursor = lastUpdated;
-            }
-        }
-        // No cursor we can follow — stop here.
-        if (cursor === undefined) {
-            return all;
-        }
-    }
 
     while (true) {
         const response = await retry(
@@ -169,7 +124,16 @@ export async function listGlobalSessionPages(
         const payload = unwrapSessionList(response, "experimental.session.list");
         if (payload.length === 0) break;
 
-        const { appended } = ingest(payload);
+        let appended = 0;
+        for (const session of payload) {
+            if (!session?.id || seenIds.has(session.id)) continue;
+            seenIds.add(session.id);
+            all.push(session);
+            appended += 1;
+        }
+        if (appended > 0) {
+            options.onPage?.(payload);
+        }
 
         // Stop on partial page — nothing more to fetch.
         if (payload.length < options.pageSize) break;

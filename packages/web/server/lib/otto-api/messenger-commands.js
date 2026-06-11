@@ -361,7 +361,7 @@ export async function executeMessengerCommand({
         }
         await surfaceMutators.setProjectDefaults({ modelDefault: value });
         return {
-          reply: `✓ Project default model set to \`${value}\` for *${binding.projectLabel ?? binding.projectPath}*. Every Discord/Telegram session in this project uses it unless overridden.`,
+          reply: `✓ Project default model set to \`${value}\` for *${binding.projectLabel ?? binding.projectPath}*. Every Discord session in this project uses it unless overridden.`,
         };
       }
       if (raw === 'reset' || raw === 'clear') {

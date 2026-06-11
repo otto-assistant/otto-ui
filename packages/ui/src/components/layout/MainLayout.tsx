@@ -15,8 +15,6 @@ import { SessionDialogs } from '@/components/session/SessionDialogs';
 import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
 import { MultiRunLauncher } from '@/components/multirun';
 import { DrawerProvider } from '@/contexts/DrawerContext';
-import { MobileTabBar } from './MobileTabBar';
-import { MobileNavSheet } from './MobileNavSheet';
 
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
@@ -24,8 +22,6 @@ import { useUpdateStore } from '@/stores/useUpdateStore';
 import { useDeviceInfo } from '@/lib/device';
 import { cn } from '@/lib/utils';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
-import { useRoute } from '@/hooks/useHashRoute';
-import { useTaskScheduler } from '@/hooks/useTaskScheduler';
 
 import { ChatView } from '@/components/views/ChatView';
 import { DiffView } from '@/components/views/DiffView';
@@ -39,30 +35,6 @@ const DiagramView = lazyWithChunkRecovery(() => import('@/components/views/Diagr
 const SettingsView = lazyWithChunkRecovery(() => import('@/components/views/SettingsView').then(m => ({ default: m.SettingsView })));
 const SettingsWindow = lazyWithChunkRecovery(() => import('@/components/views/SettingsWindow').then(m => ({ default: m.SettingsWindow })));
 const MultiRunWindow = lazyWithChunkRecovery(() => import('@/components/views/MultiRunWindow').then(m => ({ default: m.MultiRunWindow })));
-const DashboardView = lazyWithChunkRecovery(() =>
-  import('@/components/views/dashboard/DashboardView').then((m) => ({ default: m.DashboardView })),
-);
-const TasksView = lazyWithChunkRecovery(() => import('@/components/views/TasksView').then(m => ({ default: m.TasksView })));
-const SettingsLandingView = lazyWithChunkRecovery(() => import('@/components/views/SettingsLandingView').then(m => ({ default: m.SettingsLandingView })));
-
-// Preload all view chunks on idle so navigation is instant
-const VIEW_CHUNK_PRELOADERS = [
-    () => import('@/components/views/dashboard/DashboardView'),
-    () => import('@/components/views/TasksView'),
-    () => import('@/components/views/SettingsLandingView'),
-];
-
-let _chunksPreloaded = false;
-function preloadAllViewChunks() {
-    if (_chunksPreloaded) return;
-    _chunksPreloaded = true;
-    const load = () => { for (const loader of VIEW_CHUNK_PRELOADERS) loader().catch(() => {}); };
-    if ('requestIdleCallback' in window) {
-        (window as unknown as { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(load);
-    } else {
-        setTimeout(load, 1000);
-    }
-}
 
 const DESKTOP_SIDEBAR_MIN_WIDTH = 280;
 const DESKTOP_SIDEBAR_MAX_WIDTH = 500;
@@ -80,7 +52,6 @@ export const MainLayout: React.FC = () => {
     const setRightSidebarOpen = useUIStore((state) => state.setRightSidebarOpen);
     const setBottomTerminalOpen = useUIStore((state) => state.setBottomTerminalOpen);
     const activeMainTab = useUIStore((state) => state.activeMainTab);
-    const activeView = useUIStore((state) => state.activeView);
     const setIsMobile = useUIStore((state) => state.setIsMobile);
     const isSessionSwitcherOpen = useUIStore((state) => state.isSessionSwitcherOpen);
     const isSettingsDialogOpen = useUIStore((state) => state.isSettingsDialogOpen);
@@ -88,25 +59,12 @@ export const MainLayout: React.FC = () => {
     const isMultiRunLauncherOpen = useUIStore((state) => state.isMultiRunLauncherOpen);
     const setMultiRunLauncherOpen = useUIStore((state) => state.setMultiRunLauncherOpen);
     const multiRunLauncherPrefillPrompt = useUIStore((state) => state.multiRunLauncherPrefillPrompt);
-
     const { isMobile, isTablet } = useDeviceInfo();
-
-    // Initialize hash-based routing (syncs URL ↔ activeView)
-    useRoute();
-
-    // Fires due tasks (user popups / agent session starts) on a poll.
-    useTaskScheduler();
-
-    // Preload all view chunks after first render for instant view switching
-    React.useEffect(() => { preloadAllViewChunks(); }, []);
     const sidebarWidth = useUIStore((state) => state.sidebarWidth);
     const rightSidebarWidth = useUIStore((state) => state.rightSidebarWidth);
     const rightSidebarAutoClosedRef = React.useRef(false);
     const bottomTerminalAutoClosedRef = React.useRef(false);
     const mobilePanelsResetRef = React.useRef(false);
-
-    // Mobile nav sheet state
-    const [mobileNavSheetOpen, setMobileNavSheetOpen] = React.useState(false);
 
     // Mobile drawer state
     const [mobileLeftDrawerOpen, setMobileLeftDrawerOpen] = React.useState(false);
@@ -438,10 +396,6 @@ export const MainLayout: React.FC = () => {
     }, [mobileLeftDrawerOpen, mobileRightSidebarOpen, setMobileSessionPanelOpen]);
 
     const secondaryView = React.useMemo(() => {
-        if (activeView !== 'chat') {
-            return null;
-        }
-
         switch (activeMainTab) {
             case 'plan':
                 return <React.Suspense fallback={null}><PlanView /></React.Suspense>;
@@ -460,24 +414,9 @@ export const MainLayout: React.FC = () => {
             default:
                 return null;
         }
-    }, [activeMainTab, activeView]);
+    }, [activeMainTab]);
 
-    const agentShellView = React.useMemo(() => {
-        switch (activeView) {
-            case 'dashboard':
-                return <React.Suspense fallback={null}><DashboardView /></React.Suspense>;
-            case 'tasks':
-                return <React.Suspense fallback={null}><TasksView /></React.Suspense>;
-            case 'settings':
-                return <React.Suspense fallback={null}><SettingsLandingView /></React.Suspense>;
-            case 'chat':
-                return null;
-            default:
-                return null;
-        }
-    }, [activeView]);
-
-    const isChatActive = activeView === 'chat' && activeMainTab === 'chat';
+    const isChatActive = activeMainTab === 'chat';
     const visibleSidebarWidth = React.useMemo(() => {
         const rawWidth = sidebarWidth || SIDEBAR_CONTENT_WIDTH;
         return Math.min(DESKTOP_SIDEBAR_MAX_WIDTH, Math.max(DESKTOP_SIDEBAR_MIN_WIDTH, rawWidth));
@@ -541,26 +480,18 @@ export const MainLayout: React.FC = () => {
                     <div
                         data-page-scroll-lock="true"
                         className={cn(
-                            'flex flex-1 overflow-hidden relative pb-14',
+                            'flex flex-1 overflow-hidden relative',
                             isSettingsDialogOpen && 'hidden'
                         )}
                     >
                         <main className="w-full h-full overflow-hidden bg-background relative" data-page-scroll-lock="true">
-                            {activeView !== 'chat' ? (
-                                <div className="absolute inset-0 overflow-hidden">
-                                    <ErrorBoundary key={activeView}>{agentShellView}</ErrorBoundary>
+                            <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
+                                <ErrorBoundary><ChatView /></ErrorBoundary>
+                            </div>
+                            {secondaryView && (
+                                <div className="absolute inset-0">
+                                    <ErrorBoundary>{secondaryView}</ErrorBoundary>
                                 </div>
-                            ) : (
-                                <>
-                                    <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
-                                        <ErrorBoundary><ChatView /></ErrorBoundary>
-                                    </div>
-                                    {secondaryView && (
-                                        <div className="absolute inset-0">
-                                            <ErrorBoundary>{secondaryView}</ErrorBoundary>
-                                        </div>
-                                    )}
-                                </>
                             )}
                             {isMultiRunLauncherOpen && (
                                 <div className="absolute inset-0 z-10 bg-background">
@@ -603,10 +534,6 @@ export const MainLayout: React.FC = () => {
                             </ErrorBoundary>
                         </div>
                     )}
-
-                    {/* Mobile tab bar */}
-                    <MobileTabBar onMorePress={() => setMobileNavSheetOpen(true)} />
-                    <MobileNavSheet open={mobileNavSheetOpen} onClose={() => setMobileNavSheetOpen(false)} />
                 </DrawerProvider>
             ) : (
                 <>
@@ -679,24 +606,16 @@ export const MainLayout: React.FC = () => {
                                 <div className="flex flex-1 min-h-0 overflow-hidden" data-page-scroll-lock="true">
                                     <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden" data-page-scroll-lock="true">
                                         <main className="flex-1 overflow-hidden bg-background relative" data-page-scroll-lock="true">
-                                            {activeView !== 'chat' ? (
-                                                <div className="absolute inset-0 overflow-hidden">
-                                                    <ErrorBoundary key={activeView}>{agentShellView}</ErrorBoundary>
+                                            <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
+                                                <ErrorBoundary><ChatView /></ErrorBoundary>
+                                            </div>
+                                            {secondaryView && (
+                                                <div className="absolute inset-0">
+                                                    <ErrorBoundary>{secondaryView}</ErrorBoundary>
                                                 </div>
-                                            ) : (
-                                                <>
-                                                    <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
-                                                        <ErrorBoundary><ChatView /></ErrorBoundary>
-                                                    </div>
-                                                    {secondaryView && (
-                                                        <div className="absolute inset-0">
-                                                            <ErrorBoundary>{secondaryView}</ErrorBoundary>
-                                                        </div>
-                                                    )}
-                                                </>
                                             )}
                                         </main>
-                                        {activeView === 'chat' ? <ContextPanel /> : null}
+                                        <ContextPanel />
                                     </div>
                                 </div>
                                 <BottomTerminalDock isOpen={isBottomTerminalOpen} isMobile={isMobile}>

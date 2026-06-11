@@ -1,11 +1,9 @@
 import React from 'react';
-import { RiLayoutLeftLine } from '@remixicon/react';
 import type { Session } from '@opencode-ai/sdk/v2';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { toast } from '@/components/ui';
 import { useI18n } from '@/lib/i18n';
 import { useDeviceInfo } from '@/lib/device';
-import { isDesktopShell, isWebRuntime } from '@/lib/desktop';
+import { isDesktopShell } from '@/lib/desktop';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { formatDirectoryName, cn } from '@/lib/utils';
 import { useSessionUIStore } from '@/sync/session-ui-store';
@@ -17,7 +15,6 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { getSafeStorage } from '@/stores/utils/safeStorage';
 import { useGitStore, useGitAllBranches, useGitRepoStatusMap } from '@/stores/useGitStore';
-import { useHiddenSessionsStore } from '@/stores/useHiddenSessionsStore';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { NewWorktreeDialog } from './NewWorktreeDialog';
 import { ScheduledTasksDialog } from './ScheduledTasksDialog';
@@ -42,7 +39,6 @@ import { SessionGroupSection } from './sidebar/SessionGroupSection';
 import { SidebarHeader } from './sidebar/SidebarHeader';
 import { SidebarActivitySections } from './sidebar/SidebarActivitySections';
 import { SidebarFooter } from './sidebar/SidebarFooter';
-import { OttoAgentNav } from './sidebar/OttoAgentNav';
 import { SidebarProjectsList } from './sidebar/SidebarProjectsList';
 import { SessionNodeItem } from './sidebar/SessionNodeItem';
 import { useUpdateStore } from '@/stores/useUpdateStore';
@@ -74,14 +70,12 @@ import {
   normalizePath,
 } from './sidebar/utils';
 import {
-  ensureGlobalSessionsLoaded,
   mergeSessionDirectoryMetadata,
   refreshGlobalSessions,
   refreshGlobalSessionsForDirectories,
   resolveGlobalSessionDirectory,
   useGlobalSessionsStore,
 } from '@/stores/useGlobalSessionsStore';
-import { useConfigStore } from '@/stores/useConfigStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
@@ -264,36 +258,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const updateProjectMeta = useProjectsStore((state) => state.updateProjectMeta);
   const reorderProjects = useProjectsStore((state) => state.reorderProjects);
 
-  // Per-project git probes and worktree discovery are gated on this set:
-  // only the active project + any project the user has interacted with
-  // (e.g. expanded its header) since mount gets probed. With many
-  // registered projects, blanket probing on mount fired N×2 git exec
-  // calls + N gitApi probes — mostly failing for non-git dirs.
-  const [touchedProjectIds, setTouchedProjectIds] = React.useState<Set<string>>(() => {
-    const initial = new Set<string>();
-    if (activeProjectId) initial.add(activeProjectId);
-    return initial;
-  });
-
-  React.useEffect(() => {
-    if (!activeProjectId) return;
-    setTouchedProjectIds((prev) => {
-      if (prev.has(activeProjectId)) return prev;
-      const next = new Set(prev);
-      next.add(activeProjectId);
-      return next;
-    });
-  }, [activeProjectId]);
-
-  const handleProjectInteraction = React.useCallback((projectId: string) => {
-    setTouchedProjectIds((prev) => {
-      if (prev.has(projectId)) return prev;
-      const next = new Set(prev);
-      next.add(projectId);
-      return next;
-    });
-  }, []);
-
   const setActiveMainTab = useUIStore((state) => state.setActiveMainTab);
   const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
   const setSettingsDialogOpen = useUIStore((state) => state.setSettingsDialogOpen);
@@ -372,8 +336,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     [availableWorktreesByProject, projects],
   );
 
-  const hiddenSessionIds = useHiddenSessionsStore((s) => s.hiddenSessions);
-
   const sessions = React.useMemo(() => {
     const liveById = new Map(liveSessions.map((session) => [session.id, session]));
     const merged = globalActiveSessions.map((session) => {
@@ -389,27 +351,23 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       merged.push(session);
     });
 
-    const hiddenIdSet = new Set(hiddenSessionIds);
+    return merged.filter((session) => isKnownActiveSessionDirectory(session, knownSessionDirectories));
+  }, [globalActiveSessions, knownSessionDirectories, liveSessions]);
 
-    return merged.filter((session) => {
-      if (hiddenIdSet.has(session.id)) return false;
-      return isKnownActiveSessionDirectory(session, knownSessionDirectories);
-    });
-  }, [globalActiveSessions, knownSessionDirectories, liveSessions, hiddenSessionIds]);
+  const syncSessionStructureSignature = React.useMemo(
+    () => liveSessions
+      .map((session) => {
+        const directory = normalizePath((session as Session & { directory?: string | null }).directory ?? null) ?? '';
+        return `${session.id}:${session.title ?? ''}:${session.time?.archived ? 1 : 0}:${directory}`;
+      })
+      .join('|'),
+    [liveSessions],
+  );
 
-  // Keep a ref of the latest live sessions so async helpers can read it
-  // without re-running expensive effects on every session SSE event.
-  // Using a subscription instead of a render-time signature avoids
-  // allocating an O(N) string on every render when many threads exist.
   const syncSessionsSnapshotRef = React.useRef<Session[]>(liveSessions);
-  syncSessionsSnapshotRef.current = liveSessions;
-
-  // Discover worktrees + refresh global sessions when the project set or
-  // active directory changes — not on every per-session SSE update.
-  //
-  // Worktree discovery is **lazy by default**: we only probe the active
-  // project's directory + any project the user has expanded in the
-  // sidebar.
+  React.useEffect(() => {
+    syncSessionsSnapshotRef.current = liveSessions;
+  }, [syncSessionStructureSignature, liveSessions]);
 
   const projectWorktreeDiscoveryKey = React.useMemo(
     () => projects
@@ -424,33 +382,32 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       return;
     }
     initialGlobalSessionsRefreshStartedRef.current = true;
-    // Use `ensure` rather than `refresh` so we don't force a full
-    // /api/experimental/session re-fetch when another mount path
-    // already loaded the global list.
-    void ensureGlobalSessionsLoaded(syncSessionsSnapshotRef.current);
+    void refreshGlobalSessions(syncSessionsSnapshotRef.current);
   }, []);
 
   React.useEffect(() => {
     let cancelled = false;
 
-    const discoverWorktrees = async (targetProjects: Array<{ id: string; path: string }>) => {
-      if (targetProjects.length === 0) return;
+    const discoverWorktrees = async () => {
+      const projectEntries = useProjectsStore.getState().projects;
+      if (projectEntries.length === 0) return;
 
-      const merged = new Map<string, WorktreeMetadata[]>();
-      const existing = useSessionUIStore.getState().availableWorktreesByProject;
-      existing.forEach((value, key) => merged.set(key, value));
+      const worktreesByProject = new Map<string, WorktreeMetadata[]>();
+      const allWorktrees: WorktreeMetadata[] = [];
 
       await Promise.all(
-        targetProjects.map(async (project) => {
+        projectEntries.map(async (project) => {
           const projectPath = normalizePath(project.path);
           if (!projectPath) return;
           try {
+            // Use store-cached isGitRepo when available; fall back to direct check for initial worktree discovery
             const cachedIsGitRepo = useGitStore.getState().directories.get(projectPath)?.isGitRepo;
             const isGitRepo = cachedIsGitRepo ?? await import('@/lib/gitApi').then(m => m.checkIsGitRepository(projectPath));
             if (!isGitRepo) return;
             const worktrees = await listProjectWorktrees({ id: project.id, path: projectPath });
             if (cancelled || worktrees.length === 0) return;
-            merged.set(projectPath, worktrees);
+            worktreesByProject.set(projectPath, worktrees);
+            allWorktrees.push(...worktrees);
           } catch {
             // ignore discovery errors
           }
@@ -459,86 +416,18 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
       if (cancelled) return;
 
-      const allWorktrees: WorktreeMetadata[] = [];
-      for (const list of merged.values()) {
-        allWorktrees.push(...list);
-      }
       useSessionUIStore.setState({
         availableWorktrees: allWorktrees,
-        availableWorktreesByProject: merged,
+        availableWorktreesByProject: worktreesByProject,
       });
     };
 
-    // Initial pass: active project only. Other projects' worktrees are
-    // discovered on-demand below when the user expands them.
-    const projectEntries = useProjectsStore.getState().projects;
-    const normalizedCurrent = normalizePath(currentDirectory ?? null);
-    const activeOnly = normalizedCurrent
-      ? projectEntries.filter((project) => normalizePath(project.path) === normalizedCurrent)
-      : [];
-    void discoverWorktrees(activeOnly);
+    void discoverWorktrees();
 
     return () => {
       cancelled = true;
     };
-  }, [projectWorktreeDiscoveryKey, currentDirectory]);
-
-  // Lazy worktree discovery: probe a project's worktrees the first time
-  // the user touches it (active project at mount, plus anything they
-  // toggle later).
-  React.useEffect(() => {
-    if (touchedProjectIds.size === 0) return;
-    const candidates = projects.filter((project) => touchedProjectIds.has(project.id));
-    const existing = useSessionUIStore.getState().availableWorktreesByProject;
-    const needs = candidates.filter((project) => {
-      const projectPath = normalizePath(project.path);
-      return projectPath && !existing.has(projectPath);
-    });
-    if (needs.length === 0) return;
-
-    let cancelled = false;
-    void (async () => {
-      const merged = new Map(useSessionUIStore.getState().availableWorktreesByProject);
-      await Promise.all(needs.map(async (project) => {
-        const projectPath = normalizePath(project.path);
-        if (!projectPath) return;
-        try {
-          const cachedIsGitRepo = useGitStore.getState().directories.get(projectPath)?.isGitRepo;
-          const isGitRepo = cachedIsGitRepo ?? await import('@/lib/gitApi').then(m => m.checkIsGitRepository(projectPath));
-          if (!isGitRepo) return;
-          const worktrees = await listProjectWorktrees({ id: project.id, path: projectPath });
-          if (cancelled || worktrees.length === 0) return;
-          merged.set(projectPath, worktrees);
-        } catch {
-          // ignore discovery errors
-        }
-      }));
-      if (cancelled) return;
-      const allWorktrees: WorktreeMetadata[] = [];
-      for (const list of merged.values()) allWorktrees.push(...list);
-      useSessionUIStore.setState({
-        availableWorktrees: allWorktrees,
-        availableWorktreesByProject: merged,
-      });
-    })();
-    return () => { cancelled = true; };
-  }, [touchedProjectIds, projects]);
-
-  // Backstop: periodically resync the global session list when SSE is
-  // disconnected.
-  React.useEffect(() => {
-    const PERIODIC_REFRESH_MS = 5 * 60_000;
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === 'hidden') {
-        return;
-      }
-      if (useConfigStore.getState().isConnected) {
-        return;
-      }
-      void refreshGlobalSessions(syncSessionsSnapshotRef.current);
-    }, PERIODIC_REFRESH_MS);
-    return () => window.clearInterval(interval);
-  }, []);
+  }, [projectWorktreeDiscoveryKey]);
 
   React.useEffect(() => {
     let refreshTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -562,26 +451,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   }, []);
 
   const isDesktopShellRuntime = React.useMemo(() => isDesktopShell(), []);
-  const isMacPlatform = React.useMemo(() => {
-    if (typeof navigator === 'undefined') return false;
-    return /Macintosh|Mac OS X/.test(navigator.userAgent || '');
-  }, []);
-  const [isDesktopWindowFullscreen] = React.useState(false);
 
   const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
-  const isWebRuntimeNow = React.useMemo(() => isWebRuntime(), []);
   const { isTablet } = useDeviceInfo();
   const alwaysShowSidebarActions = mobileVariant || isTablet;
-  const toggleSidebar = useUIStore((state) => state.toggleSidebar);
-
-  const showDesktopSidebarChrome = !mobileVariant && !isVSCode && !isWebRuntimeNow;
-  const desktopSidebarTopPaddingClass = isDesktopShellRuntime && isMacPlatform && !isDesktopWindowFullscreen ? 'pl-[5.5rem]' : 'pl-3';
-  const desktopSidebarToggleButtonClass = 'app-region-no-drag inline-flex h-8 w-8 items-center justify-center rounded-md typography-ui-label font-medium text-foreground transition-colors hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50';
-  const handleDesktopSidebarDragStart = React.useCallback((event: React.MouseEvent) => {
-    if (!isDesktopShellRuntime || event.button !== 0) return;
-    const target = event.target as HTMLElement | null;
-    if (target?.closest('.app-region-no-drag')) return;
-  }, [isDesktopShellRuntime]);
 
   const {
     buildGroupSearchText,
@@ -884,7 +757,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const toggleProject = React.useCallback((projectId: string) => {
     // Ignore intersection events for a short period after toggling
     ignoreIntersectionUntil.current = Date.now() + 150;
-    handleProjectInteraction(projectId);
     resetProjectSessionLimits(projectId);
     setCollapsedProjects((prev) => {
       const next = new Set(prev);
@@ -903,7 +775,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       }
       return next;
     });
-  }, [handleProjectInteraction, isVSCode, resetProjectSessionLimits, safeStorage, scheduleCollapsedProjectsPersist]);
+  }, [isVSCode, resetProjectSessionLimits, safeStorage, scheduleCollapsedProjectsPersist]);
 
   const normalizedProjects = React.useMemo(() => {
     return projects
@@ -971,7 +843,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     gitRepoStatus,
     setProjectRepoStatus,
     setProjectRootBranches,
-    visibleProjectIds: touchedProjectIds,
   });
 
   const isSessionsLoading = useSessionUIStore((state) => state.isLoading);
@@ -1723,34 +1594,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         mobileVariant ? '' : 'bg-transparent',
       )}
     >
-      {showDesktopSidebarChrome ? (
-        <div
-          onMouseDown={handleDesktopSidebarDragStart}
-          className={cn(
-            'app-region-drag flex h-[var(--oc-header-height,56px)] flex-shrink-0 items-center pr-3',
-            desktopSidebarTopPaddingClass,
-          )}
-        >
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                className={desktopSidebarToggleButtonClass}
-                aria-label={t('sessions.sidebar.header.actions.closeSessions')}
-              >
-                <RiLayoutLeftLine className="h-[18px] w-[18px]" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{t('sessions.sidebar.header.actions.closeSessions')}</p>
-            </TooltipContent>
-          </Tooltip>
-        </div>
-      ) : null}
-
-      <OttoAgentNav mobileVariant={mobileVariant} />
-
       <SidebarHeader
         hideDirectoryControls={hideDirectoryControls}
         showRecentControls={!isVSCode}

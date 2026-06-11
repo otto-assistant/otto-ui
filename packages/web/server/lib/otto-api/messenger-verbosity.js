@@ -1,5 +1,5 @@
 /**
- * Shared verbosity model for the Discord/Telegram ↔ OpenCode bridge.
+ * Shared verbosity model for the Discord ↔ OpenCode bridge.
  *
  * Three levels control how much of an OpenCode turn is mirrored back into the
  * messenger surface:

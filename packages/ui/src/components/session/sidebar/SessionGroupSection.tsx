@@ -578,6 +578,9 @@ export function SessionGroupSection(props: Props): React.ReactNode {
           ref={archivedVirtualContainerRef}
           style={{
             position: 'relative',
+            // Reserve scroll height for all archived rows so the parent
+            // scroll thumb reflects the full list. Individual rows are
+            // absolutely positioned by translateY.
             height: archivedTotalSize > 0 ? archivedTotalSize : undefined,
             width: '100%',
           }}
@@ -595,6 +598,10 @@ export function SessionGroupSection(props: Props): React.ReactNode {
                   top: 0,
                   left: 0,
                   width: '100%',
+                  // virtualRow.start is in scroll-element coordinates (offset by
+                  // scrollMargin). Subtract scrollMargin to position within the
+                  // container, which itself starts at scrollMargin in the scroll
+                  // element.
                   transform: `translateY(${virtualRow.start - archivedScrollMargin}px)`,
                 }}
               >

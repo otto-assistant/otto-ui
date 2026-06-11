@@ -1,5 +1,3 @@
-import { createIpcBearerProtection } from '../auth/ipc-middleware.js';
-
 export const createBootstrapRuntime = (dependencies) => {
   const {
     createUiAuth,
@@ -64,15 +62,6 @@ export const createBootstrapRuntime = (dependencies) => {
     });
 
     registerCommonRequestMiddleware(app, { express, verboseRequestLogs });
-
-    const ipcBearerProtection = createIpcBearerProtection({
-      tunnelAuthController,
-      process,
-    });
-    if (ipcBearerProtection.enabled) {
-      console.log('[Security] IPC bearer protection enabled');
-    }
-    app.use(ipcBearerProtection.protection);
 
     const uiAuthController = createUiAuth({
       password: uiPassword,

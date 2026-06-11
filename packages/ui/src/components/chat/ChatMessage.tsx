@@ -687,21 +687,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             };
         }
         if (detail.trim().toLowerCase() === 'aborted') {
-            // Check if the message has any parts (tools ran, text was streamed, etc.)
-            // If parts exist, the text "before OpenCode could send the next message" would be misleading.
-            const partCount = displayParts.length;
-            if (partCount > 0) {
-                if (process.env.NODE_ENV === 'development') {
-                    console.warn(
-                        `[ChatMessage] MessageAbortedError on message with ${partCount} parts (session=${message.info.sessionID}, msg=${message.info.id}). ` +
-                        'The abort may have occurred after partial content was already streamed.',
-                    );
-                }
-                return {
-                    text: 'Response generation was interrupted.',
-                    variant: 'info' as const,
-                };
-            }
             return {
                 text: 'The running turn was stopped before OpenCode could send the next message.',
                 variant: 'info' as const,
@@ -711,7 +696,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             text: `Opencode failed to send message with error:\n\`${detail}\``,
             variant: 'error' as const,
         };
-    }, [isUser, message.info, displayParts]);
+    }, [isUser, message.info]);
 
     const assistantErrorText = assistantError?.text;
     const assistantErrorVariant = assistantError?.variant;
@@ -755,12 +740,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         }
 
         if (assistantErrorText && assistantErrorText.trim().length > 0) {
-            // Include both the error context and the actual message parts (tools, text, etc.)
-            // so that "copy message" captures everything, not just the error banner.
-            const partsText = flattenAssistantTextParts(displayParts);
-            if (partsText.trim().length > 0) {
-                return `${assistantErrorText}\n\n${partsText}`;
-            }
             return assistantErrorText;
         }
 

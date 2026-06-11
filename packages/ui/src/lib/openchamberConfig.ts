@@ -163,15 +163,8 @@ const readTextFile = async (path: string): Promise<string | null> => {
   const runtimeFiles = getRuntimeFilesAPI();
   if (runtimeFiles?.readFile) {
     try {
-      // Probes for legacy/user config files are expected to miss on most
-      // installs — pass `optional: true` so runtimes that honor it (the web
-      // runtime) issue `optional=1` to the API, returning 204 instead of 404
-      // and keeping the browser console quiet.
-      const result = await runtimeFiles.readFile(path, { optional: true });
-      if (!result) {
-        return null;
-      }
-      const content = typeof result.content === 'string' ? result.content : '';
+      const result = await runtimeFiles.readFile(path);
+      const content = typeof result?.content === 'string' ? result.content : '';
       return content;
     } catch {
       return null;

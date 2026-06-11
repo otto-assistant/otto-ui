@@ -1,4 +1,3 @@
-import { resolveContainedPath } from '../auth/safe-path.js';
 import { createRealpathCache } from '../path-realpath-cache.js';
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
@@ -107,50 +106,13 @@ const resolveWorkspacePathFromWorktrees = async ({ targetPath, baseDirectory, pa
   return { ok: false, error: 'Path is outside of active workspace' };
 };
 
-const finalizeWorkspaceContainment = async ({
-  preliminary,
-  fsPromises,
-  path,
-  openchamberUserConfigRoot,
-}) => {
-  if (!preliminary.ok) {
-    return preliminary;
-  }
-
-  const anchors = [
-    preliminary.base,
-    path.resolve(openchamberUserConfigRoot),
-  ];
-
-  try {
-    const contained = await resolveContainedPath({
-      fsPromises,
-      candidateAbsolute: preliminary.resolved,
-      anchors,
-    });
-
-    if (!contained.ok) {
-      return { ok: false, error: contained.error };
-    }
-
-    return {
-      ok: true,
-      base: contained.anchorAbsolute,
-      resolved: contained.resolvedAbsolute,
-    };
-  } catch (error) {
-    console.error('Failed to canonicalize path:', error);
-    return { ok: false, error: 'Failed to canonicalize filesystem path' };
-  }
-};
-
-const resolveWorkspacePathFromContext = async ({ req, targetPath, resolveProjectDirectory, path, os, normalizeDirectoryPath, openchamberUserConfigRoot, fsPromises }) => {
+const resolveWorkspacePathFromContext = async ({ req, targetPath, resolveProjectDirectory, path, os, normalizeDirectoryPath, openchamberUserConfigRoot }) => {
   const resolvedProject = await resolveProjectDirectory(req);
   if (!resolvedProject.directory) {
     return { ok: false, error: resolvedProject.error || 'Active workspace is required' };
   }
 
-  const primary = resolveWorkspacePath({
+  const resolved = resolveWorkspacePath({
     targetPath,
     baseDirectory: resolvedProject.directory,
     path,
@@ -158,27 +120,16 @@ const resolveWorkspacePathFromContext = async ({ req, targetPath, resolveProject
     normalizeDirectoryPath,
     openchamberUserConfigRoot,
   });
-  if (primary.ok || primary.error !== 'Path is outside of active workspace') {
-    return finalizeWorkspaceContainment({
-      preliminary: primary,
-      fsPromises,
-      path,
-      openchamberUserConfigRoot,
-    });
+  if (resolved.ok || resolved.error !== 'Path is outside of active workspace') {
+    return resolved;
   }
 
-  const worktrees = await resolveWorkspacePathFromWorktrees({
+  return resolveWorkspacePathFromWorktrees({
     targetPath,
     baseDirectory: resolvedProject.directory,
     path,
     os,
     normalizeDirectoryPath,
-  });
-  return finalizeWorkspaceContainment({
-    preliminary: worktrees,
-    fsPromises,
-    path,
-    openchamberUserConfigRoot,
   });
 };
 
@@ -224,7 +175,7 @@ const escapeCloneSshKeyPath = (sshKeyPath) => {
   return `'${normalized.replace(/'/g, "'\\''")}'`;
 };
 
-const resolveReadPathFromContext = async ({ req, targetPath, resolveProjectDirectory, path, os, normalizeDirectoryPath, openchamberUserConfigRoot, fsPromises }) => {
+const resolveReadPathFromContext = async ({ req, targetPath, resolveProjectDirectory, path, os, normalizeDirectoryPath, openchamberUserConfigRoot }) => {
   if (req.query?.allowOutsideWorkspace === 'true') {
     const normalized = normalizeDirectoryPath(targetPath);
     if (!normalized || typeof normalized !== 'string') {
@@ -242,7 +193,6 @@ const resolveReadPathFromContext = async ({ req, targetPath, resolveProjectDirec
     os,
     normalizeDirectoryPath,
     openchamberUserConfigRoot,
-    fsPromises,
   });
 };
 
@@ -511,7 +461,6 @@ export const registerFsRoutes = (app, dependencies) => {
           os,
           normalizeDirectoryPath,
           openchamberUserConfigRoot,
-          fsPromises,
         });
         if (!resolved.ok) {
           return res.status(400).json({ error: resolved.error });
@@ -651,13 +600,19 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolved.ok) {
         return res.status(400).json({ error: resolved.error });
       }
 
-      const canonicalPath = resolved.resolved;
+      const [canonicalPath, canonicalBase] = await Promise.all([
+        fsPromises.realpath(resolved.resolved),
+        fsPromises.realpath(resolved.base).catch(() => path.resolve(resolved.base)),
+      ]);
+
+      if (!isPathWithinRoot(canonicalPath, canonicalBase, path, os)) {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
 
       const stats = await fsPromises.stat(canonicalPath);
       if (!stats.isFile()) {
@@ -680,8 +635,6 @@ export const registerFsRoutes = (app, dependencies) => {
 
   app.get('/api/fs/read', async (req, res) => {
     const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
-    // `optional=true` signals to the client that a missing file is an expected
-    // outcome (e.g. probing for an optional config file).
     const optional = req.query.optional === 'true';
     if (!filePath) {
       return res.status(400).json({ error: 'Path is required' });
@@ -696,13 +649,19 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolved.ok) {
         return res.status(400).json({ error: resolved.error });
       }
 
-      const canonicalPath = resolved.resolved;
+      const [canonicalPath, canonicalBase] = await Promise.all([
+        fsPromises.realpath(resolved.resolved),
+        fsPromises.realpath(resolved.base).catch(() => path.resolve(resolved.base)),
+      ]);
+
+      if (!isPathWithinRoot(canonicalPath, canonicalBase, path, os)) {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
 
       const stats = await fsPromises.stat(canonicalPath);
       if (!stats.isFile()) {
@@ -756,13 +715,19 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolved.ok) {
         return res.status(400).json({ error: resolved.error });
       }
 
-      const canonicalPath = resolved.resolved;
+      const [canonicalPath, canonicalBase] = await Promise.all([
+        fsPromises.realpath(resolved.resolved),
+        fsPromises.realpath(resolved.base).catch(() => path.resolve(resolved.base)),
+      ]);
+
+      if (!isPathWithinRoot(canonicalPath, canonicalBase, path, os)) {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
 
       const stats = await fsPromises.stat(canonicalPath);
       if (!stats.isFile()) {
@@ -823,7 +788,6 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolved.ok) {
         return res.status(400).json({ error: resolved.error });
@@ -883,7 +847,6 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolved.ok) {
         return res.status(400).json({ error: resolved.error });
@@ -922,7 +885,6 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolvedOld.ok) {
         return res.status(400).json({ error: resolvedOld.error });
@@ -936,7 +898,6 @@ export const registerFsRoutes = (app, dependencies) => {
         os,
         normalizeDirectoryPath,
         openchamberUserConfigRoot,
-        fsPromises,
       });
       if (!resolvedNew.ok) {
         return res.status(400).json({ error: resolvedNew.error });
@@ -968,21 +929,7 @@ export const registerFsRoutes = (app, dependencies) => {
     }
 
     try {
-      const resolvedWorkspace = await resolveWorkspacePathFromContext({
-        req,
-        targetPath,
-        resolveProjectDirectory,
-        path,
-        os,
-        normalizeDirectoryPath,
-        openchamberUserConfigRoot,
-        fsPromises,
-      });
-      if (!resolvedWorkspace.ok) {
-        return res.status(400).json({ error: resolvedWorkspace.error });
-      }
-
-      const resolved = resolvedWorkspace.resolved;
+      const resolved = path.resolve(targetPath.trim());
       await fsPromises.access(resolved);
 
       const platform = process.platform;
@@ -1042,21 +989,7 @@ export const registerFsRoutes = (app, dependencies) => {
     pruneGitReadCache();
 
     try {
-      const resolvedWorkspaceCwd = await resolveWorkspacePathFromContext({
-        req,
-        targetPath: cwd,
-        resolveProjectDirectory,
-        path,
-        os,
-        normalizeDirectoryPath,
-        openchamberUserConfigRoot,
-        fsPromises,
-      });
-      if (!resolvedWorkspaceCwd.ok) {
-        return res.status(400).json({ error: resolvedWorkspaceCwd.error });
-      }
-
-      const resolvedCwd = resolvedWorkspaceCwd.resolved;
+      const resolvedCwd = path.resolve(normalizeDirectoryPath(cwd));
       const stats = await fsPromises.stat(resolvedCwd);
       if (!stats.isDirectory()) {
         return res.status(400).json({ error: 'Specified cwd is not a directory' });

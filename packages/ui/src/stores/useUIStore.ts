@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { devtools, persist, createJSONStorage } from 'zustand/middleware';
 import type { SidebarSection } from '@/constants/sidebar';
-import { isAppActiveView, type AppActiveView } from '@/constants/agentNav';
 import { getSafeStorage } from './utils/safeStorage';
 import { SEMANTIC_TYPOGRAPHY, getTypographyVariable, type SemanticTypographyKey } from '@/lib/typography';
 import type { ShortcutCombo } from '@/lib/shortcuts';
@@ -9,8 +8,6 @@ import type { DraftStarterRef } from '@/lib/draftStarters';
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
 import { getStoredMobileKeyboardMode, type MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 import { getRuntimeKey } from '@/lib/runtime-switch';
-
-export type { AppActiveView };
 
 export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files' | 'context' | 'diagram';
 export type RightSidebarTab = 'git' | 'files' | 'context';
@@ -541,10 +538,6 @@ interface UIStore {
   isSettingsDialogOpen: boolean;
   isModelSelectorOpen: boolean;
   sidebarSection: SidebarSection;
-  activeView: AppActiveView;
-
-  /** Active tab in the merged Tasks + Schedule hub view */
-  tasksHubTab: 'list' | 'schedule';
 
   // Settings IA (new shell)
   settingsPage: string;
@@ -693,8 +686,6 @@ interface UIStore {
   setModelSelectorOpen: (open: boolean) => void;
   applyTheme: () => void;
   setSidebarSection: (section: SidebarSection) => void;
-  setActiveView: (view: AppActiveView) => void;
-  setTasksHubTab: (tab: 'list' | 'schedule') => void;
   setSettingsPage: (slug: string) => void;
   setSettingsProjectsSelectedId: (projectId: string | null) => void;
   setSettingsRemoteInstancesSelectedId: (instanceId: string | null) => void;
@@ -833,8 +824,6 @@ export const useUIStore = create<UIStore>()(
         isSettingsDialogOpen: false,
         isModelSelectorOpen: false,
         sidebarSection: 'sessions',
-        activeView: 'dashboard',
-        tasksHubTab: 'list',
         settingsPage: 'home',
         settingsHasOpenedOnce: false,
         settingsProjectsSelectedId: null,
@@ -1511,32 +1500,6 @@ export const useUIStore = create<UIStore>()(
           set({ sidebarSection: section });
         },
 
-        setActiveView: (view) => {
-          set((state) => {
-            if (view !== 'settings' && state.activeView === 'settings' && state.isSettingsDialogOpen) {
-              return { activeView: view, isSettingsDialogOpen: false };
-            }
-
-            return { activeView: view };
-          });
-
-          // Sync hash route (lazy import to avoid circular deps)
-          if (typeof window !== 'undefined') {
-            import('@/lib/router/hashRoutes').then(({ buildHashRoute }) => {
-              const hash = buildHashRoute(view);
-              const currentHash = window.location.hash || '#/';
-              if (`#${currentHash.slice(1).split('/').slice(0, 2).join('/')}` !== hash.split('/').slice(0, 2).join('/')) {
-                const url = `${window.location.pathname}${window.location.search}${hash}`;
-                window.history.replaceState(window.history.state, '', url);
-              }
-            });
-          }
-        },
-
-        setTasksHubTab: (tab) => {
-          set({ tasksHubTab: tab });
-        },
-
         setSettingsPage: (slug) => {
           set({ settingsPage: slug });
         },
@@ -2198,11 +2161,6 @@ export const useUIStore = create<UIStore>()(
             }
           }
 
-          if (version < 9) {
-            if (!isAppActiveView(state.activeView)) {
-              state.activeView = 'dashboard';
-            }
-          }
           state.fileEditorKeymap = normalizeFileEditorKeymap(state.fileEditorKeymap);
 
           return state;
@@ -2222,8 +2180,6 @@ export const useUIStore = create<UIStore>()(
           todoPanelHeight: state.todoPanelHeight,
           isSessionSwitcherOpen: state.isSessionSwitcherOpen,
           activeMainTab: state.activeMainTab,
-          activeView: state.activeView,
-          tasksHubTab: state.tasksHubTab,
           sidebarSection: state.sidebarSection,
           settingsPage: state.settingsPage,
           settingsHasOpenedOnce: state.settingsHasOpenedOnce,

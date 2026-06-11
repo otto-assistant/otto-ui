@@ -15,8 +15,6 @@ import { ModelSelector } from './ModelSelector';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { useI18n } from '@/lib/i18n';
-import { PersonaSection } from '@/components/views/persona/PersonaSection';
-import { usePersonaStore } from '@/stores/usePersonaStore';
 import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import {
   Select,
@@ -605,13 +603,6 @@ export const AgentsPage: React.FC = () => {
       }
 
       if (success) {
-        // Also push persona-side settings (display name, behavior, language,
-        // skills, scope) to the Otto backend / localStorage on the same save.
-        try {
-          await usePersonaStore.getState().saveAgent();
-        } catch {
-          // Persona save failures are non-fatal; settings stay in the local cache.
-        }
         toast.success(isNewAgent ? t('settings.agents.page.toast.created') : t('settings.agents.page.toast.updated'));
       } else {
         toast.error(isNewAgent ? t('settings.agents.page.toast.createFailed') : t('settings.agents.page.toast.updateFailed'));
@@ -1108,18 +1099,6 @@ export const AgentsPage: React.FC = () => {
               </div>
             </div>
           )}
-        </div>
-
-        {/* Persona */}
-        <div className="mb-8 mt-2">
-          <div className="mb-1 px-1">
-            <h3 className="typography-ui-header font-medium text-foreground">Persona</h3>
-            <p className="typography-meta text-muted-foreground">
-              Otto-specific personality settings layered on top of this agent.
-            </p>
-          </div>
-
-          <PersonaSection agentName={isNewAgent ? null : selectedAgentName} />
         </div>
 
         {/* Save action */}

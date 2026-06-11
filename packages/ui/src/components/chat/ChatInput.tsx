@@ -27,7 +27,6 @@ import { SnippetAutocomplete, type SnippetAutocompleteHandle } from './SnippetAu
 import { cn, formatDirectoryName, isMacOS } from '@/lib/utils';
 import { ModelControls } from './ModelControls';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
-import { extractQueueSuffix } from '@/lib/messages/queueSuffix';
 import { StatusRow } from './StatusRow';
 import { PendingChangesBar } from './PendingChangesBar';
 import { useChatSurfaceMode } from './useChatSurfaceMode';
@@ -1614,16 +1613,13 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
     const handleSubmitRef = React.useRef<(options?: SubmitOptions) => Promise<void>>(async () => {});
 
     // Add message to queue instead of sending
-    const handleQueueMessage = React.useCallback((messageOverride?: string) => {
+    const handleQueueMessage = React.useCallback(() => {
         const inputSnapshot = getCurrentInputSnapshot();
-        // Strip an explicit ". queue" suffix so the marker never reaches the model.
-        const baseMessage = messageOverride ?? extractQueueSuffix(inputSnapshot.message).prompt;
-        const hasQueueableContent = baseMessage.trim().length > 0 || sendableAttachedFiles.length > 0 || hasDrafts;
-        if (!hasQueueableContent || !currentSessionId) return;
+        if (!inputSnapshot.hasContent || !currentSessionId) return;
 
         const drafts = consumeDrafts(currentSessionId);
 
-        let messageToQueue = baseMessage.replace(/^\n+|\n+$/g, '');
+        let messageToQueue = inputSnapshot.message.replace(/^\n+|\n+$/g, '');
         if (drafts.length > 0) {
             messageToQueue = appendInlineComments(messageToQueue, drafts);
         }
@@ -1652,7 +1648,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         if (!isMobile) {
             textareaRef.current?.focus();
         }
-    }, [getCurrentInputSnapshot, currentSessionId, sendableAttachedFiles, hasDrafts, sanitizeAttachmentsForSend, addToQueue, clearAttachedFiles, isMobile, consumeDrafts, currentProviderId, currentModelId, currentAgentName, currentVariant]);
+    }, [getCurrentInputSnapshot, currentSessionId, sendableAttachedFiles, sanitizeAttachmentsForSend, addToQueue, clearAttachedFiles, isMobile, consumeDrafts, currentProviderId, currentModelId, currentAgentName, currentVariant]);
 
     const handleQueuedMessageEdit = React.useCallback((content: string) => {
         setMessage(content);
@@ -1693,25 +1689,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
             if (queuedMessagesToSend.length === 0 || !currentSessionId) return;
         } else if ((!inputSnapshot.hasContent && !hasQueuedMessages) || (!currentSessionId && !newSessionDraftOpen)) {
             return;
-        }
-
-        // Bridge parity: a message ending with ". queue" is routed into the
-        // local queue while the session is busy; when idle the marker is
-        // stripped and the message is sent immediately.
-        if (!queuedOnly && inputMode === 'normal' && inputSnapshot.hasContent) {
-            const queueSuffix = extractQueueSuffix(inputSnapshot.message);
-            if (queueSuffix.forceQueue) {
-                const strippedHasText = queueSuffix.prompt.trim().length > 0;
-                if (!strippedHasText && sendableAttachedFiles.length === 0 && !hasDrafts) {
-                    return;
-                }
-                if (currentSessionId && sessionPhase !== 'idle') {
-                    handleQueueMessage(queueSuffix.prompt);
-                    return;
-                }
-                inputSnapshot.message = queueSuffix.prompt;
-                inputSnapshot.hasContent = strippedHasText || sendableAttachedFiles.length > 0 || hasDrafts;
-            }
         }
 
         const capturedSendConfig = queuedOnly ? queuedMessagesToSend[0]?.sendConfig : undefined;

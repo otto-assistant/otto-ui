@@ -141,16 +141,6 @@ export interface GitStatus {
   rebaseInProgress?: GitRebaseInProgress | null;
   /** Phase 1: reason for attention-required state */
   attentionReason?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'bisect' | null;
-  /**
-   * Total number of changed files reported by git BEFORE the server-side
-   * cap. Always >= `files.length`. Use this for "X files changed" summaries
-   * even when `files` was truncated to keep the payload manageable.
-   */
-  totalChangedFiles?: number;
-  /** True when `files` was truncated by the server (huge working tree). */
-  truncated?: boolean;
-  /** Number of files omitted by the truncation. 0 when `truncated` is false. */
-  truncatedCount?: number;
 }
 
 export interface GitDiffResponse {

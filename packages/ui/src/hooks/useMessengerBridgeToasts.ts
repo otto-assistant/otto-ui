@@ -9,14 +9,14 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 
 /**
  * Surface incoming bridge events to the OpenChamber user via toasts so a
- * Discord/Telegram conversation that creates a new OpenCode session is
+ * Discord conversation that creates a new OpenCode session is
  * immediately discoverable from the web UI — including a one-click action
  * that switches to the project the bridge auto-resolved.
  *
  * Wired into App.tsx so it lives for the lifetime of the session.
  */
 type SessionBoundPayload = {
-  type?: 'discord' | 'telegram';
+  type?: 'discord';
   channelId?: string;
   threadId?: string | null;
   sessionId?: string;
@@ -49,7 +49,7 @@ export function useMessengerBridgeToasts() {
         const data = event.data as SessionBoundPayload | undefined;
         if (!data || !data.sessionId) return;
         const projectName = data.projectLabel ?? data.projectPath ?? 'unknown project';
-        const messengerName = data.type === 'telegram' ? 'Telegram' : 'Discord';
+        const messengerName = 'Discord';
         const auto =
           data.autoResolved === 'slug-match'
             ? ` (auto-matched from "${data.resolvedFromName ?? ''}")`
@@ -74,10 +74,10 @@ export function useMessengerBridgeToasts() {
       }
       if (event.eventType === 'messenger.bridge.bootstrap_prompt') {
         const data = event.data as
-          | { type?: 'discord' | 'telegram'; channelId?: string; originalText?: string }
+          | { type?: 'discord'; channelId?: string; originalText?: string }
           | undefined;
         if (!data) return;
-        const messengerName = data.type === 'telegram' ? 'Telegram' : 'Discord';
+        const messengerName = 'Discord';
         toast.info(`${messengerName} — new channel waiting for a project`, {
           description: `Reply in the channel with \`clone <git-url>\`, \`path </abs/path>\` or \`new <name>\` to set it up. Stashed message: "${(data.originalText ?? '').slice(0, 100)}"`,
           duration: 14000,

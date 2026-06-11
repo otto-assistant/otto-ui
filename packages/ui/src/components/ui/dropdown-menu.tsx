@@ -2,7 +2,6 @@ import * as React from "react"
 import { Menu as BaseMenu } from "@base-ui/react/menu"
 
 import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
 import { Icon } from "@/components/icon/Icon";
 
 type AsChildProps = { asChild?: boolean };
@@ -72,11 +71,9 @@ function DropdownMenuTrigger({
   }, [portalContext]);
 
   const r = renderFromAsChild(asChild, children);
-  const childIsNativeButton = !asChild || (React.isValidElement(children) && (children.type === 'button' || children.type === Button));
   return (
     <BaseMenu.Trigger
       data-slot="dropdown-menu-trigger"
-      nativeButton={childIsNativeButton}
       onPointerDownCapture={(event) => {
         syncPortalContainer(event.currentTarget);
         onPointerDownCapture?.(event);
