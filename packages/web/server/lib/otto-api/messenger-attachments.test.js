@@ -30,7 +30,7 @@ describe('classifyAttachment', () => {
 });
 
 describe('attachment rendering', () => {
-  it('wraps text content in a kimaki-style XML block', () => {
+  it('wraps text content in an inline XML block', () => {
     const block = renderTextAttachmentBlock({ filename: 'a.log', mime: 'text/plain', content: 'boom' });
     expect(block).toBe('<attachment filename="a.log" mime="text/plain">\nboom\n</attachment>');
   });

@@ -190,7 +190,7 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
   let text = typeof message.content === 'string' ? message.content.trim() : '';
   const attachments = Array.isArray(message.attachments) ? message.attachments : [];
 
-  // Mention-only mode (kimaki parity): when enabled for a channel, new
+  // Mention-only mode: when enabled for a channel, new
   // conversations require an @mention of the bot. Surfaces that already
   // have a session binding (existing threads) keep working without it.
   if (

@@ -183,7 +183,7 @@ describe('/abort and /model still resolve as known commands', () => {
   });
 });
 
-describe('/abort clears the queue (kimaki parity)', () => {
+describe('/abort clears the queue', () => {
   it('reports cleared queued messages on a successful abort', async () => {
     const clearQueue = vi.fn(async () => 2);
     const { result } = await run('/abort', {
@@ -372,7 +372,7 @@ describe('worktree commands', () => {
   });
 });
 
-describe('/help lists the kimaki-parity commands', () => {
+describe('/help lists the extended command set', () => {
   it('mentions queue, fork, share, resume, worktrees and mention-mode', async () => {
     const { result } = await run('/help');
     for (const cmd of ['/queue', '/fork', '/share', '/resume', '/new-worktree', '/merge-worktree', '/mention-mode', '/clear-queue', '/session']) {

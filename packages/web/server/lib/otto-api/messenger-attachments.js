@@ -1,7 +1,7 @@
 /**
  * Discord attachment handling for the messenger ↔ OpenCode bridge.
  *
- * Mirrors kimaki's attachment pipeline:
+ * Attachment pipeline:
  *   - Text-like files are downloaded and inlined into the prompt as
  *     `<attachment filename="..." mime="...">…</attachment>` XML blocks.
  *   - Images and PDFs are downloaded and converted to base64 data URLs,
@@ -64,7 +64,7 @@ export function classifyAttachment(attachment) {
   return 'unknown';
 }
 
-/** Render a text attachment as a kimaki-style XML block. */
+/** Render a text attachment as an inline XML block. */
 export function renderTextAttachmentBlock({ filename, mime, content }) {
   const safeName = String(filename ?? 'attachment').replace(/"/g, "'");
   const safeMime = String(mime ?? 'text/plain').replace(/"/g, "'");
@@ -184,7 +184,7 @@ export async function processDiscordAttachments({ attachments, fetchImpl = fetch
 
 /**
  * Compose the final prompt text from the user's message body plus
- * processed attachments, kimaki-style:
+ * processed attachments:
  *   - transcripts replace/augment an empty body (voice messages)
  *   - "message sent as file": empty body + exactly one text block → the
  *     attachment content IS the prompt (without the XML wrapper)
@@ -212,7 +212,7 @@ export function composePromptText({ body, textBlocks, transcripts }) {
 
 /**
  * Resolve raw Discord mention syntax into human-readable names so the AI
- * never sees opaque snowflake IDs (kimaki parity).
+ * never sees opaque snowflake IDs.
  *
  *   <@123> / <@!123>  → @username (from the gateway `mentions` array)
  *   <@&456>           → @role-name (via injected role lookup)

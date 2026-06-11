@@ -21,7 +21,7 @@ describe('parseScheduleSpec', () => {
     expect(r.kind).toBe('once');
   });
 
-  it('rejects past dates (kimaki rule)', () => {
+  it('rejects past dates', () => {
     const r = parseScheduleSpec('2026-06-10T09:00:00Z', NOW);
     expect(r.error).toContain('future');
   });

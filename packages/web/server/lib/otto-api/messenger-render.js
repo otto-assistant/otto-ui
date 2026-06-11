@@ -411,7 +411,7 @@ export function renderToolDetailVerbose(part) {
   return blocks.filter(Boolean).join('\n');
 }
 
-// ── Thread naming from OpenCode session titles (kimaki parity) ─────────────
+// ── Thread naming from OpenCode session titles ─────────────────────────────
 
 const DISCORD_THREAD_NAME_MAX = 100;
 
@@ -420,7 +420,7 @@ const PRESERVED_THREAD_PREFIXES = ['⬦ ', 'Fork: ', 'Resume: '];
 
 /**
  * Decide whether (and how) to rename a Discord thread based on an OpenCode
- * session title. Mirrors kimaki's deriveThreadNameFromSessionTitle:
+ * session title. Rules:
  *   - skip empty titles and OpenCode's "New session - …" placeholder
  *   - preserve a recognised prefix from the current thread name
  *   - cap at Discord's 100-char thread-name limit

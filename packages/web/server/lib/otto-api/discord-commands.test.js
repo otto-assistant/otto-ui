@@ -33,7 +33,7 @@ describe('buildSlashCommandDefinitions', () => {
     expect(queue.options[0]).toMatchObject({ name: 'message', required: true, type: 3 });
   });
 
-  it('includes the kimaki-parity command set', () => {
+  it('includes the extended command set', () => {
     const names = defs.map((d) => d.name);
     for (const name of [
       'session', 'resume', 'fork', 'share', 'unshare',

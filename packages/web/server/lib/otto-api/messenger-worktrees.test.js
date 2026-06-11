@@ -6,7 +6,7 @@ import os from 'node:os';
 import { sanitizeWorktreeName, mergeBridgeWorktree } from './messenger-worktrees.js';
 
 describe('sanitizeWorktreeName', () => {
-  test('lowercases, hyphenates and strips specials (kimaki parity)', () => {
+  test('lowercases, hyphenates and strips specials', () => {
     expect(sanitizeWorktreeName('My Feature')).toBe('my-feature');
     expect(sanitizeWorktreeName('Fix Bug #123')).toBe('fix-bug-123');
     expect(sanitizeWorktreeName('  Add   Auth  ')).toBe('add-auth');

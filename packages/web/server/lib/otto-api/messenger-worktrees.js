@@ -1,7 +1,7 @@
 /**
  * Git worktree support for the Discord ↔ OpenCode bridge.
  *
- * Mirrors kimaki's `/new-worktree` + `/merge-worktree` commands:
+ * Implements the `/new-worktree` + `/merge-worktree` commands:
  *   - `/new-worktree [name]` creates an isolated git worktree (re-using
  *     OpenChamber's worktree service, so worktrees show up in the web UI
  *     too) and binds the conversation to a session running inside it.
@@ -38,7 +38,7 @@ function runGit(cwd, args, { timeoutMs = GIT_TIMEOUT_MS } = {}) {
   });
 }
 
-/** kimaki-style worktree name sanitization: lowercase, hyphens, no specials. */
+/** Worktree name sanitization: lowercase, hyphens, no specials. */
 export function sanitizeWorktreeName(raw) {
   const cleaned = String(raw ?? '')
     .toLowerCase()
@@ -103,7 +103,7 @@ async function resolveDefaultBranch(worktreeDir) {
  *   { ok: false, error }                        — hard failure
  */
 export async function mergeBridgeWorktree({ worktreeDir }) {
-  // 1. Refuse to merge with uncommitted changes (kimaki parity).
+  // 1. Refuse to merge with uncommitted changes.
   const status = await runGit(worktreeDir, ['status', '--porcelain']);
   if (!status.ok) {
     return { ok: false, error: `git status failed: ${status.stderr || status.stdout}` };
@@ -236,7 +236,7 @@ export async function mergeBridgeWorktree({ worktreeDir }) {
   };
 }
 
-/** kimaki's conflict-resolution prompt, sent to the session when a merge conflicts. */
+/** Conflict-resolution prompt, sent to the session when a merge conflicts. */
 export const MERGE_CONFLICT_PROMPT = [
   'A rebase conflict occurred while merging this worktree into the default branch.',
   'Please resolve the rebase conflicts:',

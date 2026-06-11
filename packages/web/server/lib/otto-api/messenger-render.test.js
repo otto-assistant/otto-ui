@@ -139,7 +139,7 @@ describe('renderToolPart — code fence safety', () => {
   });
 });
 
-describe('deriveThreadNameFromSessionTitle (kimaki parity)', () => {
+describe('deriveThreadNameFromSessionTitle', () => {
   it('returns the trimmed title for a plain thread', () => {
     expect(
       deriveThreadNameFromSessionTitle({ sessionTitle: '  Fix auth bug  ', currentName: 'fix the auth' }),

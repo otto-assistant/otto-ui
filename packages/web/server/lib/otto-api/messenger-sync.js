@@ -1049,7 +1049,7 @@ export function createMessengerSyncRouter({
    *   Omit a field to leave it unchanged. Pass null to clear it.
    * Returns: { ok, project: { projectPath, projectLabel, modelDefault, agentDefault } }
    */
-  // ── Scheduled prompts (kimaki --send-at parity) ───────────────────────
+  // ── Scheduled prompts ─────────────────────────────────────────────────
   // Create / list / delete scheduled prompts. Used by the Discord /schedule
   // command, the OpenChamber UI, AND by the agent itself (the bridge injects
   // these endpoints into new sessions so the model can self-serve reminders).

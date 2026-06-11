@@ -24,7 +24,7 @@ import { createMessengerScheduler, describeSchedule } from './messenger-schedule
 /**
  * Bidirectional bridge between Discord and OpenCode chat sessions.
  *
- * Threading model (modelled after https://github.com/remorses/kimaki):
+ * Threading model:
  *   - Each new conversation starter in a Discord text channel spawns a public
  *     Thread on that message via POST /channels/:id/messages/:id/threads. The
  *     OpenCode session is bound to the THREAD, not the channel. Follow-up
@@ -35,7 +35,7 @@ import { createMessengerScheduler, describeSchedule } from './messenger-schedule
  *     No edit-in-place — text streams complete (part.time.end set) before
  *     they're posted, tool runs post a single one-liner per state change,
  *     reasoning posts a `┣ thinking` marker.
- *   - Tool summaries follow kimaki's compact format: file name and ±line
+ *   - Tool summaries use a compact format: file name and ±line
  *     count for edits, file name for reads, escaped command for bash,
  *     match count for glob/grep, etc. Not `[⋯ tool-name]`.
  *   - Typing indicator pulses every 7s while a session has unfinished
@@ -189,7 +189,7 @@ async function sendApprovalToSurface({ type, token, channelId, threadId, permiss
     }
     // Only store context after the Discord API call succeeds. The surface
     // info lets the bridge auto-reject + strip buttons when a new message
-    // supersedes the pending request (kimaki parity).
+    // supersedes the pending request.
     const data = await r.json();
     storeApprovalContext({
       surface: { type, token, channelId: ch, messageId: data?.id ?? null },
@@ -390,7 +390,7 @@ export function createMessengerOpencodeBridge({
    */
   const sessionContexts = new Map();
 
-  // --- /queue support (kimaki parity) -------------------------------------
+  // --- /queue support ------------------------------------------------------
   // Sessions with an in-flight assistant turn. Set when a prompt is sent,
   // cleared on session.idle / session.error so `/queue` knows whether to
   // hold a message back or send it immediately.
@@ -618,7 +618,7 @@ export function createMessengerOpencodeBridge({
   async function createOpencodeSession({ projectPath, title = null }) {
     const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
     // Omit the title by default so OpenCode auto-generates a meaningful
-    // summary title from the conversation (kimaki parity). The bridge then
+    // summary title from the conversation. The bridge then
     // renames the Discord thread to match on session.updated.
     const r = await opencodeFetch(`/session${params}`, {
       method: 'POST',
@@ -904,7 +904,7 @@ export function createMessengerOpencodeBridge({
     return { sessionId, projectPath: effectivePath, autoResolved, created: true };
   }
 
-  // --- Project memory (MEMORY.md) — kimaki parity --------------------------
+  // --- Project memory (MEMORY.md) -------------------------------------------
   // When a brand-new session starts, the project's MEMORY.md (if present) is
   // injected into the first prompt as a <project-memory> block so persistent
   // context survives across sessions.
@@ -925,7 +925,7 @@ export function createMessengerOpencodeBridge({
     }
   }
 
-  // --- Voice transcription (kimaki parity) ----------------------------------
+  // --- Voice transcription ---------------------------------------------------
   // Proxies Discord voice-message audio to the same OpenAI-compatible STT
   // endpoint OpenChamber's web UI uses (Settings → Voice → Custom server).
   async function transcribeVoiceAttachment({ audioBuffer, mimeType }) {
@@ -960,7 +960,7 @@ export function createMessengerOpencodeBridge({
     }
   }
 
-  // --- Mention-only mode (kimaki parity) -----------------------------------
+  // --- Mention-only mode ------------------------------------------------------
   function mentionModeKey({ type, token, channelId }) {
     return `mention-mode:${type}:${tokenHash(token)}:${channelId}`;
   }
@@ -1022,7 +1022,7 @@ export function createMessengerOpencodeBridge({
     }
   }
 
-  // --- Pending-approval auto-reject (kimaki parity) -------------------------
+  // --- Pending-approval auto-reject -------------------------------------------
   // When a new message arrives for a session that still has unanswered
   // permission requests, reject them and strip the buttons so the session
   // unblocks and stale buttons can't be clicked later.
@@ -1066,7 +1066,7 @@ export function createMessengerOpencodeBridge({
     return rejected;
   }
 
-  // --- Thread renaming from session titles (kimaki parity) ------------------
+  // --- Thread renaming from session titles -------------------------------------
   // OpenCode auto-generates a summary title for untitled sessions; we mirror
   // it onto the Discord thread. Discord rate-limits thread renames (~2 per
   // 10 minutes), so we rename at most once per distinct title and fail soft.
@@ -1138,7 +1138,7 @@ export function createMessengerOpencodeBridge({
     }
   }
 
-  // --- Scheduled prompts (kimaki `--send-at` parity) -------------------------
+  // --- Scheduled prompts -------------------------------------------------------
   // Tasks persist in the bridge store; on fire they are delivered through the
   // normal inbound pipeline so answers stream back into the Discord surface.
   async function resolveBotToken() {
@@ -1224,8 +1224,7 @@ export function createMessengerOpencodeBridge({
 
   /**
    * Compact scheduling instructions injected into each new session so the
-   * agent can set up reminders / recurring runs on request (kimaki parity —
-   * kimaki documents `otto send --send-at` in its system prompt).
+   * agent can set up reminders / recurring runs on request.
    */
   function buildSchedulingInstructions({ channelId, threadId }) {
     const base = typeof getLocalApiBaseUrl === 'function' ? getLocalApiBaseUrl() : null;
@@ -1296,7 +1295,7 @@ export function createMessengerOpencodeBridge({
   /** Like postToSurface but takes a raw surface descriptor — used by the
    *  bootstrap dialogue before a session exists. Long content is split into
    *  multiple messages on line boundaries instead of being truncated at
-   *  Discord's 2000-char limit (kimaki parity for long /help output etc.). */
+   *  Discord's 2000-char limit (long /help output etc.). */
   async function postMessengerSurface({ type, token, channelId, threadId }, content) {
     if (!content) return { ok: false, error: 'empty content' };
     if (type === 'discord') {
@@ -1719,7 +1718,7 @@ export function createMessengerOpencodeBridge({
         channelId: ctx.channelId,
         threadId: ctx.threadId,
       });
-      // Drain one queued message for this surface (kimaki parity): /queue'd
+      // Drain one queued message for this surface: /queue'd
       // follow-ups send automatically after each response completes.
       void drainSurfaceQueue(ctx);
       return;
@@ -1931,7 +1930,7 @@ export function createMessengerOpencodeBridge({
       async startSession({ prompt }) {
         // Post a starter message in the channel, then run the normal inbound
         // pipeline anchored on it so the thread + session spin up exactly
-        // like a typed message (kimaki's /session behaviour). When invoked
+        // like a typed message. When invoked
         // from inside a thread, hop up to the parent channel so the new
         // session gets its own thread instead of hijacking this one.
         const parentId = await resolveParentChannelId({ token, channelId });
@@ -2016,7 +2015,7 @@ export function createMessengerOpencodeBridge({
         if (!thread.ok) return thread;
 
         // Show the most recent assistant response so the user has context
-        // (kimaki shows only the last reply to avoid flooding the thread).
+        // (only the last reply is shown to avoid flooding the thread).
         const messages = await opencodeAdapter.listMessages(target.id, projectPath ?? undefined);
         const lastText = lastAssistantTextOfMessages(messages ?? []);
         if (lastText) {
@@ -2184,7 +2183,7 @@ export function createMessengerOpencodeBridge({
         const result = await mergeBridgeWorktree({ worktreeDir });
         if (result.ok || !result.conflict) return result;
 
-        // Conflict — hand resolution to the model (kimaki parity).
+        // Conflict — hand resolution to the model.
         let promptSent = false;
         if (stored?.sessionId) {
           try {
@@ -2271,7 +2270,7 @@ export function createMessengerOpencodeBridge({
     modelOverride: pinnedModel = null,
     agentOverride: pinnedAgent = null,
   }) {
-    // Attachments (kimaki parity): text files inline as <attachment> blocks,
+    // Attachments: text files inline as <attachment> blocks,
     // images/PDFs forwarded as file parts, voice messages transcribed via the
     // configured STT server. An attachment-only message is allowed — the
     // attachment content becomes the prompt.
@@ -2375,7 +2374,7 @@ export function createMessengerOpencodeBridge({
           // Recurse with the stashed original text + the now-known project.
           // sourceMessageId remains from the ORIGINAL message so the thread
           // (when we create it below) is anchored on the user's first
-          // message, matching kimaki's UX.
+          // message.
           return routeInbound({
             type,
             token,
@@ -2456,7 +2455,7 @@ export function createMessengerOpencodeBridge({
     // -----------------------------------------------------------------
     let effectiveThreadId = threadId ?? null;
     if (type === 'discord' && !effectiveThreadId && sourceMessageId) {
-      // kimaki-style initial name: whole message collapsed to one line,
+      // Initial name: whole message collapsed to one line,
       // capped at 80 chars. Renamed later to OpenCode's generated title.
       const threadName = text.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Otto';
       const thread = await startDiscordThread({
@@ -2493,7 +2492,7 @@ export function createMessengerOpencodeBridge({
       return { ok: false, error: err?.message ?? 'session resolve failed' };
     }
 
-    // Project memory (kimaki parity): a brand-new session's first prompt
+    // Project memory: a brand-new session's first prompt
     // carries the project's MEMORY.md as persistent context. The scheduling
     // instructions ride along so the agent can self-serve reminders /
     // recurring tasks via the local API when the user asks.
@@ -2512,7 +2511,7 @@ export function createMessengerOpencodeBridge({
     }
 
     // A new message supersedes unanswered permission requests for this
-    // session — reject them and strip stale buttons (kimaki parity).
+    // session — reject them and strip stale buttons.
     await rejectPendingApprovalsForSession(sessionId).catch(() => {});
 
     // Remember this prompt so OpenCode's `user` part echo isn't mirrored back
@@ -2830,9 +2829,9 @@ export function createMessengerOpencodeBridge({
     initApprovalListener,
     handleApprovalDecision,
     handleThreadDeleted,
-    /** Scheduled prompts (kimaki --send-at parity) — used by the HTTP routes. */
+    /** Scheduled prompts — used by the HTTP routes. */
     scheduler,
-    /** Mention-only mode (kimaki parity) — checked by the Discord listener. */
+    /** Mention-only mode — checked by the Discord listener. */
     getMentionMode,
     /** Whether a surface already has a session binding (mention mode skips bound threads). */
     hasSurfaceBinding,

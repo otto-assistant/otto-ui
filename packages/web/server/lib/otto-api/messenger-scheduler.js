@@ -1,6 +1,5 @@
 /**
- * Scheduled prompts for the Discord ↔ OpenCode bridge — kimaki's
- * `otto send --send-at` parity.
+ * Scheduled prompts for the Discord ↔ OpenCode bridge.
  *
  * A scheduled task delivers a prompt at a future time, either:
  *   - into an EXISTING Discord thread/channel surface (continuing its bound
@@ -8,7 +7,7 @@
  *   - as a NEW chat in a project (starter message + fresh thread + session),
  * optionally pinning the model (`provider/model`) and agent that must answer.
  *
- * Schedule spec (kimaki rules, everything UTC):
+ * Schedule spec (everything UTC):
  *   - one-time: ISO timestamp ending with `Z`, e.g. `2026-03-01T09:00:00Z`
  *   - recurring: 5-field cron expression evaluated in UTC, e.g. `0 9 * * 1`
  *
@@ -25,7 +24,7 @@ export const MAX_SCHEDULED_TASKS = 100;
 
 /**
  * Parse a schedule spec into { kind, spec, nextRunAt } or { error }.
- * Mirrors kimaki's parseUtcSendAtDate semantics for one-time dates and falls
+ * One-time dates must be UTC ISO and in the future; everything else falls
  * back to cron (UTC) for everything else.
  */
 export function parseScheduleSpec(value, now = Date.now()) {
@@ -43,7 +42,7 @@ export function parseScheduleSpec(value, now = Date.now()) {
     return { kind: 'once', spec: raw, nextRunAt: runAt };
   }
 
-  // Anything date-like that isn't valid UTC ISO gets the kimaki error message.
+  // Anything date-like that isn't valid UTC ISO gets a helpful error message.
   if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
     return {
       error: `dates must be UTC ISO format ending with Z (example: 2026-03-01T09:00:00Z). Received: ${raw}`,

@@ -109,7 +109,7 @@ export class MessengerBridgeStore {
         updated_at TEXT NOT NULL
       );
     `);
-    // Scheduled prompts (kimaki's `otto send --send-at` parity). Each row is a
+    // Scheduled prompts. Each row is a
     // one-time (ISO UTC) or recurring (cron, UTC) prompt delivered either into
     // an existing Discord thread/channel surface or as a fresh session in a
     // project, optionally pinning the model/agent that must answer.

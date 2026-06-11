@@ -3,7 +3,7 @@
  *
  * Mirrors the slash commands available in the OpenChamber web chat input
  * (`/undo`, `/redo`, `/compact`, `/summary`, `/init`, `/review` + dynamic
- * project commands) and adds the kimaki-inspired session-control set
+ * project commands) and adds the session-control set
  * (`/abort`, `/new`, `/model`, `/agent`, `/sessions`, `/status`, `/help`).
  *
  * Why text-prefix instead of native Discord slash commands:
@@ -146,7 +146,7 @@ const KNOWN_TOP_LEVEL = new Set(COMMAND_HELP.map((c) => c.name));
  * Extract the leading slash command from a user message. Returns `null`
  * when the message is a normal prompt.
  *
- * Mirrors kimaki's extractLeadingOpencodeCommand — only the FIRST non-empty
+ * Only the FIRST non-empty
  * line matters. Multi-line messages where the first line is a `/cmd` are
  * still treated as commands so users can paste context after a `/init`.
  */
@@ -288,7 +288,7 @@ export async function executeMessengerCommand({
     case 'abort': {
       if (!sessionId) return { reply: '✗ No session is active on this conversation.' };
       const r = await opencode.abortSession(sessionId, binding?.projectPath ?? undefined);
-      // kimaki parity: aborting clears any queued messages for the surface.
+      // Aborting clears any queued messages for the surface.
       let clearedNote = '';
       if (r.ok && bridgeOps?.clearQueue) {
         const cleared = await bridgeOps.clearQueue().catch(() => 0);

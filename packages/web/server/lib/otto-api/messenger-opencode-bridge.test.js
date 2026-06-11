@@ -626,7 +626,7 @@ describe('discord inbound mirroring', () => {
   });
 });
 
-describe('thread renaming from OpenCode session titles (kimaki parity)', () => {
+describe('thread renaming from OpenCode session titles', () => {
   let originalFetch;
   let calls;
 
