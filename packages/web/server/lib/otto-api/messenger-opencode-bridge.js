@@ -4,7 +4,13 @@ import path from 'node:path';
 import { MessengerBridgeStore } from './messenger-bridge-store.js';
 import { executeMessengerCommand, parseLeadingCommand } from './messenger-commands.js';
 import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
-import { renderPartForMessenger, renderPermissionContext, escapeMd, clipBlock } from './messenger-render.js';
+import {
+  renderPartForMessenger,
+  renderPermissionContext,
+  escapeMd,
+  clipBlock,
+  deriveThreadNameFromSessionTitle,
+} from './messenger-render.js';
 import { processDiscordAttachments, composePromptText } from './messenger-attachments.js';
 import {
   createBridgeWorktree,
@@ -600,11 +606,14 @@ export function createMessengerOpencodeBridge({
     return fetch(url, { ...init, headers });
   }
 
-  async function createOpencodeSession({ projectPath, title }) {
+  async function createOpencodeSession({ projectPath, title = null }) {
     const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
+    // Omit the title by default so OpenCode auto-generates a meaningful
+    // summary title from the conversation (kimaki parity). The bridge then
+    // renames the Discord thread to match on session.updated.
     const r = await opencodeFetch(`/session${params}`, {
       method: 'POST',
-      body: JSON.stringify({ title: title ?? 'Otto messenger session' }),
+      body: JSON.stringify(title ? { title } : {}),
     });
     if (!r.ok) {
       const text = await r.text();
@@ -862,10 +871,9 @@ export function createMessengerOpencodeBridge({
       }
     }
 
-    const title = effectiveLabel
-      ? `Otto · ${type} · ${effectiveLabel}`
-      : `Otto · ${type} · ${channelId}${threadId ? `:${threadId}` : ''}`;
-    const sessionId = await createOpencodeSession({ projectPath: effectivePath, title });
+    // No explicit title — OpenCode auto-generates one from the first
+    // message and the bridge renames the Discord thread to match.
+    const sessionId = await createOpencodeSession({ projectPath: effectivePath });
     bridgeStore.bind({
       type,
       botTokenHash: hash,
@@ -1047,6 +1055,78 @@ export function createMessengerOpencodeBridge({
       console.log(`[BRIDGE] Auto-rejected ${rejected} stale permission request(s) for session ${sessionId}`);
     }
     return rejected;
+  }
+
+  // --- Thread renaming from session titles (kimaki parity) ------------------
+  // OpenCode auto-generates a summary title for untitled sessions; we mirror
+  // it onto the Discord thread. Discord rate-limits thread renames (~2 per
+  // 10 minutes), so we rename at most once per distinct title and fail soft.
+  /** @type {Map<string, string>} threadId → last applied OpenCode title */
+  const appliedThreadTitles = new Map();
+  const APPLIED_TITLE_CACHE_MAX = 500;
+
+  async function maybeRenameThreadFromSessionTitle(sessionId, title) {
+    try {
+      const normalizedTitle = String(title ?? '').trim();
+      if (!normalizedTitle) return;
+
+      // Resolve the Discord surface for this session: live context first,
+      // then the persistent binding lookup (covers server restarts).
+      let surface = null;
+      const ctx = sessionContexts.get(sessionId);
+      if (ctx?.type === 'discord' && ctx.token && ctx.threadId) {
+        surface = { token: ctx.token, threadId: ctx.threadId };
+      } else if (typeof lookupMessengerTarget === 'function') {
+        const target = await lookupMessengerTarget(sessionId);
+        if (target?.type === 'discord' && target.token && target.targetKey) {
+          surface = { token: target.token, threadId: target.targetKey };
+        }
+      }
+      if (!surface) return;
+      if (appliedThreadTitles.get(surface.threadId) === normalizedTitle) return;
+
+      // Mark BEFORE any await so concurrent session.updated events for the
+      // same title can't stack rename attempts — failures are almost always
+      // rate limits, so retrying the same title wouldn't help anyway.
+      if (appliedThreadTitles.size >= APPLIED_TITLE_CACHE_MAX) {
+        const oldest = appliedThreadTitles.keys().next().value;
+        if (oldest !== undefined) appliedThreadTitles.delete(oldest);
+      }
+      appliedThreadTitles.set(surface.threadId, normalizedTitle);
+
+      // Fetch the channel to confirm it IS a thread (never rename a text
+      // channel) and to read the current name for prefix preservation.
+      const chRes = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(surface.threadId)}`,
+        { headers: { Authorization: `Bot ${surface.token}` }, signal: AbortSignal.timeout(3000) },
+      );
+      if (!chRes.ok) return;
+      const channel = await chRes.json();
+      if (![10, 11, 12].includes(channel?.type)) return;
+
+      const desiredName = deriveThreadNameFromSessionTitle({
+        sessionTitle: normalizedTitle,
+        currentName: channel?.name ?? '',
+      });
+      if (!desiredName) return;
+
+      const res = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(surface.threadId)}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bot ${surface.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: desiredName }),
+          signal: AbortSignal.timeout(3000),
+        },
+      );
+      if (!res.ok) {
+        console.warn(`[BRIDGE] Could not rename thread ${surface.threadId} from session title: Discord ${res.status}`);
+        return;
+      }
+      console.log(`[BRIDGE] Renamed thread ${surface.threadId} → "${desiredName}" (session ${sessionId})`);
+    } catch (err) {
+      console.warn('[BRIDGE] Thread rename failed:', err?.message ?? err);
+    }
   }
 
   /** Resolve a thread's parent channel id via the Discord API (for /resume, /fork etc. run inside threads). */
@@ -1410,6 +1490,14 @@ export function createMessengerOpencodeBridge({
             },
           });
         }
+      }
+      return;
+    }
+    if (type === 'session.updated') {
+      const info = props?.info ?? props ?? null;
+      const sessionId = info?.id ?? props?.sessionID ?? props?.sessionId ?? null;
+      if (sessionId && typeof info?.title === 'string') {
+        void maybeRenameThreadFromSessionTitle(sessionId, info.title);
       }
       return;
     }
@@ -1909,12 +1997,10 @@ export function createMessengerOpencodeBridge({
         if (!created.ok) return created;
 
         // Bind a fresh session running inside the worktree to a new thread.
+        // Untitled — OpenCode names it from the first message.
         let sessionId;
         try {
-          sessionId = await createOpencodeSession({
-            projectPath: created.path,
-            title: `Otto · worktree · ${created.branch}`,
-          });
+          sessionId = await createOpencodeSession({ projectPath: created.path });
         } catch (err) {
           return { ok: false, error: `worktree created at ${created.path}, but session creation failed: ${err?.message ?? 'unknown'}` };
         }
@@ -2204,7 +2290,9 @@ export function createMessengerOpencodeBridge({
     // -----------------------------------------------------------------
     let effectiveThreadId = threadId ?? null;
     if (type === 'discord' && !effectiveThreadId && sourceMessageId) {
-      const threadName = clipBlock(text.split('\n')[0] ?? 'Otto', 80);
+      // kimaki-style initial name: whole message collapsed to one line,
+      // capped at 80 chars. Renamed later to OpenCode's generated title.
+      const threadName = text.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Otto';
       const thread = await startDiscordThread({
         token,
         channelId,

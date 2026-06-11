@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderPartForMessenger, renderToolPart } from './messenger-render.js';
+import { renderPartForMessenger, renderToolPart, deriveThreadNameFromSessionTitle } from './messenger-render.js';
 
 const toolPart = (overrides = {}) => ({
   type: 'tool',
@@ -85,5 +85,54 @@ describe('renderToolPart — code fence safety', () => {
     // The only real fences are the inline block's own; embedded ``` is replaced.
     expect(line).not.toContain('```js');
     expect(line).toContain("'''js");
+  });
+});
+
+describe('deriveThreadNameFromSessionTitle (kimaki parity)', () => {
+  it('returns the trimmed title for a plain thread', () => {
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: '  Fix auth bug  ', currentName: 'fix the auth' }),
+    ).toBe('Fix auth bug');
+  });
+
+  it('preserves the worktree prefix from the current name', () => {
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: 'Refactor queue', currentName: '⬦ refactor queue old' }),
+    ).toBe('⬦ Refactor queue');
+  });
+
+  it('preserves Fork: and Resume: prefixes', () => {
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: 'Auth flow', currentName: 'Fork: old name' }),
+    ).toBe('Fork: Auth flow');
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: 'Auth flow', currentName: 'Resume: old name' }),
+    ).toBe('Resume: Auth flow');
+  });
+
+  it('ignores OpenCode placeholder titles', () => {
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: 'New session - 2026-06-11T13:00:00Z', currentName: 'x' }),
+    ).toBeUndefined();
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: 'new session -abc', currentName: 'x' }),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined when nothing changes or the title is empty', () => {
+    expect(
+      deriveThreadNameFromSessionTitle({ sessionTitle: 'Fix auth bug', currentName: 'Fix auth bug' }),
+    ).toBeUndefined();
+    expect(deriveThreadNameFromSessionTitle({ sessionTitle: '   ', currentName: 'x' })).toBeUndefined();
+    expect(deriveThreadNameFromSessionTitle({ sessionTitle: null, currentName: 'x' })).toBeUndefined();
+  });
+
+  it('caps at 100 chars including a preserved prefix', () => {
+    const long = 'x'.repeat(200);
+    const withPrefix = deriveThreadNameFromSessionTitle({ sessionTitle: long, currentName: '⬦ seed' });
+    expect(withPrefix).toHaveLength(100);
+    expect(withPrefix.startsWith('⬦ ')).toBe(true);
+    const plain = deriveThreadNameFromSessionTitle({ sessionTitle: long, currentName: 'seed' });
+    expect(plain).toHaveLength(100);
   });
 });
