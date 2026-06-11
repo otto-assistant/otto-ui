@@ -86,11 +86,15 @@ const SYNC_MODES: { id: SyncMode; label: string; desc: string }[] = [
 
 const VERBOSITY_OPTIONS: { id: MessengerVerbosity; label: string; desc: string }[] = [
   { id: 'quiet', label: 'Quiet', desc: 'Final answer only — hides reasoning and tool activity' },
-  { id: 'normal', label: 'Normal', desc: 'Answer + full reasoning + tool calls with input/output visible' },
+  {
+    id: 'normal',
+    label: 'Normal',
+    desc: 'Compact activity feed — tool names with short summaries and a thinking marker, no payloads',
+  },
   {
     id: 'verbose',
     label: 'Verbose',
-    desc: 'Same as Normal, but tool details wrapped under click-to-reveal spoilers',
+    desc: 'Full detail — commands, diffs, outputs and reasoning, formatted for reading',
   },
 ];
 
@@ -776,8 +780,8 @@ function BridgePanel({
           Discord too with{' '}
           <code className="bg-muted px-1 rounded">/verbosity {currentVerbosity}</code> (this
           conversation) or <code className="bg-muted px-1 rounded">/verbosity default verbose</code>{' '}
-          (everywhere). At <strong>Verbose</strong>, every tool call and result is posted under a
-          click-to-reveal spoiler.
+          (everywhere). At <strong>Verbose</strong>, commands, diffs, outputs and reasoning are
+          posted in full, formatted for reading.
         </div>
       </div>
 

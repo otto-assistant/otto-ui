@@ -34,8 +34,8 @@ import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js'
 
 const VERBOSITY_DESCRIPTIONS = {
   quiet: 'final answer only — hides reasoning and tool activity',
-  normal: 'answer + full reasoning + tool calls with input/output visible (default)',
-  verbose: 'same as normal, but tool details wrapped under click-to-reveal spoilers',
+  normal: 'compact activity feed — tool names + a thinking marker, no payloads (default)',
+  verbose: 'full detail — commands, diffs, outputs and reasoning, formatted for reading',
 };
 
 // Commands we recognise. The `usage` text is shown by /help so order matters.
@@ -81,7 +81,7 @@ const COMMAND_HELP = [
     name: 'verbosity',
     usage: '/verbosity [quiet | normal | verbose | default <level> | reset]',
     summary:
-      'How much Otto streams back. `verbose` shows every tool call + result under a spoiler. `default <level>` sets the messenger-wide default.',
+      'How much Otto streams back: `quiet` = answer only, `normal` = tool names + thinking marker, `verbose` = full commands/diffs/outputs. `default <level>` sets the messenger-wide default.',
   },
   {
     name: 'skill',

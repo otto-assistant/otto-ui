@@ -10,6 +10,7 @@ import {
   escapeMd,
   clipBlock,
   deriveThreadNameFromSessionTitle,
+  THINKING_MARKER,
 } from './messenger-render.js';
 import { processDiscordAttachments, composePromptText } from './messenger-attachments.js';
 import {
@@ -1389,7 +1390,7 @@ export function createMessengerOpencodeBridge({
       // "running" line and then a "completed" line doubled every tool into
       // two messages and made the feed unreadable. Waiting for the terminal
       // state also lets the one-liner include result metadata (match counts,
-      // error text) and, at `verbose`, the real input + output spoiler.
+      // error text) and, at `verbose`, the real input + output blocks.
       if (status !== 'completed' && status !== 'error') return;
     }
     if (partType === 'reasoning') {
@@ -1405,6 +1406,19 @@ export function createMessengerOpencodeBridge({
 
     const rendered = renderPartForMessenger(part, verbosity);
     if (!rendered) return;
+
+    // At `normal`, reasoning renders as a bare process marker. Consecutive
+    // reasoning parts would repeat it — post the marker only once until a
+    // different kind of content interleaves.
+    if (rendered === THINKING_MARKER) {
+      if (ctx.lastPostedMarker === THINKING_MARKER) {
+        if (dedupKey) ctx.sentPartIds.add(dedupKey);
+        return;
+      }
+      ctx.lastPostedMarker = THINKING_MARKER;
+    } else {
+      ctx.lastPostedMarker = null;
+    }
 
     const sent = await postToSurface(ctx, rendered);
     if (!sent.ok) {
