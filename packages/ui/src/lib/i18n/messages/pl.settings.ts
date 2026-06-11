@@ -1760,4 +1760,12 @@ export const settingsDict = {
   'settings.voice.page.field.ttsInputModeSanitized': 'Oczyszczony tekst',
   'settings.voice.page.field.ttsInputModeRaw': 'Surowy Markdown',
   'settings.window.description': 'Okno ustawień OpenChamber.',
+  'settings.otto.upgrade.title': 'Aktualizacja',
+  'settings.otto.upgrade.currentVersionLabel': 'Bieżąca wersja',
+  'settings.otto.upgrade.availableLabel': 'Dostępna',
+  'settings.otto.upgrade.upToDate': 'Otto jest aktualny',
+  'settings.otto.upgrade.checking': 'Sprawdzanie...',
+  'settings.otto.upgrade.checkAction': 'Sprawdź aktualizacje',
+  'settings.otto.upgrade.upgrading': 'Aktualizowanie...',
+  'settings.otto.upgrade.upgradeAction': 'Zaktualizuj do {version}',
 };

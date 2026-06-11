@@ -1772,4 +1772,12 @@
   'settings.usage.sidebar.field.showPredictions': '顯示預測',
   'settings.view.home.cards.plugins.description': '管理 opencode 外掛',
   'settings.view.home.cards.plugins.title': '外掛',
+  'settings.otto.upgrade.title': '升級',
+  'settings.otto.upgrade.currentVersionLabel': '目前版本',
+  'settings.otto.upgrade.availableLabel': '可用',
+  'settings.otto.upgrade.upToDate': 'Otto 已是最新版本',
+  'settings.otto.upgrade.checking': '檢查中...',
+  'settings.otto.upgrade.checkAction': '檢查更新',
+  'settings.otto.upgrade.upgrading': '升級中...',
+  'settings.otto.upgrade.upgradeAction': '升級到 {version}',
 } as const;

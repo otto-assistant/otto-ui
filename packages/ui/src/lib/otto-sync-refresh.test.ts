@@ -1,11 +1,32 @@
 import { describe, expect, test } from 'bun:test';
-import type { SyncEvent } from './otto-sync';
 import {
   extractPersonaAgentHint,
+  matchesEventPattern,
   pickPersonaTargetAgent,
   refreshMemoryForRemoteEvent,
   refreshPersonaForRemoteEvent,
+  type SyncEvent,
 } from './otto-sync-refresh';
+
+describe('matchesEventPattern', () => {
+  test('wildcard matches everything', () => {
+    expect(matchesEventPattern('*', 'task.create')).toBe(true);
+    expect(matchesEventPattern('*', 'persona.update')).toBe(true);
+  });
+
+  test('exact match', () => {
+    expect(matchesEventPattern('task.create', 'task.create')).toBe(true);
+    expect(matchesEventPattern('task.create', 'task.update')).toBe(false);
+  });
+
+  test('prefix glob', () => {
+    expect(matchesEventPattern('task.*', 'task.create')).toBe(true);
+    expect(matchesEventPattern('task.*', 'task.update')).toBe(true);
+    expect(matchesEventPattern('task.*', 'tasks.create')).toBe(false);
+    expect(matchesEventPattern('agent.*', 'agent.activity')).toBe(true);
+    expect(matchesEventPattern('memory.*', 'task.create')).toBe(false);
+  });
+});
 
 describe('extractPersonaAgentHint', () => {
   test('returns null for non-objects', () => {

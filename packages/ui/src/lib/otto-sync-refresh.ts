@@ -1,11 +1,29 @@
-import type { OttoSyncClient, SyncEvent } from './otto-sync';
 import type { MemoryTab } from '../stores/useMemoryStore';
 import { useTasksStore } from '../stores/useTasksStore';
 import { useDashboardStore } from '../stores/useDashboardStore';
 import { useMemoryStore } from '../stores/useMemoryStore';
 import { usePersonaStore } from '../stores/usePersonaStore';
+import { useOttoEventsStore } from '../stores/useOttoEventsStore';
+
+/** Normalized realtime event shape used by the domain refresh layer. */
+export interface SyncEvent {
+  id: string;
+  type: string; // e.g. "task.create", "persona.update"
+  payload: unknown;
+  timestamp: number;
+}
 
 const PERSONA_HINT_KEYS = ['agent', 'agentId', 'agentName', 'name', 'id'] as const;
+
+/** Matches an event type against a glob pattern (e.g. "task.*"). */
+export function matchesEventPattern(pattern: string, eventType: string): boolean {
+  if (pattern === '*' || pattern === eventType) return true;
+  if (pattern.endsWith('*')) {
+    const prefix = pattern.slice(0, -1);
+    return prefix.length === 0 || eventType.startsWith(prefix);
+  }
+  return false;
+}
 
 /**
  * Best-effort extraction of which agent a persona-related WS event refers to.
@@ -106,47 +124,51 @@ function fireAndForget(promise: Promise<unknown>): void {
 }
 
 /**
- * Subscribe OttoSyncClient glob patterns to store refresh actions. Returns a dispose function.
+ * Routes a realtime event to the matching domain refresh action.
+ * Patterns mirror the event types broadcast by the server hub
+ * (`task.*`, `agent.activity`, `memory.change`, `persona.update`, `schedule.trigger`).
  */
-export function subscribeOttoSyncDomainRefresh(
-  client: OttoSyncClient,
+export function dispatchOttoSyncDomainRefresh(
+  event: SyncEvent,
   gateways: OttoSyncRefreshGateways,
-): () => void {
-  const unsubs: Array<() => void> = [];
+): void {
+  if (matchesEventPattern('task.*', event.type)) {
+    fireAndForget(gateways.tasks.fetchTasks());
+  }
 
-  unsubs.push(
-    client.on('task.*', () => {
-      fireAndForget(gateways.tasks.fetchTasks());
-    }),
-  );
+  if (matchesEventPattern('agent.*', event.type)) {
+    fireAndForget(gateways.dashboard.fetchDashboard());
+  }
 
-  unsubs.push(
-    client.on('agent.*', () => {
-      fireAndForget(gateways.dashboard.fetchDashboard());
-    }),
-  );
+  if (matchesEventPattern('memory.*', event.type)) {
+    fireAndForget(refreshMemoryForRemoteEvent(gateways.memory));
+  }
 
-  unsubs.push(
-    client.on('memory.*', () => {
-      fireAndForget(refreshMemoryForRemoteEvent(gateways.memory));
-    }),
-  );
+  if (matchesEventPattern('persona.*', event.type)) {
+    fireAndForget(refreshPersonaForRemoteEvent(event, gateways.persona));
+  }
 
-  unsubs.push(
-    client.on('persona.*', (event) => {
-      fireAndForget(refreshPersonaForRemoteEvent(event, gateways.persona));
-    }),
-  );
+  if (matchesEventPattern('schedule.*', event.type)) {
+    fireAndForget(gateways.schedule.fetchSchedule());
+  }
+}
 
-  unsubs.push(
-    client.on('schedule.*', () => {
-      fireAndForget(gateways.schedule.fetchSchedule());
-    }),
-  );
-
-  return () => {
-    for (const unsub of unsubs) unsub();
-  };
+/**
+ * Subscribes domain refresh actions to the live `/ws/otto/events` stream
+ * (fed by `useOttoWebSocket`). Returns a dispose function.
+ */
+export function subscribeOttoSyncDomainRefresh(gateways: OttoSyncRefreshGateways): () => void {
+  return useOttoEventsStore.getState().subscribeToEvents((event) => {
+    dispatchOttoSyncDomainRefresh(
+      {
+        id: event.eventId,
+        type: event.eventType,
+        payload: event.data,
+        timestamp: event.timestamp,
+      },
+      gateways,
+    );
+  });
 }
 
 /** Default gateways backed by Otto UI Zustand stores (browser). */

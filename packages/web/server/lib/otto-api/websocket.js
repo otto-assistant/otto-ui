@@ -153,7 +153,7 @@ export function createOttoEventsWebSocketRuntime({
 
   const acceptSocket = (socket, { requestedLastEventId = '' } = {}) => {
     clientState.set(socket, {
-      patterns: normalizePatterns(initialPatterns),
+      patterns: normalizePatterns(null),
     });
 
     clientTimers.set(

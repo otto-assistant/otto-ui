@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ottoFetch } from "../lib/api-base";
 
-export type MemoryTab = "graph" | "list" | "diary" | "search";
+export type MemoryTab = "graph" | "list" | "diary" | "search" | "file";
 
 export interface Entity {
   id: string;

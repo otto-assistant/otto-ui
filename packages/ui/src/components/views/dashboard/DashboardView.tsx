@@ -20,6 +20,7 @@ import { openMemorySettings } from "@/lib/navigation/openMemorySettings";
 import { cn } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { ErrorState } from "@/components/ui/ErrorState";
+import { ConnectionStatus } from "@/components/ui/ConnectionStatus";
 import type { DashboardStats } from "@/stores/useDashboardStore";
 
 export const DashboardView: React.FC = () => {
@@ -100,6 +101,7 @@ export const DashboardView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <ConnectionStatus />
             <button
               type="button"
               onClick={handleNewSession}

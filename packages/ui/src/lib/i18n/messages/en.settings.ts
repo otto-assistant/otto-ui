@@ -1773,4 +1773,12 @@ export const settingsDict = {
   'settings.magicPrompts.page.toast.resetFailed': 'Failed to reset prompt',
   'settings.magicPrompts.page.toast.resetAllSuccess': 'All prompt overrides reset',
   'settings.magicPrompts.page.toast.resetAllFailed': 'Failed to reset all prompts',
+  'settings.otto.upgrade.title': 'Upgrade',
+  'settings.otto.upgrade.currentVersionLabel': 'Current version',
+  'settings.otto.upgrade.availableLabel': 'Available',
+  'settings.otto.upgrade.upToDate': 'Otto is up to date',
+  'settings.otto.upgrade.checking': 'Checking...',
+  'settings.otto.upgrade.checkAction': 'Check for updates',
+  'settings.otto.upgrade.upgrading': 'Upgrading...',
+  'settings.otto.upgrade.upgradeAction': 'Upgrade to {version}',
 } as const;

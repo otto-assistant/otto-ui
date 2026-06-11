@@ -1,17 +1,20 @@
 import React, { useEffect, useState } from "react";
 import { useMemoryStore, type MemoryTab } from "../../../stores/useMemoryStore";
 import { ottoFetch } from "../../../lib/api-base";
+import { useI18n, type I18nKey } from "@/lib/i18n";
 import { GraphView } from "./GraphView";
 import { ListView } from "./ListView";
 import { DiaryView } from "./DiaryView";
 import { SearchView } from "./SearchView";
+import { MemoryFileView } from "./MemoryFileView";
 import { RiBrainLine } from "@remixicon/react";
 
-const TABS: { id: MemoryTab; label: string }[] = [
-  { id: "graph", label: "Graph" },
-  { id: "list", label: "List" },
-  { id: "diary", label: "Diary" },
-  { id: "search", label: "Search" },
+const TABS: { id: MemoryTab; labelKey: I18nKey }[] = [
+  { id: "graph", labelKey: "memoryView.tab.graph" },
+  { id: "list", labelKey: "memoryView.tab.list" },
+  { id: "diary", labelKey: "memoryView.tab.diary" },
+  { id: "search", labelKey: "memoryView.tab.search" },
+  { id: "file", labelKey: "memoryView.tab.file" },
 ];
 
 function MempalaceStatus() {
@@ -37,6 +40,7 @@ function MempalaceStatus() {
 }
 
 export const MemoryView: React.FC = () => {
+  const { t } = useI18n();
   const { activeTab, setActiveTab, entities, relations } = useMemoryStore();
 
   return (
@@ -44,7 +48,7 @@ export const MemoryView: React.FC = () => {
       <div className="flex items-center gap-4">
         <RiBrainLine className="size-5 text-foreground" />
         <h1 className="text-lg font-semibold text-foreground" data-testid="view-memory-heading">
-          Memory
+          {t('memoryView.heading')}
         </h1>
         <div className="flex gap-1 rounded-lg border border-border bg-muted p-0.5">
           {TABS.map((tab) => (
@@ -57,13 +61,13 @@ export const MemoryView: React.FC = () => {
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              {tab.label}
+              {t(tab.labelKey)}
             </button>
           ))}
         </div>
         <div className="flex items-center gap-3 ml-auto text-xs text-muted-foreground">
-          <span>{entities.length} entities</span>
-          <span>{relations.length} relations</span>
+          <span>{t('memoryView.stats.entities', { count: entities.length })}</span>
+          <span>{t('memoryView.stats.relations', { count: relations.length })}</span>
           <MempalaceStatus />
         </div>
       </div>
@@ -73,6 +77,7 @@ export const MemoryView: React.FC = () => {
         {activeTab === "list" && <ListView />}
         {activeTab === "diary" && <DiaryView />}
         {activeTab === "search" && <SearchView />}
+        {activeTab === "file" && <MemoryFileView />}
       </div>
     </div>
   );

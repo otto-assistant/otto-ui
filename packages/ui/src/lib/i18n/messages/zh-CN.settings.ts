@@ -1773,4 +1773,12 @@ export const settingsDict = {
   'settings.promptTemplates.page.toast.created': '模板已创建',
   'settings.promptTemplates.page.toast.createFailed': '创建模板失败',
   'settings.promptTemplates.page.toast.saveUnexpectedError': '保存时发生意外错误',
+  'settings.otto.upgrade.title': '升级',
+  'settings.otto.upgrade.currentVersionLabel': '当前版本',
+  'settings.otto.upgrade.availableLabel': '可用',
+  'settings.otto.upgrade.upToDate': 'Otto 已是最新版本',
+  'settings.otto.upgrade.checking': '检查中...',
+  'settings.otto.upgrade.checkAction': '检查更新',
+  'settings.otto.upgrade.upgrading': '升级中...',
+  'settings.otto.upgrade.upgradeAction': '升级到 {version}',
 } as const;

@@ -132,6 +132,15 @@ export default defineConfig({
           attachForwardedDevHeaders(proxy);
         },
       },
+      // Otto realtime events hub (/ws/otto/events) lives on the Express server.
+      '/ws': {
+        target: proxyBackendTarget,
+        changeOrigin: true,
+        ws: true,
+        configure(proxy) {
+          attachForwardedDevHeaders(proxy);
+        },
+      },
     },
   },
   build: {

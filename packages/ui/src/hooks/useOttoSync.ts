@@ -1,28 +1,35 @@
 import { useEffect, useState } from 'react';
-import { type ConnectionState, getOttoSyncClient } from '../lib/otto-sync';
+import {
+  useOttoEventsStore,
+  type OttoWsConnectionStatus,
+} from '../stores/useOttoEventsStore';
 import {
   createDefaultOttoSyncGateways,
   subscribeOttoSyncDomainRefresh,
 } from '../lib/otto-sync-refresh';
 
+export type ConnectionState = 'connected' | 'disconnected' | 'reconnecting';
+
+export function mapOttoWsStatusToConnectionState(status: OttoWsConnectionStatus): ConnectionState {
+  if (status === 'open') return 'connected';
+  if (status === 'connecting') return 'reconnecting';
+  return 'disconnected';
+}
+
 /**
- * React hook that initializes the OttoSyncClient singleton and dispatches
- * incoming WebSocket events to the appropriate Zustand stores.
+ * Dispatches incoming `/ws/otto/events` realtime events (fed by `useOttoWebSocket`)
+ * to the appropriate Zustand store refresh actions, and exposes the connection state.
  */
 export function useOttoSync() {
+  const wsStatus = useOttoEventsStore((state) => state.connectionStatus);
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
 
   useEffect(() => {
-    const client = getOttoSyncClient();
+    setConnectionState(mapOttoWsStatusToConnectionState(wsStatus));
+  }, [wsStatus]);
 
-    const unsubs: (() => void)[] = [];
-
-    unsubs.push(client.onConnection(setConnectionState));
-    unsubs.push(subscribeOttoSyncDomainRefresh(client, createDefaultOttoSyncGateways()));
-
-    return () => {
-      for (const unsub of unsubs) unsub();
-    };
+  useEffect(() => {
+    return subscribeOttoSyncDomainRefresh(createDefaultOttoSyncGateways());
   }, []);
 
   return { connectionState };
