@@ -110,7 +110,15 @@ function clearViteCache() {
   }
 }
 
-clearViteCache();
+// Re-using the dependency cache is a massive dev-load win: a forced
+// re-optimization busts every prebundled dep hash, so the browser re-downloads
+// the entire module graph (tens of MB, 30s+ "Finish") on every dev restart.
+// Vite invalidates the cache automatically when the lockfile or config
+// changes; set OPENCHAMBER_VITE_FORCE=1 for a clean slate when needed.
+const forceOptimize = process.env.OPENCHAMBER_VITE_FORCE === '1';
+if (forceOptimize) {
+  clearViteCache();
+}
 
 const api = run('api', 'bun', ['run', '--cwd', 'packages/web', 'dev:server:watch'], {
   OPENCHAMBER_PORT: backendPort,
@@ -118,7 +126,7 @@ const api = run('api', 'bun', ['run', '--cwd', 'packages/web', 'dev:server:watch
 const vite = run(
   'vite',
   'bun',
-  ['x', 'vite', '--force', '--host', hmrHost, '--port', uiPort, '--strictPort'],
+  ['x', 'vite', ...(forceOptimize ? ['--force'] : []), '--host', hmrHost, '--port', uiPort, '--strictPort'],
   {
     OPENCHAMBER_PORT: backendPort,
     OPENCHAMBER_DISABLE_PWA_DEV: '1',

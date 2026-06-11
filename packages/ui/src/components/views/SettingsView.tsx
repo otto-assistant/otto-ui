@@ -1,4 +1,5 @@
 import React from 'react';
+import { getSettingsNavIcon } from '@/lib/settings/navIcons';
 import { cn, getModifierLabel } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -40,7 +41,6 @@ import { useDeviceInfo } from '@/lib/device';
 import { isDesktopShell, isVSCodeRuntime, isWebRuntime } from '@/lib/desktop';
 import { useI18n } from '@/lib/i18n';
 import { Icon } from "@/components/icon/Icon";
-import type { IconName } from "@/components/icon/icons";
 import { reloadOpenCodeConfiguration } from '@/stores/useAgentsStore';
 import {
   SETTINGS_PAGE_METADATA,
@@ -102,7 +102,6 @@ const pageOrder: SettingsPageSlug[] = [
   'tunnel',
 ];
 
-const SNIPPETS_SETTINGS_ICON = { icon: 'chat-thread' } as const;
 
 function buildRuntimeContext(isDesktop: boolean): SettingsRuntimeContext {
   const isVSCode = isVSCodeRuntime();
@@ -148,64 +147,11 @@ function getCurrentHistoryState(): Record<string, unknown> {
   return window.history.state;
 }
 
+// Re-exported for backwards compatibility; the implementation lives in
+// lib/settings/navIcons.ts so light consumers (command palette) don't pull
+// the whole settings view graph.
 // eslint-disable-next-line react-refresh/only-export-components
-export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
-  switch (slug) {
-    case 'projects':
-      return 'folders';
-    case 'remote-instances':
-      return 'server';
-    case 'appearance':
-      return 'palette';
-    case 'chat':
-      return 'chat-ai-3';
-    case 'magic-prompts':
-      return 'ai-generate-2';
-    case 'snippets':
-      return SNIPPETS_SETTINGS_ICON.icon;
-    case 'notifications':
-      return 'notification-3';
-    case 'shortcuts':
-      return 'command';
-    case 'sessions':
-      return 'chat-history';
-
-    case 'providers':
-      return 'cloud';
-    case 'agents':
-      return 'ai-agent';
-    case 'behavior':
-      return 'brain';
-    case 'commands':
-      return 'slash-commands-2';
-    case 'mcp':
-      return 'plug-2';
-    case 'plugins':
-      return 'code-box';
-
-    case 'skills.installed':
-      return 'book-open';
-    case 'skills.catalog':
-      return 'book';
-
-    case 'git':
-      return 'git-branch';
-
-    case 'integrations':
-      return 'external-link';
-
-    case 'usage':
-      return 'bar-chart-2';
-    case 'voice':
-      return 'mic';
-    case 'tunnel':
-      return 'global';
-    case 'home':
-      return null;
-    default:
-      return 'robot-2';
-  }
-}
+export { getSettingsNavIcon };
 
 const SettingsHome: React.FC<{ onOpen: (slug: SettingsPageSlug) => void }> = ({ onOpen }) => {
   const { t } = useI18n();
