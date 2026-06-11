@@ -11,6 +11,8 @@ import {
   clipBlock,
   deriveThreadNameFromSessionTitle,
   THINKING_MARKER,
+  extractLastAssistantTokens,
+  computeTurnTokens,
 } from './messenger-render.js';
 import { processDiscordAttachments, composePromptText } from './messenger-attachments.js';
 import {
@@ -1646,14 +1648,14 @@ export function createMessengerOpencodeBridge({
         let footer = `_done · ${duration}`;
         try {
           const dir = ctx.projectPath ? `?directory=${encodeURIComponent(ctx.projectPath)}` : '';
-          const [sessionRes, providersRes] = await Promise.all([
+          const [sessionRes, messagesRes, providersRes] = await Promise.all([
             opencodeFetch(`/session/${encodeURIComponent(sessionId)}${dir}`),
+            opencodeFetch(`/session/${encodeURIComponent(sessionId)}/message${dir}`),
             opencodeFetch(`/provider`),
           ]);
           if (sessionRes.ok) {
             const d = await sessionRes.json().catch(() => null);
             const modelInfo = d?.model;
-            const tokensInfo = d?.tokens;
 
             // Add model name
             if (modelInfo) {
@@ -1663,15 +1665,18 @@ export function createMessengerOpencodeBridge({
               if (modelStr) footer += ` ⋅ \`${modelStr}\``;
             }
 
-            // Add token count + context percentage
-            if (tokensInfo && typeof tokensInfo === 'object') {
-              const total =
-                (tokensInfo.input ?? 0) +
-                (tokensInfo.output ?? 0) +
-                (tokensInfo.reasoning ?? 0) +
-                (tokensInfo.cache?.read ?? 0) +
-                (tokensInfo.cache?.write ?? 0);
+            // Context usage = the LAST assistant turn's tokens, the same way
+            // the web UI computes it. The session object's `tokens` field is
+            // a cumulative sum over every turn (cache reads re-counted each
+            // time), which inflated the footer severalfold on long sessions.
+            let lastTurnTokens = null;
+            if (messagesRes.ok) {
+              const messages = await messagesRes.json().catch(() => null);
+              lastTurnTokens = extractLastAssistantTokens(messages);
+            }
+            const total = computeTurnTokens(lastTurnTokens);
 
+            if (total > 0) {
               // Look up context limit from provider data
               let contextLimit = null;
               if (providersRes.ok) {
@@ -1691,12 +1696,10 @@ export function createMessengerOpencodeBridge({
                 } catch {}
               }
 
-              if (total > 0) {
-                footer += ` ⋅ ${total.toLocaleString()} tokens`;
-                if (contextLimit && contextLimit > 0) {
-                  const pct = Math.round((total / contextLimit) * 100);
-                  footer += ` (${pct}%)`;
-                }
+              footer += ` ⋅ ${total.toLocaleString()} tokens`;
+              if (contextLimit && contextLimit > 0) {
+                const pct = Math.round((total / contextLimit) * 100);
+                footer += ` (${pct}% of context)`;
               }
             }
           }

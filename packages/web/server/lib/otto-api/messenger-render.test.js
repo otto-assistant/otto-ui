@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { renderPartForMessenger, renderToolPart, deriveThreadNameFromSessionTitle } from './messenger-render.js';
+import {
+  renderPartForMessenger,
+  renderToolPart,
+  deriveThreadNameFromSessionTitle,
+  extractLastAssistantTokens,
+  computeTurnTokens,
+} from './messenger-render.js';
 
 const toolPart = (overrides = {}) => ({
   type: 'tool',
@@ -185,5 +191,61 @@ describe('deriveThreadNameFromSessionTitle', () => {
     expect(withPrefix.startsWith('⬦ ')).toBe(true);
     const plain = deriveThreadNameFromSessionTitle({ sessionTitle: long, currentName: 'seed' });
     expect(plain).toHaveLength(100);
+  });
+});
+
+describe('computeTurnTokens', () => {
+  it('prefers the tokens.total field when present', () => {
+    expect(
+      computeTurnTokens({ total: 8715, input: 304, output: 62, reasoning: 29, cache: { read: 8320, write: 0 } }),
+    ).toBe(8715);
+  });
+
+  it('falls back to summing components when total is missing', () => {
+    expect(computeTurnTokens({ input: 304, output: 62, reasoning: 29, cache: { read: 8320, write: 0 } })).toBe(8715);
+  });
+
+  it('returns 0 for missing or empty tokens', () => {
+    expect(computeTurnTokens(null)).toBe(0);
+    expect(computeTurnTokens(undefined)).toBe(0);
+    expect(computeTurnTokens({})).toBe(0);
+    expect(computeTurnTokens({ input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })).toBe(0);
+  });
+});
+
+describe('extractLastAssistantTokens', () => {
+  const turn = (tokens) => ({ info: { role: 'assistant', tokens } });
+
+  it('returns the LAST assistant turn tokens, not the cumulative session total', () => {
+    // Real shape from GET /session/{id}/message: two turns where each
+    // re-reads the cached context. Session-level tokens would sum to 17,274
+    // — the true context of the last turn is 8,715.
+    const messages = [
+      { info: { role: 'user' } },
+      turn({ total: 8559, input: 8437, output: 86, reasoning: 36, cache: { read: 0, write: 0 } }),
+      { info: { role: 'user' } },
+      turn({ total: 8715, input: 304, output: 62, reasoning: 29, cache: { read: 8320, write: 0 } }),
+    ];
+    expect(computeTurnTokens(extractLastAssistantTokens(messages))).toBe(8715);
+  });
+
+  it('skips trailing assistant messages without token data', () => {
+    const messages = [
+      turn({ total: 5000, input: 5000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }),
+      turn(undefined),
+      { info: { role: 'assistant', tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } } },
+    ];
+    expect(computeTurnTokens(extractLastAssistantTokens(messages))).toBe(5000);
+  });
+
+  it('supports flat message shape without an info wrapper', () => {
+    const messages = [{ role: 'assistant', tokens: { total: 1234 } }];
+    expect(computeTurnTokens(extractLastAssistantTokens(messages))).toBe(1234);
+  });
+
+  it('returns null when there are no assistant turns with tokens', () => {
+    expect(extractLastAssistantTokens([])).toBeNull();
+    expect(extractLastAssistantTokens(null)).toBeNull();
+    expect(extractLastAssistantTokens([{ info: { role: 'user' } }])).toBeNull();
   });
 });

@@ -411,6 +411,49 @@ export function renderToolDetailVerbose(part) {
   return blocks.filter(Boolean).join('\n');
 }
 
+// ── Token accounting for the session.idle footer ───────────────────────────
+
+/**
+ * Context usage for a single assistant turn. Prefers OpenCode's own
+ * `tokens.total`; falls back to input + output + reasoning + cache.read +
+ * cache.write (the same formula the web UI's getContextUsage uses).
+ * Returns 0 for missing/empty token info.
+ */
+export function computeTurnTokens(tokens) {
+  if (!tokens || typeof tokens !== 'object') return 0;
+  if (typeof tokens.total === 'number' && tokens.total > 0) return tokens.total;
+  return (
+    (tokens.input ?? 0) +
+    (tokens.output ?? 0) +
+    (tokens.reasoning ?? 0) +
+    (tokens.cache?.read ?? 0) +
+    (tokens.cache?.write ?? 0)
+  );
+}
+
+/**
+ * Find the LAST assistant message with non-zero token info and return its
+ * tokens. This is the true context size of the most recent turn.
+ *
+ * The session object's own `tokens` field is a CUMULATIVE sum across every
+ * assistant turn (each turn re-adds the full cached context), so using it
+ * inflates counts severalfold on multi-turn sessions — never use it for
+ * context percentages.
+ *
+ * Accepts both message shapes: `{ info: { role, tokens } }` and flat
+ * `{ role, tokens }`.
+ */
+export function extractLastAssistantTokens(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const info = list[i]?.info ?? list[i];
+    if (!info || info.role !== 'assistant') continue;
+    const tokens = info.tokens;
+    if (computeTurnTokens(tokens) > 0) return tokens;
+  }
+  return null;
+}
+
 // ── Thread naming from OpenCode session titles ─────────────────────────────
 
 const DISCORD_THREAD_NAME_MAX = 100;
