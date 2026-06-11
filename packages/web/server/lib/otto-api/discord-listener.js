@@ -353,7 +353,7 @@ const KNOWN_SLASH_COMMANDS = new Set([
   'model', 'agent', 'verbosity', 'skill', 'sessions',
   'session', 'resume', 'fork', 'share', 'unshare',
   'queue', 'clear-queue', 'mention-mode',
-  'new-worktree', 'merge-worktree',
+  'new-worktree', 'merge-worktree', 'schedule',
 ]);
 
 async function handleApplicationCommand(state, interaction, broadcastEvent, bridge) {

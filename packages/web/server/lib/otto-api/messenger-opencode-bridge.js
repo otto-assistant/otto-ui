@@ -19,6 +19,7 @@ import {
   sanitizeWorktreeName,
   MERGE_CONFLICT_PROMPT,
 } from './messenger-worktrees.js';
+import { createMessengerScheduler, describeSchedule } from './messenger-scheduler.js';
 
 /**
  * Bidirectional bridge between Discord and OpenCode chat sessions.
@@ -327,9 +328,16 @@ export function createMessengerOpencodeBridge({
   getGlobalDefaults = null,
   /**
    * Optional settings reader (async () => settings object). Used for the
-   * voice-message STT configuration (sttServerUrl / sttModel / sttLanguage).
+   * voice-message STT configuration (sttServerUrl / sttModel / sttLanguage)
+   * and for resolving the bot token when scheduled tasks fire.
    */
   readSettings = null,
+  /**
+   * Optional base URL of this OpenChamber server (e.g. http://127.0.0.1:3001).
+   * Injected into new sessions so the agent can self-serve scheduling via the
+   * local HTTP API.
+   */
+  getLocalApiBaseUrl = null,
   /**
    * Optional default messenger target for web-originated OpenCode sessions.
    * Discord-originated sessions already have a bound context; this
@@ -1128,6 +1136,113 @@ export function createMessengerOpencodeBridge({
     } catch (err) {
       console.warn('[BRIDGE] Thread rename failed:', err?.message ?? err);
     }
+  }
+
+  // --- Scheduled prompts (kimaki `--send-at` parity) -------------------------
+  // Tasks persist in the bridge store; on fire they are delivered through the
+  // normal inbound pipeline so answers stream back into the Discord surface.
+  async function resolveBotToken() {
+    if (typeof readSettings !== 'function') return null;
+    try {
+      const settings = await readSettings();
+      return settings?.discord?.botToken ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function dispatchScheduledTask(task) {
+    const prompt = task.prompt;
+    const overrides = {
+      modelOverride: task.modelOverride ?? null,
+      agentOverride: task.agentOverride ?? null,
+    };
+
+    if (task.type === 'discord' && (task.threadId || task.channelId)) {
+      const token = await resolveBotToken();
+      if (!token) throw new Error('no Discord bot token configured');
+
+      if (task.threadId) {
+        // Existing thread — continue its bound session.
+        const result = await routeInbound({
+          type: 'discord',
+          token,
+          channelId: task.threadId,
+          threadId: null,
+          text: prompt,
+          projectPath: task.projectPath ?? null,
+          ...overrides,
+        });
+        if (!result.ok) throw new Error(result.error ?? 'delivery failed');
+        return;
+      }
+
+      // Channel target — start a NEW chat (starter message + thread + session),
+      // exactly like /session.
+      const starter = await sendDiscord({
+        token,
+        channelId: task.channelId,
+        content: `⏰ **Scheduled task** — ${clipBlock(prompt.split('\n')[0] ?? prompt, 160)}`,
+      });
+      const result = await routeInbound({
+        type: 'discord',
+        token,
+        channelId: task.channelId,
+        threadId: null,
+        sourceMessageId: starter.ok ? starter.id : null,
+        text: prompt,
+        projectPath: task.projectPath ?? null,
+        ...overrides,
+      });
+      if (!result.ok) throw new Error(result.error ?? 'delivery failed');
+      return;
+    }
+
+    // Project-only target (scheduled from the UI/API without a Discord
+    // surface): run a fresh OpenCode session directly. When Discord is
+    // configured, the web-session mirroring picks it up automatically.
+    if (task.projectPath) {
+      const sessionId = await createOpencodeSession({ projectPath: task.projectPath });
+      await sendOpencodePrompt({
+        sessionId,
+        projectPath: task.projectPath,
+        text: prompt,
+        modelOverride: overrides.modelOverride,
+        agentOverride: overrides.agentOverride,
+      });
+      return;
+    }
+
+    throw new Error('task has no target (thread, channel or project)');
+  }
+
+  const scheduler = createMessengerScheduler({
+    store: bridgeStore,
+    dispatch: dispatchScheduledTask,
+  });
+  scheduler.start();
+
+  /**
+   * Compact scheduling instructions injected into each new session so the
+   * agent can set up reminders / recurring runs on request (kimaki parity —
+   * kimaki documents `otto send --send-at` in its system prompt).
+   */
+  function buildSchedulingInstructions({ channelId, threadId }) {
+    const base = typeof getLocalApiBaseUrl === 'function' ? getLocalApiBaseUrl() : null;
+    if (!base) return null;
+    const api = `${base}/api/otto/messenger/schedule`;
+    return [
+      '<scheduling>',
+      'You can schedule prompts (reminders, recurring jobs) via the local OpenChamber API using bash curl.',
+      `One-time (UTC ISO, must end with Z) into THIS conversation's thread:`,
+      `  curl -s -X POST ${api} -H 'Content-Type: application/json' -d '{"when":"2026-03-01T09:00:00Z","prompt":"<detailed prompt>","threadId":"${threadId ?? ''}"}'`,
+      `Recurring (5-field cron, UTC) as a NEW chat in this channel, optionally pinning the model/agent that must answer:`,
+      `  curl -s -X POST ${api} -H 'Content-Type: application/json' -d '{"when":"0 9 * * 1","prompt":"<detailed prompt>","channelId":"${channelId ?? ''}","model":"provider/model","agent":"build"}'`,
+      `Manage: curl -s ${api}   (list) · curl -s -X DELETE ${api}/<id>   (remove) · curl -s ${api}/help   (full reference)`,
+      'All times are UTC. Never guess the user timezone — ask for the UTC equivalent. Use detailed prompts: goal, constraints, expected output, completion criteria.',
+      'Always tell the user when you scheduled something (include the id and the UTC time).',
+      '</scheduling>',
+    ].join('\n');
   }
 
   /** Resolve a thread's parent channel id via the Discord API (for /resume, /fork etc. run inside threads). */
@@ -1930,8 +2045,8 @@ export function createMessengerOpencodeBridge({
             return id ? { id, preview, when: created ? new Date(created).toLocaleString() : '' } : null;
           })
           .filter(Boolean)
-          // Hide synthetic / injected messages (memory blocks, queue echos).
-          .filter((m) => !m.preview.startsWith('<project-memory>'))
+          // Hide synthetic / injected messages (memory + scheduling blocks).
+          .filter((m) => !m.preview.startsWith('<project-memory>') && !m.preview.startsWith('<scheduling>'))
           .slice(-25);
         forkCandidatesCache.set(surfaceCacheKey, candidates);
         return candidates;
@@ -2030,6 +2145,39 @@ export function createMessengerOpencodeBridge({
         return { ok: true, path: created.path, branch: created.branch, threadId: thread.threadId };
       },
 
+      async scheduleTask({ when, prompt, model, agent }) {
+        // Inside a thread the command's channel id IS the thread id — detect
+        // it so the task targets the existing conversation; otherwise the
+        // task starts a new chat in the channel.
+        const surfaceId = threadId ?? channelId;
+        const parentId = type === 'discord'
+          ? await resolveParentChannelId({ token, channelId: surfaceId })
+          : null;
+        const isThread = Boolean(parentId);
+        return scheduler.create({
+          type,
+          botTokenHash: hash,
+          channelId: isThread ? null : surfaceId,
+          threadId: isThread ? surfaceId : null,
+          projectPath: stored?.projectPath ?? null,
+          prompt,
+          when,
+          modelOverride: model ?? null,
+          agentOverride: agent ?? null,
+          createdBy: from?.username ?? from?.id ?? null,
+        });
+      },
+
+      async listSchedules() {
+        return scheduler.list();
+      },
+
+      async deleteSchedule(id) {
+        return scheduler.delete(id);
+      },
+
+      describeSchedule,
+
       async mergeWorktree() {
         const worktreeDir = stored?.projectPath ?? null;
         if (!worktreeDir) return { ok: false, error: 'no project bound to this conversation.' };
@@ -2118,6 +2266,10 @@ export function createMessengerOpencodeBridge({
     projectLabel,
     from,
     attachments = null,
+    // Per-call model/agent pins (scheduled tasks). Highest priority —
+    // above surface overrides, project defaults and global defaults.
+    modelOverride: pinnedModel = null,
+    agentOverride: pinnedAgent = null,
   }) {
     // Attachments (kimaki parity): text files inline as <attachment> blocks,
     // images/PDFs forwarded as file parts, voice messages transcribed via the
@@ -2342,11 +2494,20 @@ export function createMessengerOpencodeBridge({
     }
 
     // Project memory (kimaki parity): a brand-new session's first prompt
-    // carries the project's MEMORY.md as persistent context.
+    // carries the project's MEMORY.md as persistent context. The scheduling
+    // instructions ride along so the agent can self-serve reminders /
+    // recurring tasks via the local API when the user asks.
     if (sessionCreated) {
+      const contextBlocks = [];
       const memory = await readProjectMemory(effectiveProjectPath);
-      if (memory) {
-        text = `<project-memory>\n${memory}\n</project-memory>\n\n${text}`;
+      if (memory) contextBlocks.push(`<project-memory>\n${memory}\n</project-memory>`);
+      const scheduling = buildSchedulingInstructions({
+        channelId,
+        threadId: effectiveThreadId,
+      });
+      if (scheduling) contextBlocks.push(scheduling);
+      if (contextBlocks.length > 0) {
+        text = `${contextBlocks.join('\n\n')}\n\n${text}`;
       }
     }
 
@@ -2405,14 +2566,14 @@ export function createMessengerOpencodeBridge({
     //      OpenChamber UI; applies to every Discord surface
     //      that lands in this project
     //   4. OpenCode default   — nothing set, server picks
-    let modelOverride = null;
-    let agentOverride = null;
+    let modelOverride = pinnedModel ?? null;
+    let agentOverride = pinnedAgent ?? null;
     try {
       const hash = tokenHash(token);
       const stableKey = targetKey({ type, channelId, threadId: effectiveThreadId });
       const surfaceRow = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
-      modelOverride = surfaceRow?.modelOverride ?? null;
-      agentOverride = surfaceRow?.agentOverride ?? null;
+      modelOverride = modelOverride ?? surfaceRow?.modelOverride ?? null;
+      agentOverride = agentOverride ?? surfaceRow?.agentOverride ?? null;
 
       // Parent channel fallback (Discord follow-ups in a thread carry a
       // different surface key than the channel where /model was first set).
@@ -2669,6 +2830,8 @@ export function createMessengerOpencodeBridge({
     initApprovalListener,
     handleApprovalDecision,
     handleThreadDeleted,
+    /** Scheduled prompts (kimaki --send-at parity) — used by the HTTP routes. */
+    scheduler,
     /** Mention-only mode (kimaki parity) — checked by the Discord listener. */
     getMentionMode,
     /** Whether a surface already has a session binding (mention mode skips bound threads). */

@@ -132,6 +132,12 @@ const COMMAND_HELP = [
     usage: '/merge-worktree',
     summary: 'Squash-merge this worktree\'s commits into the default branch',
   },
+  {
+    name: 'schedule',
+    usage: '/schedule <when> [model=p/m] [agent=name] <prompt> | list | delete <id>',
+    summary:
+      'Schedule a prompt — `when` is a UTC ISO date (2026-03-01T09:00:00Z) or cron (`0 9 * * 1`, UTC). In a thread it continues that conversation; in a channel it starts a new chat.',
+  },
 ];
 
 const KNOWN_TOP_LEVEL = new Set(COMMAND_HELP.map((c) => c.name));
@@ -750,6 +756,84 @@ export async function executeMessengerCommand({
           `📁 \`${r.path}\``,
           `🌿 Branch: \`${r.branch}\``,
           r.threadId ? `Continue in <#${r.threadId}> — everything there happens inside the worktree.` : '',
+        ].filter(Boolean).join('\n'),
+      };
+    }
+
+    case 'schedule': {
+      if (!bridgeOps?.scheduleTask || !bridgeOps?.listSchedules || !bridgeOps?.deleteSchedule) {
+        return { reply: '✗ `/schedule` is not available on this surface.' };
+      }
+      const argsText = [command.args, command.body].filter(Boolean).join('\n').trim();
+
+      if (!argsText || argsText === 'list') {
+        const tasks = await bridgeOps.listSchedules();
+        if (!tasks || tasks.length === 0) {
+          return {
+            reply: [
+              '_(no scheduled tasks)_',
+              '',
+              'Create one with `/schedule <when> [model=provider/model] [agent=name] <prompt>`:',
+              '• one-time (UTC ISO): `/schedule 2026-03-01T09:00:00Z Review open PRs`',
+              '• recurring (cron, UTC): `/schedule 0 9 * * 1 Run the weekly test suite`',
+              'In a thread the prompt continues that conversation; in a channel it starts a new chat.',
+            ].join('\n'),
+          };
+        }
+        const lines = ['**Scheduled tasks**', ''];
+        for (const t of tasks) {
+          const status = t.enabled
+            ? (t.nextRunAt ? `next ${new Date(t.nextRunAt).toISOString()}` : 'pending')
+            : `done${t.lastStatus ? ` (${t.lastStatus})` : ''}`;
+          lines.push(`\`${t.id}\` — ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : t.scheduleSpec} — _${status}_`);
+          lines.push(`> ${t.prompt.split('\n')[0].slice(0, 120)}`);
+        }
+        lines.push('', 'Remove with `/schedule delete <id>`.');
+        return { reply: lines.join('\n') };
+      }
+
+      const deleteMatch = argsText.match(/^delete\s+(\S+)$/);
+      if (deleteMatch) {
+        const removed = await bridgeOps.deleteSchedule(deleteMatch[1]);
+        return { reply: removed ? `🗑 Deleted scheduled task \`${deleteMatch[1]}\`.` : `✗ No scheduled task \`${deleteMatch[1]}\`.` };
+      }
+
+      // Grammar: <when> [model=p/m] [agent=name] <prompt…>
+      // <when> is either an ISO-UTC token or a 5-field cron expression.
+      const tokens = argsText.split(/\s+/);
+      let when = tokens.shift() ?? '';
+      if (!/^\d{4}-\d{2}-\d{2}T/.test(when)) {
+        // Assume cron: consume up to 5 fields while they look cron-ish.
+        const cronFields = [when];
+        while (cronFields.length < 5 && tokens.length > 0 && /^[\d*,/\-A-Za-z]+$/.test(tokens[0]) && !tokens[0].includes('=')) {
+          cronFields.push(tokens.shift());
+        }
+        if (cronFields.length === 5) when = cronFields.join(' ');
+        else tokens.unshift(...cronFields.slice(1));
+      }
+      let model = null;
+      let agent = null;
+      while (tokens.length > 0 && /^(model|agent)=/.test(tokens[0])) {
+        const [key, ...rest] = tokens.shift().split('=');
+        if (key === 'model') model = rest.join('=');
+        if (key === 'agent') agent = rest.join('=');
+      }
+      const prompt = tokens.join(' ').trim();
+      if (!when || !prompt) {
+        return {
+          reply: '✗ Usage: `/schedule <when> [model=provider/model] [agent=name] <prompt>` — e.g. `/schedule 0 9 * * 1 model=anthropic/claude-sonnet-4 Run the weekly tests`.',
+        };
+      }
+
+      const r = await bridgeOps.scheduleTask({ when, prompt, model, agent });
+      if (!r.ok) return { reply: `✗ Could not schedule: ${r.error ?? 'unknown error'}` };
+      const t = r.task;
+      return {
+        reply: [
+          `⏰ Scheduled \`${t.id}\` — ${t.scheduleKind === 'once' ? `once at ${t.scheduleSpec}` : `cron \`${t.scheduleSpec}\` (UTC)`}`,
+          t.threadId ? 'Target: this thread (continues the current conversation).' : 'Target: a new chat in this channel.',
+          model || agent ? `Pinned: ${[model && `model \`${model}\``, agent && `agent \`${agent}\``].filter(Boolean).join(', ')}` : '',
+          `Next run: ${t.nextRunAt ? new Date(t.nextRunAt).toISOString() : 'n/a'} · manage with \`/schedule list\` / \`/schedule delete ${t.id}\``,
         ].filter(Boolean).join('\n'),
       };
     }

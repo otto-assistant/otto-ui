@@ -83,6 +83,13 @@ export function buildSlashCommandDefinitions() {
       ],
     },
     { name: 'merge-worktree', description: 'Squash-merge this worktree into the default branch' },
+    {
+      name: 'schedule',
+      description: 'Schedule a prompt: UTC ISO date or cron — list / delete <id> to manage',
+      options: [
+        { type: STRING_OPTION, name: 'args', description: '<when> [model=p/m] [agent=name] <prompt> | list | delete <id>', required: false },
+      ],
+    },
   ].map((c) => ({ type: 1, ...c }));
 }
 

@@ -23,7 +23,7 @@ describe('buildSlashCommandDefinitions', () => {
   it('declares options only on the parameterised commands', () => {
     const withOptions = defs.filter((d) => Array.isArray(d.options) && d.options.length > 0);
     expect(withOptions.map((d) => d.name).sort()).toEqual(
-      ['fork', 'new-worktree', 'queue', 'resume', 'session', 'summary'].sort(),
+      ['fork', 'new-worktree', 'queue', 'resume', 'schedule', 'session', 'summary'].sort(),
     );
     const summary = defs.find((d) => d.name === 'summary');
     expect(summary.options[0]).toMatchObject({ name: 'topic', required: false, type: 3 });

@@ -814,6 +814,154 @@ function BridgePanel({
   );
 }
 
+function ScheduledPromptsPanel({ conn }: { conn: MessengerConnection }) {
+  const scheduledTasks = useMessengerStore((s) => s.scheduledTasks);
+  const loadScheduledTasks = useMessengerStore((s) => s.loadScheduledTasks);
+  const createScheduledTask = useMessengerStore((s) => s.createScheduledTask);
+  const deleteScheduledTask = useMessengerStore((s) => s.deleteScheduledTask);
+  const projects = useProjectsStore((s) => s.projects);
+
+  const [when, setWhen] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [model, setModel] = useState('');
+  const [agent, setAgent] = useState('');
+  const [target, setTarget] = useState('channel');
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    loadScheduledTasks();
+    const id = setInterval(() => loadScheduledTasks(), 30_000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const inputClass =
+    'w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring';
+
+  const handleCreate = async () => {
+    setSubmitError(null);
+    if (!when.trim() || !prompt.trim()) {
+      setSubmitError('Schedule and prompt are required.');
+      return;
+    }
+    const input: Parameters<typeof createScheduledTask>[0] = {
+      when: when.trim(),
+      prompt: prompt.trim(),
+      ...(model.trim() ? { model: model.trim() } : {}),
+      ...(agent.trim() ? { agent: agent.trim() } : {}),
+    };
+    if (target === 'channel') {
+      if (!conn.defaultChannelId) {
+        setSubmitError('Set a Discord Channel ID first (or pick a project target).');
+        return;
+      }
+      input.channelId = conn.defaultChannelId;
+    } else {
+      input.projectPath = target;
+    }
+    setSubmitting(true);
+    try {
+      const r = await createScheduledTask(input);
+      if (!r.ok) {
+        setSubmitError(r.error ?? 'Could not schedule');
+        return;
+      }
+      setWhen('');
+      setPrompt('');
+      setModel('');
+      setAgent('');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
+      <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
+        <RiRefreshLine className="size-3.5 text-primary" />
+        Scheduled prompts
+        <span className="text-[10px] font-normal text-muted-foreground">
+          ({scheduledTasks.filter((t) => t.enabled).length} active)
+        </span>
+      </div>
+      <div className="text-[11px] text-muted-foreground leading-snug">
+        Send a prompt later — once (UTC ISO, e.g. <code className="bg-muted px-1 rounded">2026-03-01T09:00:00Z</code>)
+        or recurring (cron in UTC, e.g. <code className="bg-muted px-1 rounded">0 9 * * 1</code>).
+        Also available from Discord via <code className="bg-muted px-1 rounded">/schedule</code>, and the
+        agent can schedule on request from inside any conversation.
+      </div>
+
+      {/* Create form */}
+      <div className="grid grid-cols-2 gap-2">
+        <input type="text" value={when} onChange={(e) => setWhen(e.target.value)} placeholder="When: ISO‑UTC or cron" className={inputClass} />
+        <select value={target} onChange={(e) => setTarget(e.target.value)} className={inputClass}>
+          <option value="channel">New chat in default channel</option>
+          {projects.map((p) => (
+            <option key={p.id} value={p.path}>
+              New session in {p.label || p.path.split('/').pop()}
+            </option>
+          ))}
+        </select>
+        <input type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder="Model (optional): provider/model" className={inputClass} />
+        <input type="text" value={agent} onChange={(e) => setAgent(e.target.value)} placeholder="Agent (optional)" className={inputClass} />
+      </div>
+      <div className="flex gap-2">
+        <input type="text" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Prompt to send" className={inputClass} />
+        <button
+          type="button"
+          onClick={handleCreate}
+          disabled={submitting}
+          className="shrink-0 rounded bg-primary px-3 py-1 text-xs text-primary-foreground disabled:opacity-50"
+        >
+          {submitting ? 'Scheduling…' : 'Schedule'}
+        </button>
+      </div>
+      {submitError && <div className="text-[11px] text-destructive">{submitError}</div>}
+
+      {/* Task list */}
+      {scheduledTasks.length > 0 && (
+        <ul className="space-y-1">
+          {scheduledTasks.map((t) => (
+            <li key={t.id} className="rounded bg-background border border-border px-2 py-1.5 text-[11px] flex items-start gap-2">
+              <span className={cn('mt-0.5', t.enabled ? 'text-primary' : 'text-muted-foreground')}>⏰</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-foreground truncate">
+                  <code className="bg-muted px-1 rounded text-[10px]">{t.id}</code>{' '}
+                  {t.scheduleKind === 'once' ? `once ${t.scheduleSpec}` : `cron ${t.scheduleSpec} (UTC)`}
+                  {' → '}
+                  {t.threadId ? `thread ${t.threadId}` : t.channelId ? `new chat in ${t.channelId}` : t.projectPath}
+                  {(t.modelOverride || t.agentOverride) && (
+                    <span className="text-muted-foreground">
+                      {' '}· {[t.modelOverride, t.agentOverride].filter(Boolean).join(', ')}
+                    </span>
+                  )}
+                </div>
+                <div className="text-muted-foreground truncate">{t.prompt}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  {t.enabled
+                    ? t.nextRunAt
+                      ? `next: ${new Date(t.nextRunAt).toLocaleString()}`
+                      : 'pending'
+                    : `done${t.lastStatus ? ` (${t.lastStatus})` : ''}`}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => deleteScheduledTask(t.id)}
+                className="text-muted-foreground hover:text-destructive"
+                title="Delete scheduled task"
+              >
+                <RiCloseLine className="size-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function DiscordSyncResults({
   channels,
   guildName,
@@ -1603,6 +1751,11 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
 
       {conn.lastSyncChannels && conn.lastSyncChannels.length > 0 && (
         <DiscordSyncResults channels={conn.lastSyncChannels} guildName={conn.guildName} />
+      )}
+
+      {/* Scheduled prompts — one-time or recurring sends into Discord/projects. */}
+      {hasToken && (hasTarget || conn.discordGuildId) && (
+        <ScheduledPromptsPanel conn={conn} />
       )}
 
       {/* Approval requests panel — only rendered when this card has a usable target. */}

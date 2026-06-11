@@ -1244,6 +1244,8 @@ async function main(options = {}) {
     readSettings: readSettingsFromDiskMigrated,
     persistSettings,
     sanitizeProjects,
+    // Lets the bridge tell agents how to reach the scheduling API locally.
+    getLocalApiBaseUrl: () => `http://127.0.0.1:${tunnelRuntimeContext.getActivePort() || port}`,
   });
   app.use('/api/otto/messenger', messengerRouter);
 
