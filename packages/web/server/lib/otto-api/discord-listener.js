@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { createDiscordModelWizard } from './discord-model-wizard.js';
 import { createDiscordCommandWizards } from './discord-command-wizards.js';
 import { registerApplicationCommands } from './discord-commands.js';
+import { resolveDiscordMentions } from './messenger-attachments.js';
 
 /**
  * Discord Gateway listener registry, keyed by bot token.
@@ -95,6 +96,37 @@ function buildAutoReply(message) {
   return null;
 }
 
+// Cached lookups for mention resolution (<@&role> / <#channel> → names).
+// Names rarely change; a small TTL cache avoids a REST call per message.
+const MENTION_LOOKUP_TTL_MS = 10 * 60_000;
+const guildRolesCache = new Map(); // guildId → { at, roles: Map<id, name> }
+const channelNameCache = new Map(); // channelId → { at, name }
+
+async function lookupGuildRoleName(state, guildId, roleId) {
+  if (!guildId || !roleId) return null;
+  const cached = guildRolesCache.get(guildId);
+  if (cached && Date.now() - cached.at < MENTION_LOOKUP_TTL_MS) {
+    return cached.roles.get(roleId) ?? null;
+  }
+  const r = await restCall(state.token, 'GET', `/guilds/${encodeURIComponent(guildId)}/roles`);
+  if (!r.ok || !Array.isArray(r.body)) return null;
+  const roles = new Map(r.body.filter((role) => role?.id).map((role) => [String(role.id), role.name ?? null]));
+  guildRolesCache.set(guildId, { at: Date.now(), roles });
+  return roles.get(roleId) ?? null;
+}
+
+async function lookupChannelName(state, channelId) {
+  if (!channelId) return null;
+  const cached = channelNameCache.get(channelId);
+  if (cached && Date.now() - cached.at < MENTION_LOOKUP_TTL_MS) {
+    return cached.name;
+  }
+  const r = await restCall(state.token, 'GET', `/channels/${encodeURIComponent(channelId)}`);
+  const name = r.ok ? r.body?.name ?? null : null;
+  channelNameCache.set(channelId, { at: Date.now(), name });
+  return name;
+}
+
 function inboundFromMessage(message) {
   return {
     updateId: message.id,
@@ -155,14 +187,60 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
   if (message.author?.bot) return;
   if (state.botId && message.author?.id === state.botId) return;
 
-  const text = typeof message.content === 'string' ? message.content.trim() : '';
+  let text = typeof message.content === 'string' ? message.content.trim() : '';
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+
+  // Mention-only mode (kimaki parity): when enabled for a channel, new
+  // conversations require an @mention of the bot. Surfaces that already
+  // have a session binding (existing threads) keep working without it.
+  if (
+    bridge?.getMentionMode &&
+    text.length > 0 &&
+    bridge.getMentionMode({ type: 'discord', token: state.token, channelId: message.channel_id })
+  ) {
+    const mentionsBot =
+      (state.botId && (Array.isArray(message.mentions) ? message.mentions : []).some((u) => u?.id === state.botId)) ||
+      (state.botId && text.includes(`<@${state.botId}>`)) ||
+      (state.botId && text.includes(`<@!${state.botId}>`));
+    const hasBinding = bridge.hasSurfaceBinding?.({
+      type: 'discord',
+      token: state.token,
+      channelId: message.channel_id,
+      threadId: null,
+    });
+    if (!mentionsBot && !hasBinding) {
+      return; // ignored by design — user must @mention the bot here
+    }
+    // Strip the bot mention from the prompt so the model doesn't see it.
+    if (state.botId) {
+      text = text.replaceAll(`<@${state.botId}>`, '').replaceAll(`<@!${state.botId}>`, '').trim();
+    }
+  }
+
+  // Resolve raw Discord mention syntax (<@id>, <@&role>, <#channel>) into
+  // human-readable names so the AI never sees opaque snowflakes.
+  if (text.length > 0 && text.includes('<')) {
+    try {
+      text = await resolveDiscordMentions({
+        text,
+        message,
+        lookupRole: (roleId) => lookupGuildRoleName(state, message.guild_id, roleId),
+        lookupChannel: (channelId) => lookupChannelName(state, channelId),
+      });
+    } catch {
+      // best-effort — fall back to the raw text
+    }
+  }
 
   // OpenCode bridge — every non-empty message that isn't a `!cmd` shortcut
   // is forwarded to OpenCode and the streaming response is mirrored back
   // into the same channel/thread. This is what makes Discord a real
-  // OpenChamber chat surface.
+  // OpenChamber chat surface. Attachment-only messages (e.g. "send message
+  // as file", screenshots, voice messages) are bridged too.
   const isBridgeable =
-    bridge && state.bridgeEnabled !== false && text.length > 0 && !text.startsWith('!');
+    bridge && state.bridgeEnabled !== false &&
+    (text.length > 0 || attachments.length > 0) &&
+    !text.startsWith('!');
   if (isBridgeable) {
     try {
       const project = state.resolveProject?.({
@@ -186,6 +264,7 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
         threadId: null,
         sourceMessageId: message.id,
         text,
+        attachments,
         projectPath: project?.path ?? null,
         projectLabel: project?.label ?? null,
         from: {
@@ -272,6 +351,9 @@ const KNOWN_SLASH_COMMANDS = new Set([
   'help', 'status', 'abort', 'new', 'undo', 'redo',
   'compact', 'summary', 'init', 'review',
   'model', 'agent', 'verbosity', 'skill', 'sessions',
+  'session', 'resume', 'fork', 'share', 'unshare',
+  'queue', 'clear-queue', 'mention-mode',
+  'new-worktree', 'merge-worktree',
 ]);
 
 async function handleApplicationCommand(state, interaction, broadcastEvent, bridge) {
@@ -325,6 +407,7 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
   // Run the command through the bridge's command pipeline.
   if (bridge?.runCommand) {
     try {
+      const user = interaction.member?.user ?? interaction.user ?? {};
       const result = await bridge.runCommand({
         type: 'discord',
         token: state.token,
@@ -333,9 +416,9 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
         commandName: cmdName,
         args,
         from: {
-          id: interaction.member?.user?.id,
-          username: interaction.member?.user?.username,
-          firstName: interaction.member?.user?.global_name ?? null,
+          id: user.id,
+          username: user.username,
+          firstName: user.global_name ?? null,
         },
       });
 

@@ -216,6 +216,8 @@ export function createMessengerSyncRouter({
           bootstrapProject: projectBootstrap,
           lookupMessengerTarget: makeLookupMessengerTarget(),
           getDefaultMessengerTarget: readSettings ? resolveDefaultDiscordTarget : null,
+          // Settings access for voice-message STT (sttServerUrl/sttModel/sttLanguage).
+          readSettings,
           // Powers the Discord `/skill` picker — list skills available to the
           // agent in the surface's bound project (or user-level when unbound).
           listSkills: ({ projectPath } = {}) => {

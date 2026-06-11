@@ -9,6 +9,7 @@ export default defineConfig({
       // `bun:sqlite` / `bun:test`, which Node-based vitest cannot load.
       // Run them with `bun test` instead.
       'server/lib/otto-api/messenger-opencode-bridge.test.js',
+      'server/lib/otto-api/messenger-worktrees.test.js',
       'server/lib/git/getStatus.cap.test.js',
     ],
   },

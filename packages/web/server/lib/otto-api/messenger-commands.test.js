@@ -12,7 +12,7 @@ function makeMutators() {
   };
 }
 
-async function run(text, { binding = null, surfaceMutators = makeMutators(), opencode = {} } = {}) {
+async function run(text, { binding = null, surfaceMutators = makeMutators(), opencode = {}, bridgeOps = null } = {}) {
   const command = parseLeadingCommand(text);
   const result = await executeMessengerCommand({
     command,
@@ -20,6 +20,7 @@ async function run(text, { binding = null, surfaceMutators = makeMutators(), ope
     opencode,
     binding,
     surfaceMutators,
+    bridgeOps,
   });
   return { result, surfaceMutators };
 }
@@ -179,5 +180,203 @@ describe('/abort and /model still resolve as known commands', () => {
   it('unknown commands pass through (null) for OpenCode to handle', async () => {
     const { result } = await run('/changelog');
     expect(result).toBeNull();
+  });
+});
+
+describe('/abort clears the queue (kimaki parity)', () => {
+  it('reports cleared queued messages on a successful abort', async () => {
+    const clearQueue = vi.fn(async () => 2);
+    const { result } = await run('/abort', {
+      binding: { sessionId: 'ses-1' },
+      opencode: { abortSession: async () => ({ ok: true }) },
+      bridgeOps: { clearQueue },
+    });
+    expect(clearQueue).toHaveBeenCalled();
+    expect(result.reply).toContain('Cleared 2 queued messages');
+  });
+});
+
+describe('/share and /unshare', () => {
+  it('returns the public URL on success', async () => {
+    const { result } = await run('/share', {
+      binding: { sessionId: 'ses-1', projectPath: '/p' },
+      opencode: { shareSession: async () => ({ ok: true, url: 'https://opencode.ai/share/abc' }) },
+    });
+    expect(result.reply).toContain('https://opencode.ai/share/abc');
+  });
+  it('requires an active session', async () => {
+    const { result } = await run('/share', { binding: { sessionId: null } });
+    expect(result.reply).toMatch(/No session/);
+  });
+  it('unshare revokes the link', async () => {
+    const { result } = await run('/unshare', {
+      binding: { sessionId: 'ses-1' },
+      opencode: { unshareSession: async () => ({ ok: true }) },
+    });
+    expect(result.reply).toMatch(/revoked/);
+  });
+});
+
+describe('/queue and /clear-queue', () => {
+  it('queues when a response is running', async () => {
+    const queueMessage = vi.fn(async () => ({ ok: true, queued: true, position: 1 }));
+    const { result } = await run('/queue Now add tests', {
+      binding: { sessionId: 'ses-1' },
+      bridgeOps: { queueMessage },
+    });
+    expect(queueMessage).toHaveBeenCalledWith({ text: 'Now add tests' });
+    expect(result.reply).toContain('queued (position: 1)');
+  });
+  it('sends immediately when idle', async () => {
+    const queueMessage = vi.fn(async () => ({ ok: true, queued: false }));
+    const { result } = await run('/queue do it', { bridgeOps: { queueMessage } });
+    expect(result.reply).toMatch(/Sent immediately/);
+  });
+  it('requires a message argument', async () => {
+    const { result } = await run('/queue', { bridgeOps: { queueMessage: vi.fn() } });
+    expect(result.reply).toMatch(/Usage/);
+  });
+  it('clear-queue reports the number of cleared messages', async () => {
+    const { result } = await run('/clear-queue', { bridgeOps: { clearQueue: async () => 3 } });
+    expect(result.reply).toContain('Cleared 3 queued messages');
+  });
+  it('clear-queue handles an empty queue', async () => {
+    const { result } = await run('/clear-queue', { bridgeOps: { clearQueue: async () => 0 } });
+    expect(result.reply).toMatch(/already empty/);
+  });
+});
+
+describe('/mention-mode', () => {
+  it('toggles on and explains the behaviour', async () => {
+    const { result } = await run('/mention-mode', {
+      bridgeOps: { toggleMentionMode: async () => true },
+    });
+    expect(result.reply).toContain('**enabled**');
+  });
+  it('toggles off', async () => {
+    const { result } = await run('/mention-mode', {
+      bridgeOps: { toggleMentionMode: async () => false },
+    });
+    expect(result.reply).toContain('**disabled**');
+  });
+});
+
+describe('/session', () => {
+  it('starts a session with the given prompt', async () => {
+    const startSession = vi.fn(async () => ({ ok: true, threadId: 'th-9' }));
+    const { result } = await run('/session Add user authentication', {
+      bridgeOps: { startSession },
+    });
+    expect(startSession).toHaveBeenCalledWith({ prompt: 'Add user authentication' });
+    expect(result.reply).toContain('Starting OpenCode session');
+    expect(result.reply).toContain('<#th-9>');
+  });
+  it('requires a prompt', async () => {
+    const { result } = await run('/session', { bridgeOps: { startSession: vi.fn() } });
+    expect(result.reply).toMatch(/Usage/);
+  });
+});
+
+describe('/resume', () => {
+  it('lists candidates with no args', async () => {
+    const { result } = await run('/resume', {
+      bridgeOps: {
+        resumeSession: vi.fn(),
+        listResumeCandidates: async () => [
+          { id: 'ses-a', title: 'Fix login', when: 'today' },
+        ],
+      },
+    });
+    expect(result.reply).toContain('Resume a session');
+    expect(result.reply).toContain('Fix login');
+    expect(result.reply).toContain('ses-a');
+  });
+  it('resumes by reference', async () => {
+    const resumeSession = vi.fn(async () => ({ ok: true, threadId: 'th-1', title: 'Fix login', loadedNote: 'Loaded 4 messages.' }));
+    const { result } = await run('/resume 1', {
+      bridgeOps: { resumeSession, listResumeCandidates: vi.fn() },
+    });
+    expect(resumeSession).toHaveBeenCalledWith({ ref: '1' });
+    expect(result.reply).toContain('Session resumed');
+    expect(result.reply).toContain('<#th-1>');
+  });
+});
+
+describe('/fork', () => {
+  const binding = { sessionId: 'ses-1', projectPath: '/p' };
+  it('requires a session', async () => {
+    const { result } = await run('/fork', { bridgeOps: { forkSession: vi.fn(), listForkCandidates: vi.fn() } });
+    expect(result.reply).toMatch(/No session/);
+  });
+  it('lists user messages with no args', async () => {
+    const { result } = await run('/fork', {
+      binding,
+      bridgeOps: {
+        forkSession: vi.fn(),
+        listForkCandidates: async () => [{ preview: 'Add auth', when: 'now' }],
+      },
+    });
+    expect(result.reply).toContain('Fork this session');
+    expect(result.reply).toContain('Add auth');
+  });
+  it('forks from the selected message', async () => {
+    const forkSession = vi.fn(async () => ({ ok: true, threadId: 'th-2' }));
+    const { result } = await run('/fork 2', {
+      binding,
+      bridgeOps: { forkSession, listForkCandidates: vi.fn() },
+    });
+    expect(forkSession).toHaveBeenCalledWith({ index: 2 });
+    expect(result.reply).toContain('Session forked');
+  });
+  it('rejects a non-numeric pick', async () => {
+    const { result } = await run('/fork abc', {
+      binding,
+      bridgeOps: { forkSession: vi.fn(), listForkCandidates: vi.fn() },
+    });
+    expect(result.reply).toMatch(/Usage/);
+  });
+});
+
+describe('worktree commands', () => {
+  it('new-worktree reports the created worktree + thread', async () => {
+    const newWorktree = vi.fn(async () => ({ ok: true, path: '/wt/feature', branch: 'feature', threadId: 'th-3' }));
+    const { result } = await run('/new-worktree feature', {
+      binding: { projectPath: '/p' },
+      bridgeOps: { newWorktree },
+    });
+    expect(newWorktree).toHaveBeenCalledWith({ name: 'feature' });
+    expect(result.reply).toContain('🌳 Worktree');
+    expect(result.reply).toContain('/wt/feature');
+  });
+  it('new-worktree requires a bound project', async () => {
+    const { result } = await run('/new-worktree feature', {
+      binding: { projectPath: null },
+      bridgeOps: { newWorktree: vi.fn() },
+    });
+    expect(result.reply).toMatch(/not bound to a project/);
+  });
+  it('merge-worktree reports a successful merge', async () => {
+    const { result } = await run('/merge-worktree', {
+      binding: { projectPath: '/wt/feature' },
+      bridgeOps: { mergeWorktree: async () => ({ ok: true, summary: 'Merged `feature` into `main` @ abc123 (2 commits squashed).' }) },
+    });
+    expect(result.reply).toContain('Merged `feature` into `main`');
+  });
+  it('merge-worktree surfaces conflicts with guidance', async () => {
+    const { result } = await run('/merge-worktree', {
+      binding: { projectPath: '/wt/feature' },
+      bridgeOps: { mergeWorktree: async () => ({ ok: false, conflict: true, error: 'rebase conflicts', promptSent: true }) },
+    });
+    expect(result.reply).toContain('Merge conflict detected');
+    expect(result.reply).toContain('asked the model');
+  });
+});
+
+describe('/help lists the kimaki-parity commands', () => {
+  it('mentions queue, fork, share, resume, worktrees and mention-mode', async () => {
+    const { result } = await run('/help');
+    for (const cmd of ['/queue', '/fork', '/share', '/resume', '/new-worktree', '/merge-worktree', '/mention-mode', '/clear-queue', '/session']) {
+      expect(result.reply).toContain(cmd);
+    }
   });
 });
