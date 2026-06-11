@@ -43,6 +43,53 @@ export function buildSlashCommandDefinitions() {
     { name: 'verbosity', description: 'Choose how much Otto streams back (this chat or everywhere)' },
     { name: 'skill', description: 'Pick an available skill and hand it to the agent' },
     { name: 'sessions', description: 'List recent OpenCode sessions for this project' },
+    {
+      name: 'session',
+      description: 'Start a new OpenCode session (and thread) with a prompt',
+      options: [
+        { type: STRING_OPTION, name: 'prompt', description: 'The task description for the AI', required: true },
+      ],
+    },
+    {
+      name: 'resume',
+      description: 'Resume a previous session in a new thread',
+      options: [
+        { type: STRING_OPTION, name: 'session', description: 'List number or session id (leave empty to list)', required: false },
+      ],
+    },
+    {
+      name: 'fork',
+      description: 'Branch the session from an earlier user message',
+      options: [
+        { type: STRING_OPTION, name: 'message', description: 'List number from /fork (leave empty to list)', required: false },
+      ],
+    },
+    { name: 'share', description: 'Generate a public URL for the current session' },
+    { name: 'unshare', description: 'Revoke the public URL for the current session' },
+    {
+      name: 'queue',
+      description: 'Queue a message to send after the current response finishes',
+      options: [
+        { type: STRING_OPTION, name: 'message', description: 'The message to queue', required: true },
+      ],
+    },
+    { name: 'clear-queue', description: 'Clear all queued messages for this conversation' },
+    { name: 'mention-mode', description: 'Toggle mention-only mode for this channel' },
+    {
+      name: 'new-worktree',
+      description: 'Create an isolated git worktree and work there in a new thread',
+      options: [
+        { type: STRING_OPTION, name: 'name', description: 'Worktree name (derived automatically when omitted)', required: false },
+      ],
+    },
+    { name: 'merge-worktree', description: 'Squash-merge this worktree into the default branch' },
+    {
+      name: 'schedule',
+      description: 'Schedule a prompt: UTC ISO date or cron — list / delete <id> to manage',
+      options: [
+        { type: STRING_OPTION, name: 'args', description: '<when> [model=p/m] [agent=name] <prompt> | list | delete <id>', required: false },
+      ],
+    },
   ].map((c) => ({ type: 1, ...c }));
 }
 

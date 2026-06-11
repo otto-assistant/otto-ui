@@ -80,6 +80,12 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Pre-transform the main entry's import graph at server start so the
+    // browser's first request hits warm transforms instead of paying the
+    // per-module transform cost serially through the request waterfall.
+    warmup: {
+      clientFiles: ['./src/main.tsx'],
+    },
     proxy: {
       '/auth': {
         target: `http://127.0.0.1:${process.env.OPENCHAMBER_PORT || 3001}`,

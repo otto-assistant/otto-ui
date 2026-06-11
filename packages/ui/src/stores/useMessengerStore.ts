@@ -169,6 +169,25 @@ export interface DiscordHistoryMessage {
   attachmentCount: number;
 }
 
+export interface ScheduledPromptTask {
+  id: string;
+  type: string;
+  channelId: string | null;
+  threadId: string | null;
+  projectPath: string | null;
+  prompt: string;
+  scheduleKind: 'once' | 'cron';
+  scheduleSpec: string;
+  modelOverride: string | null;
+  agentOverride: string | null;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+  lastStatus: string | null;
+  enabled: number | boolean;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 export type MessengerApprovalDecision = 'approve' | 'deny';
 
 export interface MessengerApproval {
@@ -249,6 +268,9 @@ interface MessengerState {
    */
   bridgeVerbosity: Partial<Record<MessengerType, MessengerVerbosity | null>>;
 
+  /** Scheduled prompts (one-time UTC or cron) managed by the bridge. */
+  scheduledTasks: ScheduledPromptTask[];
+
   addConnection: (type: MessengerType) => void;
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
   removeConnection: (type: MessengerType) => void;
@@ -265,6 +287,17 @@ interface MessengerState {
   diagnoseDiscord: () => Promise<boolean>;
   refreshBridgeStatus: (type?: MessengerType) => Promise<void>;
   setBridgeVerbosity: (type: MessengerType, level: MessengerVerbosity) => Promise<boolean>;
+  loadScheduledTasks: () => Promise<void>;
+  createScheduledTask: (input: {
+    when: string;
+    prompt: string;
+    threadId?: string;
+    channelId?: string;
+    projectPath?: string;
+    model?: string;
+    agent?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  deleteScheduledTask: (id: string) => Promise<boolean>;
   saveDiscordConfig: () => Promise<void>;
   startDiscordListener: () => Promise<boolean>;
   stopDiscordListener: () => Promise<boolean>;
@@ -340,6 +373,7 @@ export const useMessengerStore = create<MessengerState>()(
       approvals: [],
       bridgeStatus: { enabled: false, bindings: [], active: [] },
       bridgeVerbosity: {},
+      scheduledTasks: [],
 
       addConnection: (type) => {
         const existing = get().connections.find((c) => c.type === type);
@@ -724,6 +758,46 @@ export const useMessengerStore = create<MessengerState>()(
           });
         } catch {
           // ignore
+        }
+      },
+
+      loadScheduledTasks: async () => {
+        try {
+          const res = await fetch('/api/otto/messenger/schedule');
+          const data = (await res.json()) as { ok: boolean; tasks?: ScheduledPromptTask[] };
+          if (data.ok && Array.isArray(data.tasks)) {
+            set({ scheduledTasks: data.tasks });
+          }
+        } catch {
+          // ignore — background refresh
+        }
+      },
+
+      createScheduledTask: async (input) => {
+        try {
+          const data = await postJson<{ ok: boolean; error?: string }>(
+            '/api/otto/messenger/schedule',
+            { ...input, createdBy: 'ui' },
+          );
+          if (data.ok) {
+            void get().loadScheduledTasks();
+          }
+          return data;
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : 'request failed' };
+        }
+      },
+
+      deleteScheduledTask: async (id) => {
+        try {
+          const res = await fetch(`/api/otto/messenger/schedule/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+          });
+          const data = (await res.json()) as { ok: boolean };
+          void get().loadScheduledTasks();
+          return Boolean(data.ok);
+        } catch {
+          return false;
         }
       },
 

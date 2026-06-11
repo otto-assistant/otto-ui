@@ -20,10 +20,28 @@ describe('buildSlashCommandDefinitions', () => {
     }
   });
 
-  it('only /summary takes an option (the optional topic string)', () => {
+  it('declares options only on the parameterised commands', () => {
     const withOptions = defs.filter((d) => Array.isArray(d.options) && d.options.length > 0);
-    expect(withOptions.map((d) => d.name)).toEqual(['summary']);
-    expect(withOptions[0].options[0]).toMatchObject({ name: 'topic', required: false, type: 3 });
+    expect(withOptions.map((d) => d.name).sort()).toEqual(
+      ['fork', 'new-worktree', 'queue', 'resume', 'schedule', 'session', 'summary'].sort(),
+    );
+    const summary = defs.find((d) => d.name === 'summary');
+    expect(summary.options[0]).toMatchObject({ name: 'topic', required: false, type: 3 });
+    const session = defs.find((d) => d.name === 'session');
+    expect(session.options[0]).toMatchObject({ name: 'prompt', required: true, type: 3 });
+    const queue = defs.find((d) => d.name === 'queue');
+    expect(queue.options[0]).toMatchObject({ name: 'message', required: true, type: 3 });
+  });
+
+  it('includes the extended command set', () => {
+    const names = defs.map((d) => d.name);
+    for (const name of [
+      'session', 'resume', 'fork', 'share', 'unshare',
+      'queue', 'clear-queue', 'mention-mode',
+      'new-worktree', 'merge-worktree',
+    ]) {
+      expect(names).toContain(name);
+    }
   });
 });
 

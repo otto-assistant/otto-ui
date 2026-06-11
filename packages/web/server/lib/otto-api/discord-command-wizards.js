@@ -32,8 +32,8 @@ const SKILL_PICK_PREFIX = 'otto-skill-pick:';
 
 const VERBOSITY_DESCRIPTIONS = {
   quiet: 'Final answer only — hides reasoning + tool activity',
-  normal: 'Answer + reasoning + tool calls (default)',
-  verbose: 'Everything in normal, plus full tool input/output',
+  normal: 'Compact feed: tool names + thinking marker (default)',
+  verbose: 'Full detail: commands, diffs, outputs, reasoning',
 };
 
 const PREFIXES = [

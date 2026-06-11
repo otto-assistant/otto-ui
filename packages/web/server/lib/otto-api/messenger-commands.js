@@ -3,7 +3,7 @@
  *
  * Mirrors the slash commands available in the OpenChamber web chat input
  * (`/undo`, `/redo`, `/compact`, `/summary`, `/init`, `/review` + dynamic
- * project commands) and adds the kimaki-inspired session-control set
+ * project commands) and adds the session-control set
  * (`/abort`, `/new`, `/model`, `/agent`, `/sessions`, `/status`, `/help`).
  *
  * Why text-prefix instead of native Discord slash commands:
@@ -34,8 +34,8 @@ import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js'
 
 const VERBOSITY_DESCRIPTIONS = {
   quiet: 'final answer only — hides reasoning and tool activity',
-  normal: 'answer + full reasoning + tool calls with input/output visible (default)',
-  verbose: 'same as normal, but tool details wrapped under click-to-reveal spoilers',
+  normal: 'compact activity feed — tool names + a thinking marker, no payloads (default)',
+  verbose: 'full detail — commands, diffs, outputs and reasoning, formatted for reading',
 };
 
 // Commands we recognise. The `usage` text is shown by /help so order matters.
@@ -81,7 +81,7 @@ const COMMAND_HELP = [
     name: 'verbosity',
     usage: '/verbosity [quiet | normal | verbose | default <level> | reset]',
     summary:
-      'How much Otto streams back. `verbose` shows every tool call + result under a spoiler. `default <level>` sets the messenger-wide default.',
+      'How much Otto streams back: `quiet` = answer only, `normal` = tool names + thinking marker, `verbose` = full commands/diffs/outputs. `default <level>` sets the messenger-wide default.',
   },
   {
     name: 'skill',
@@ -94,6 +94,50 @@ const COMMAND_HELP = [
     usage: '/sessions',
     summary: 'List recent OpenCode sessions for this project',
   },
+  {
+    name: 'session',
+    usage: '/session <prompt>',
+    summary: 'Start a brand-new session (and thread) with the given prompt',
+  },
+  {
+    name: 'resume',
+    usage: '/resume [n | session-id]',
+    summary: 'Resume a previous session — `/resume` lists candidates, `/resume 2` opens one in a new thread',
+  },
+  {
+    name: 'fork',
+    usage: '/fork [n]',
+    summary: 'Branch from an earlier user message — `/fork` lists messages, `/fork 2` forks in a new thread',
+  },
+  { name: 'share', usage: '/share', summary: 'Generate a public URL for the current session' },
+  { name: 'unshare', usage: '/unshare', summary: 'Revoke the public URL for the current session' },
+  {
+    name: 'queue',
+    usage: '/queue <message>',
+    summary: 'Queue a message to send automatically after the current response finishes',
+  },
+  { name: 'clear-queue', usage: '/clear-queue', summary: 'Clear all queued messages for this conversation' },
+  {
+    name: 'mention-mode',
+    usage: '/mention-mode',
+    summary: 'Toggle mention-only mode — when on, new sessions in this channel need an @mention',
+  },
+  {
+    name: 'new-worktree',
+    usage: '/new-worktree [name]',
+    summary: 'Create an isolated git worktree + branch and work there in a new thread',
+  },
+  {
+    name: 'merge-worktree',
+    usage: '/merge-worktree',
+    summary: 'Squash-merge this worktree\'s commits into the default branch',
+  },
+  {
+    name: 'schedule',
+    usage: '/schedule <when> [model=p/m] [agent=name] <prompt> | list | delete <id>',
+    summary:
+      'Schedule a prompt — `when` is a UTC ISO date (2026-03-01T09:00:00Z) or cron (`0 9 * * 1`, UTC). In a thread it continues that conversation; in a channel it starts a new chat.',
+  },
 ];
 
 const KNOWN_TOP_LEVEL = new Set(COMMAND_HELP.map((c) => c.name));
@@ -102,7 +146,7 @@ const KNOWN_TOP_LEVEL = new Set(COMMAND_HELP.map((c) => c.name));
  * Extract the leading slash command from a user message. Returns `null`
  * when the message is a normal prompt.
  *
- * Mirrors kimaki's extractLeadingOpencodeCommand — only the FIRST non-empty
+ * Only the FIRST non-empty
  * line matters. Multi-line messages where the first line is a `/cmd` are
  * still treated as commands so users can paste context after a `/init`.
  */
@@ -179,6 +223,7 @@ export async function executeMessengerCommand({
   opencode,
   binding,
   surfaceMutators,
+  bridgeOps = null,
 }) {
   if (!command || !KNOWN_TOP_LEVEL.has(command.name)) {
     // Pass through — let OpenCode itself decide (e.g. user-defined `/changelog`).
@@ -243,7 +288,13 @@ export async function executeMessengerCommand({
     case 'abort': {
       if (!sessionId) return { reply: '✗ No session is active on this conversation.' };
       const r = await opencode.abortSession(sessionId, binding?.projectPath ?? undefined);
-      return { reply: r.ok ? `✓ Aborted session \`${sessionId}\`.` : `✗ Could not abort: ${r.error ?? 'unknown error'}` };
+      // Aborting clears any queued messages for the surface.
+      let clearedNote = '';
+      if (r.ok && bridgeOps?.clearQueue) {
+        const cleared = await bridgeOps.clearQueue().catch(() => 0);
+        if (cleared > 0) clearedNote = ` Cleared ${cleared} queued message${cleared === 1 ? '' : 's'}.`;
+      }
+      return { reply: r.ok ? `🛑 Aborted session \`${sessionId}\`.${clearedNote}` : `✗ Could not abort: ${r.error ?? 'unknown error'}` };
     }
 
     case 'new': {
@@ -565,6 +616,240 @@ export async function executeMessengerCommand({
         ]),
       );
       return { reply: lines.join('\n') };
+    }
+
+    case 'session': {
+      const prompt = [command.args, command.body].filter(Boolean).join('\n').trim();
+      if (!prompt) {
+        return { reply: '✗ Usage: `/session <prompt>` — e.g. `/session Add user authentication`.' };
+      }
+      if (!bridgeOps?.startSession) {
+        return { reply: '✗ `/session` is not available on this surface.' };
+      }
+      const r = await bridgeOps.startSession({ prompt });
+      return {
+        reply: r.ok
+          ? `🚀 Starting OpenCode session${r.threadId ? ` in <#${r.threadId}>` : ''}…`
+          : `✗ Could not start session: ${r.error ?? 'unknown error'}`,
+      };
+    }
+
+    case 'resume': {
+      if (!bridgeOps?.resumeSession || !bridgeOps?.listResumeCandidates) {
+        return { reply: '✗ `/resume` is not available on this surface.' };
+      }
+      const ref = command.args.trim();
+      if (!ref) {
+        const candidates = await bridgeOps.listResumeCandidates().catch(() => []);
+        if (!candidates || candidates.length === 0) {
+          return { reply: '_(no resumable sessions found for this project)_' };
+        }
+        const lines = ['**Resume a session** — reply `/resume <n>` or `/resume <session-id>`', ''];
+        candidates.slice(0, 10).forEach((s, i) => {
+          lines.push(`**${i + 1}.** ${s.title ?? '(untitled)'} — _${s.when ?? ''}_ \`${s.id}\``);
+        });
+        return { reply: lines.join('\n') };
+      }
+      const r = await bridgeOps.resumeSession({ ref });
+      if (!r.ok) return { reply: `✗ Could not resume: ${r.error ?? 'unknown error'}` };
+      return {
+        reply: `✓ Session resumed${r.title ? `: **${r.title}**` : ''}${r.threadId ? ` — continue in <#${r.threadId}>` : ''}.${r.loadedNote ? ` ${r.loadedNote}` : ''}`,
+      };
+    }
+
+    case 'fork': {
+      if (!sessionId) return { reply: '✗ No session is active on this conversation — nothing to fork.' };
+      if (!bridgeOps?.forkSession || !bridgeOps?.listForkCandidates) {
+        return { reply: '✗ `/fork` is not available on this surface.' };
+      }
+      const arg = command.args.trim();
+      if (!arg) {
+        const candidates = await bridgeOps.listForkCandidates().catch(() => []);
+        if (!candidates || candidates.length === 0) {
+          return { reply: '_(no user messages found in this session to fork from)_' };
+        }
+        const lines = ['**Fork this session** — reply `/fork <n>` to branch from that message', ''];
+        candidates.slice(0, 25).forEach((m, i) => {
+          lines.push(`**${i + 1}.** ${m.preview} — _${m.when ?? ''}_`);
+        });
+        return { reply: lines.join('\n') };
+      }
+      const index = Number.parseInt(arg, 10);
+      if (!Number.isFinite(index) || index < 1) {
+        return { reply: '✗ Usage: `/fork <n>` where `n` comes from the `/fork` list.' };
+      }
+      const r = await bridgeOps.forkSession({ index });
+      if (!r.ok) return { reply: `✗ Fork failed: ${r.error ?? 'unknown error'}` };
+      return {
+        reply: `✓ Session forked${r.threadId ? ` — continue in <#${r.threadId}>` : ''}. The fork continues as if later messages were never sent.`,
+      };
+    }
+
+    case 'share': {
+      if (!sessionId) return { reply: '✗ No session is active on this conversation.' };
+      const r = await opencode.shareSession(sessionId, binding?.projectPath ?? undefined);
+      if (!r.ok) return { reply: `✗ Share failed: ${r.error ?? 'unknown error'}` };
+      return {
+        reply: r.url
+          ? `🔗 Session shared: ${r.url}\n_Anyone with the link can view the full transcript._`
+          : '✓ Session shared, but OpenCode returned no URL.',
+      };
+    }
+
+    case 'unshare': {
+      if (!sessionId) return { reply: '✗ No session is active on this conversation.' };
+      const r = await opencode.unshareSession(sessionId, binding?.projectPath ?? undefined);
+      return { reply: r.ok ? '✓ Share link revoked.' : `✗ Unshare failed: ${r.error ?? 'unknown error'}` };
+    }
+
+    case 'queue': {
+      const text = [command.args, command.body].filter(Boolean).join('\n').trim();
+      if (!text) return { reply: '✗ Usage: `/queue <message>`' };
+      if (!bridgeOps?.queueMessage) {
+        return { reply: '✗ `/queue` is not available on this surface.' };
+      }
+      const r = await bridgeOps.queueMessage({ text });
+      if (!r.ok) return { reply: `✗ Could not queue: ${r.error ?? 'unknown error'}` };
+      return {
+        reply: r.queued
+          ? `✓ Message queued (position: ${r.position}). It will be sent after the current response.`
+          : `» Sent immediately — no response is currently running.`,
+      };
+    }
+
+    case 'clear-queue': {
+      if (!bridgeOps?.clearQueue) {
+        return { reply: '✗ `/clear-queue` is not available on this surface.' };
+      }
+      const cleared = await bridgeOps.clearQueue().catch(() => 0);
+      return {
+        reply: cleared > 0
+          ? `🗑 Cleared ${cleared} queued message${cleared === 1 ? '' : 's'}.`
+          : '_(the queue was already empty)_',
+      };
+    }
+
+    case 'mention-mode': {
+      if (!bridgeOps?.toggleMentionMode) {
+        return { reply: '✗ `/mention-mode` is not available on this surface.' };
+      }
+      const enabled = await bridgeOps.toggleMentionMode();
+      return {
+        reply: enabled
+          ? '✓ Mention mode **enabled** — new sessions in this channel now require an @mention of the bot. Existing threads keep working without it.'
+          : '✓ Mention mode **disabled** — the bot responds to every message in this channel again.',
+      };
+    }
+
+    case 'new-worktree': {
+      if (!bridgeOps?.newWorktree) {
+        return { reply: '✗ `/new-worktree` is not available on this surface.' };
+      }
+      if (!binding?.projectPath) {
+        return { reply: '✗ This channel is not bound to a project yet — send a message first so I can set one up.' };
+      }
+      const r = await bridgeOps.newWorktree({ name: command.args.trim() || null });
+      if (!r.ok) return { reply: `✗ Worktree failed: ${r.error ?? 'unknown error'}` };
+      return {
+        reply: [
+          `🌳 Worktree: \`${r.branch}\``,
+          `📁 \`${r.path}\``,
+          `🌿 Branch: \`${r.branch}\``,
+          r.threadId ? `Continue in <#${r.threadId}> — everything there happens inside the worktree.` : '',
+        ].filter(Boolean).join('\n'),
+      };
+    }
+
+    case 'schedule': {
+      if (!bridgeOps?.scheduleTask || !bridgeOps?.listSchedules || !bridgeOps?.deleteSchedule) {
+        return { reply: '✗ `/schedule` is not available on this surface.' };
+      }
+      const argsText = [command.args, command.body].filter(Boolean).join('\n').trim();
+
+      if (!argsText || argsText === 'list') {
+        const tasks = await bridgeOps.listSchedules();
+        if (!tasks || tasks.length === 0) {
+          return {
+            reply: [
+              '_(no scheduled tasks)_',
+              '',
+              'Create one with `/schedule <when> [model=provider/model] [agent=name] <prompt>`:',
+              '• one-time (UTC ISO): `/schedule 2026-03-01T09:00:00Z Review open PRs`',
+              '• recurring (cron, UTC): `/schedule 0 9 * * 1 Run the weekly test suite`',
+              'In a thread the prompt continues that conversation; in a channel it starts a new chat.',
+            ].join('\n'),
+          };
+        }
+        const lines = ['**Scheduled tasks**', ''];
+        for (const t of tasks) {
+          const status = t.enabled
+            ? (t.nextRunAt ? `next ${new Date(t.nextRunAt).toISOString()}` : 'pending')
+            : `done${t.lastStatus ? ` (${t.lastStatus})` : ''}`;
+          lines.push(`\`${t.id}\` — ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : t.scheduleSpec} — _${status}_`);
+          lines.push(`> ${t.prompt.split('\n')[0].slice(0, 120)}`);
+        }
+        lines.push('', 'Remove with `/schedule delete <id>`.');
+        return { reply: lines.join('\n') };
+      }
+
+      const deleteMatch = argsText.match(/^delete\s+(\S+)$/);
+      if (deleteMatch) {
+        const removed = await bridgeOps.deleteSchedule(deleteMatch[1]);
+        return { reply: removed ? `🗑 Deleted scheduled task \`${deleteMatch[1]}\`.` : `✗ No scheduled task \`${deleteMatch[1]}\`.` };
+      }
+
+      // Grammar: <when> [model=p/m] [agent=name] <prompt…>
+      // <when> is either an ISO-UTC token or a 5-field cron expression.
+      const tokens = argsText.split(/\s+/);
+      let when = tokens.shift() ?? '';
+      if (!/^\d{4}-\d{2}-\d{2}T/.test(when)) {
+        // Assume cron: consume up to 5 fields while they look cron-ish.
+        const cronFields = [when];
+        while (cronFields.length < 5 && tokens.length > 0 && /^[\d*,/\-A-Za-z]+$/.test(tokens[0]) && !tokens[0].includes('=')) {
+          cronFields.push(tokens.shift());
+        }
+        if (cronFields.length === 5) when = cronFields.join(' ');
+        else tokens.unshift(...cronFields.slice(1));
+      }
+      let model = null;
+      let agent = null;
+      while (tokens.length > 0 && /^(model|agent)=/.test(tokens[0])) {
+        const [key, ...rest] = tokens.shift().split('=');
+        if (key === 'model') model = rest.join('=');
+        if (key === 'agent') agent = rest.join('=');
+      }
+      const prompt = tokens.join(' ').trim();
+      if (!when || !prompt) {
+        return {
+          reply: '✗ Usage: `/schedule <when> [model=provider/model] [agent=name] <prompt>` — e.g. `/schedule 0 9 * * 1 model=anthropic/claude-sonnet-4 Run the weekly tests`.',
+        };
+      }
+
+      const r = await bridgeOps.scheduleTask({ when, prompt, model, agent });
+      if (!r.ok) return { reply: `✗ Could not schedule: ${r.error ?? 'unknown error'}` };
+      const t = r.task;
+      return {
+        reply: [
+          `⏰ Scheduled \`${t.id}\` — ${t.scheduleKind === 'once' ? `once at ${t.scheduleSpec}` : `cron \`${t.scheduleSpec}\` (UTC)`}`,
+          t.threadId ? 'Target: this thread (continues the current conversation).' : 'Target: a new chat in this channel.',
+          model || agent ? `Pinned: ${[model && `model \`${model}\``, agent && `agent \`${agent}\``].filter(Boolean).join(', ')}` : '',
+          `Next run: ${t.nextRunAt ? new Date(t.nextRunAt).toISOString() : 'n/a'} · manage with \`/schedule list\` / \`/schedule delete ${t.id}\``,
+        ].filter(Boolean).join('\n'),
+      };
+    }
+
+    case 'merge-worktree': {
+      if (!bridgeOps?.mergeWorktree) {
+        return { reply: '✗ `/merge-worktree` is not available on this surface.' };
+      }
+      const r = await bridgeOps.mergeWorktree();
+      if (r.ok) return { reply: `✓ ${r.summary ?? 'Worktree merged.'}` };
+      if (r.conflict) {
+        return {
+          reply: `⚠ Merge conflict detected — ${r.error ?? ''}\n${r.promptSent ? 'I asked the model to resolve the conflicts; once it finishes run `/merge-worktree` again.' : 'Resolve the conflicts, then run `/merge-worktree` again.'}`,
+        };
+      }
+      return { reply: `✗ Merge failed: ${r.error ?? 'unknown error'}` };
     }
 
     default:

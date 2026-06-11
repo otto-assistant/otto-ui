@@ -625,3 +625,93 @@ describe('discord inbound mirroring', () => {
     expect(beforeReply).toBeGreaterThan(0);
   });
 });
+
+describe('thread renaming from OpenCode session titles', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push([String(url), init]);
+      const method = init.method ?? 'GET';
+      if (String(url).includes('discord.com') && method === 'GET') {
+        // The bound surface is a public thread named with the user's prompt.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'thread-9', type: 11, name: 'fix the auth' }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  const sessionUpdated = (bridge, title) =>
+    bridge._handleGlobalEvent({
+      payload: {
+        type: 'session.updated',
+        properties: { info: { id: 'ses-9', title } },
+      },
+    });
+
+  function makeRenameBridge() {
+    return makeBridge({
+      lookupMessengerTarget: () => ({
+        type: 'discord',
+        token: 'bot-token',
+        targetKey: 'thread-9',
+        threadId: null,
+        projectPath: '/p',
+      }),
+    });
+  }
+
+  it('renames the bound thread when OpenCode generates a real title', async () => {
+    const bridge = makeRenameBridge();
+    await sessionUpdated(bridge, 'Fix auth bug');
+    await flush();
+    const patches = calls.filter(([url, init]) => init.method === 'PATCH' && url.includes('/channels/thread-9'));
+    expect(patches).toHaveLength(1);
+    expect(JSON.parse(patches[0][1].body)).toEqual({ name: 'Fix auth bug' });
+  });
+
+  it('ignores the "New session -" placeholder title', async () => {
+    const bridge = makeRenameBridge();
+    await sessionUpdated(bridge, 'New session - 2026-06-11T13:00:00.000Z');
+    await flush();
+    expect(calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(0);
+  });
+
+  it('renames at most once per distinct title (Discord rate-limit protection)', async () => {
+    const bridge = makeRenameBridge();
+    await sessionUpdated(bridge, 'Fix auth bug');
+    await sessionUpdated(bridge, 'Fix auth bug');
+    await sessionUpdated(bridge, 'Fix auth bug');
+    await flush();
+    expect(calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('never renames a plain text channel', async () => {
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push([String(url), init]);
+      if ((init.method ?? 'GET') === 'GET' && String(url).includes('discord.com')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'chan-1', type: 0, name: 'general' }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+    const bridge = makeBridge({
+      lookupMessengerTarget: () => ({ type: 'discord', token: 'bot-token', targetKey: 'chan-1', threadId: null, projectPath: '/p' }),
+    });
+    await sessionUpdated(bridge, 'Fix auth bug');
+    await flush();
+    expect(calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(0);
+  });
+});

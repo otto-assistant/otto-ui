@@ -6,9 +6,13 @@
  * streaming/session plumbing and imports the renderers from here.
  *
  * Verbosity (`quiet` | `normal` | `verbose`) controls how much detail is
- * mirrored back — see `messenger-verbosity.js`. Reasoning and tool details are
- * always shown inline (never hidden behind a Discord spoiler), so thoughts and
- * tool usage are visible as-is without a click-to-reveal step.
+ * mirrored back — see `messenger-verbosity.js`:
+ *   - `quiet`   — final assistant text only
+ *   - `normal`  — compact activity feed: tool one-liners (name + short
+ *                 summary) and a `thinking…` process marker, no payloads
+ *   - `verbose` — everything, formatted for readability: commands and
+ *                 outputs in fenced blocks, edits as diffs, reasoning as
+ *                 quoted text
  */
 
 import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
@@ -27,59 +31,6 @@ export function shortFileName(p) {
 export function clipBlock(s, limit) {
   if (!s) return '';
   return s.length > limit ? s.slice(0, limit - 1) + '…' : s;
-}
-
-/**
- * Wrap arbitrary text in a Discord spoiler containing a code block so it stays
- * collapsed until clicked. Returns '' for empty input.
- *
- * The `||```\n…\n```||` form (markers flush against the fence) is the shape
- * Discord renders reliably for spoilered code blocks.
- */
-export function spoilerBlock(raw, limit = 700) {
-  const text = String(raw ?? '').trim();
-  if (!text) return '';
-  // Neutralise any embedded code-fence so it can't terminate ours early.
-  const safe = clipBlock(text.replace(/```/g, "'''"), limit);
-  return `||\`\`\`\n${safe}\n\`\`\`||`;
-}
-
-/** Build the shared tool detail lines (input + output/error) for a tool part. */
-export function buildToolDetailLines(part) {
-  const state = part.state ?? {};
-  const lines = [];
-  const input = state.input;
-  if (input && typeof input === 'object' && Object.keys(input).length > 0) {
-    let json;
-    try {
-      json = JSON.stringify(input, null, 2);
-    } catch {
-      json = String(input);
-    }
-    lines.push(`input: ${clipBlock(json, 700)}`);
-  }
-  if (state.status === 'completed' && typeof state.output === 'string' && state.output.trim()) {
-    lines.push(`output: ${clipBlock(state.output.trim(), 700)}`);
-  } else if (state.status === 'error' && state.error) {
-    lines.push(`error: ${clipBlock(String(state.error).trim(), 700)}`);
-  }
-  return lines;
-}
-
-/** Build the collapsed detail spoiler (input + output/error) for a tool part. */
-export function toolDetailSpoiler(part) {
-  const lines = buildToolDetailLines(part);
-  if (lines.length === 0) return '';
-  return spoilerBlock(lines.join('\n\n'), 1500);
-}
-
-/** Build inline detail (input + output/error) for a tool part, no spoiler. */
-export function toolDetailInline(part) {
-  const lines = buildToolDetailLines(part);
-  if (lines.length === 0) return '';
-  // Neutralise any embedded code-fence so it can't terminate ours early.
-  const safe = clipBlock(lines.join('\n\n').replace(/```/g, "'''"), 1500);
-  return '```\n' + safe + '\n```';
 }
 
 /**
@@ -203,15 +154,19 @@ export function renderPermissionContext(permission) {
   }
 }
 
+/** The compact "the model is thinking" process marker used at `normal`. */
+export const THINKING_MARKER = '┣ _thinking…_';
+
 /**
  * Render an OpenCode message part for a Discord surface. Returns
  * `null` when nothing should be posted (e.g. empty text, pending tools).
  *
-  * `verbosity` controls how much detail is mirrored:
-  *   - `quiet`   — only assistant text (reasoning/tool parts return null here)
-  *   - `normal`  — text + full reasoning text + tool one-liner with input/output inline
-  *   - `verbose` — same as normal; reasoning + tool details are shown inline (never
-  *                 hidden behind a collapsed Discord spoiler)
+ * `verbosity` controls how much detail is mirrored:
+ *   - `quiet`   — only assistant text (reasoning/tool parts return null here)
+ *   - `normal`  — tool one-liners (name + short summary, errors inline) and a
+ *                 `thinking…` marker without the reasoning text
+ *   - `verbose` — full detail, formatted for readability: reasoning as quoted
+ *                 text, commands/diffs/outputs in fenced blocks
  */
 export function renderPartForMessenger(part, verbosity = DEFAULT_VERBOSITY) {
   if (!part || typeof part !== 'object') return null;
@@ -220,10 +175,17 @@ export function renderPartForMessenger(part, verbosity = DEFAULT_VERBOSITY) {
   if (part.type === 'reasoning') {
     if (level === 'quiet') return null;
     if (!part.text || !String(part.text).trim()) return null;
-    // normal + verbose: show full reasoning text inline (never hidden behind a spoiler).
-    // Neutralise any embedded code-fence so it can't terminate ours early.
-    const text = clipBlock(String(part.text).trim().replace(/```/g, "'''"), 1500);
-    return `┣ thinking\n\`\`\`\n${text}\n\`\`\``;
+    if (level === 'normal') {
+      // Process indicator only — the thought content stays private at normal.
+      return THINKING_MARKER;
+    }
+    // verbose: the actual thoughts, quoted so they read as an aside.
+    const text = clipBlock(String(part.text).trim(), 1200);
+    const quoted = text
+      .split('\n')
+      .map((line) => `> ${escapeMd(line)}`)
+      .join('\n');
+    return `┣ **thinking**\n${quoted}`;
   }
 
   if (part.type === 'text') {
@@ -328,16 +290,198 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
     icon = '📖';
   }
 
-  let line = `${icon} ${tool}${titlePart}`;
+  let line = `${icon} **${tool}**${titlePart}`;
   if (summary) line += ` ${summary}`;
   if (status === 'error') {
     const errMsg = part.state?.error ?? '';
     if (errMsg) line += ` — ${escapeMd(clipBlock(String(errMsg), 200))}`;
   }
 
-  // `normal` + `verbose` both show the one-liner + full input/output inline
-  // (never hidden behind a click-to-reveal Discord spoiler).
-  const detail = toolDetailInline(part);
+  // `normal` stops at the one-liner: just the tool name + compact summary.
+  // `verbose` appends a readable, tool-specific detail block.
+  const level = normalizeVerbosity(verbosity);
+  if (level !== 'verbose') return line;
+
+  const detail = renderToolDetailVerbose(part);
   if (detail) line += `\n${detail}`;
   return line;
+}
+
+/** Neutralise embedded code fences + clip — for safe ```fenced``` embedding. */
+function fenceSafe(raw, limit) {
+  return clipBlock(String(raw ?? '').trim().replace(/```/g, "'''"), limit);
+}
+
+function fence(raw, { lang = '', limit = 700 } = {}) {
+  const safe = fenceSafe(raw, limit);
+  if (!safe) return '';
+  return `\`\`\`${lang}\n${safe}\n\`\`\``;
+}
+
+/** Render a readable diff block from an edit tool's old/new strings. */
+function renderEditDiff(input, { maxLinesPerSide = 12, lineLimit = 120 } = {}) {
+  const oldStr = typeof input.oldString === 'string' ? input.oldString : '';
+  const newStr = typeof input.newString === 'string' ? input.newString : '';
+  if (!oldStr && !newStr) return '';
+  const sideLines = (s, prefix) => {
+    const lines = s ? s.replace(/```/g, "'''").split('\n') : [];
+    const shown = lines.slice(0, maxLinesPerSide).map((l) => `${prefix} ${clipBlock(l, lineLimit)}`);
+    if (lines.length > maxLinesPerSide) shown.push(`${prefix} … (${lines.length - maxLinesPerSide} more lines)`);
+    return shown;
+  };
+  const body = [...sideLines(oldStr, '-'), ...sideLines(newStr, '+')].join('\n');
+  return body ? `\`\`\`diff\n${body}\n\`\`\`` : '';
+}
+
+/**
+ * Tool-specific detail rendering for `verbose` — formatted for readability
+ * instead of a raw `input:/output:` JSON dump:
+ *   - bash/shell  → command in a ```bash``` block, output in a plain block
+ *   - edit family → a real ```diff``` block (- old / + new)
+ *   - write       → the new file content (clipped)
+ *   - read/search → a short output preview
+ *   - other tools → pretty-printed input JSON + output preview
+ * Errors always close the block with a ⚠ fenced message.
+ */
+export function renderToolDetailVerbose(part) {
+  const tool = String(part.tool ?? 'tool');
+  const state = part.state ?? {};
+  const input = state.input ?? {};
+  const output = typeof state.output === 'string' ? state.output.trim() : '';
+  const blocks = [];
+
+  switch (tool) {
+    case 'bash':
+    case 'shell': {
+      // The one-liner summary already shows single-line commands; only
+      // fence the command when it spans multiple lines.
+      const cmd = (input.command ?? '').toString();
+      if (cmd.includes('\n')) blocks.push(fence(cmd, { lang: 'bash', limit: 600 }));
+      if (output) blocks.push(fence(output, { limit: 700 }));
+      break;
+    }
+    case 'edit':
+    case 'multiedit':
+    case 'apply_patch': {
+      const diff = renderEditDiff(input);
+      if (diff) blocks.push(diff);
+      break;
+    }
+    case 'write': {
+      const content = typeof input.content === 'string' ? input.content : '';
+      if (content) blocks.push(fence(content, { limit: 500 }));
+      break;
+    }
+    case 'read':
+    case 'list':
+    case 'ls':
+    case 'glob':
+    case 'grep':
+    case 'webfetch':
+    case 'fetch': {
+      // Search/read results: a short preview keeps the thread readable.
+      if (output) blocks.push(fence(output, { limit: 350 }));
+      break;
+    }
+    case 'task':
+    case 'subagent':
+    case 'todowrite':
+    case 'todoread':
+      // Subtasks stream their own parts; todo lists are summarised already.
+      break;
+    default: {
+      if (input && typeof input === 'object' && Object.keys(input).length > 0) {
+        let json;
+        try {
+          json = JSON.stringify(input, null, 2);
+        } catch {
+          json = String(input);
+        }
+        blocks.push(fence(json, { lang: 'json', limit: 500 }));
+      }
+      if (output) blocks.push(fence(output, { limit: 600 }));
+      break;
+    }
+  }
+
+  if (state.status === 'error' && state.error) {
+    blocks.push(`⚠ **error**\n${fence(String(state.error), { limit: 400 })}`);
+  }
+
+  return blocks.filter(Boolean).join('\n');
+}
+
+// ── Token accounting for the session.idle footer ───────────────────────────
+
+/**
+ * Context usage for a single assistant turn. Prefers OpenCode's own
+ * `tokens.total`; falls back to input + output + reasoning + cache.read +
+ * cache.write (the same formula the web UI's getContextUsage uses).
+ * Returns 0 for missing/empty token info.
+ */
+export function computeTurnTokens(tokens) {
+  if (!tokens || typeof tokens !== 'object') return 0;
+  if (typeof tokens.total === 'number' && tokens.total > 0) return tokens.total;
+  return (
+    (tokens.input ?? 0) +
+    (tokens.output ?? 0) +
+    (tokens.reasoning ?? 0) +
+    (tokens.cache?.read ?? 0) +
+    (tokens.cache?.write ?? 0)
+  );
+}
+
+/**
+ * Find the LAST assistant message with non-zero token info and return its
+ * tokens. This is the true context size of the most recent turn.
+ *
+ * The session object's own `tokens` field is a CUMULATIVE sum across every
+ * assistant turn (each turn re-adds the full cached context), so using it
+ * inflates counts severalfold on multi-turn sessions — never use it for
+ * context percentages.
+ *
+ * Accepts both message shapes: `{ info: { role, tokens } }` and flat
+ * `{ role, tokens }`.
+ */
+export function extractLastAssistantTokens(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const info = list[i]?.info ?? list[i];
+    if (!info || info.role !== 'assistant') continue;
+    const tokens = info.tokens;
+    if (computeTurnTokens(tokens) > 0) return tokens;
+  }
+  return null;
+}
+
+// ── Thread naming from OpenCode session titles ─────────────────────────────
+
+const DISCORD_THREAD_NAME_MAX = 100;
+
+/** Thread-name prefixes that must survive a rename (worktree marker etc.). */
+const PRESERVED_THREAD_PREFIXES = ['⬦ ', 'Fork: ', 'Resume: '];
+
+/**
+ * Decide whether (and how) to rename a Discord thread based on an OpenCode
+ * session title. Rules:
+ *   - skip empty titles and OpenCode's "New session - …" placeholder
+ *   - preserve a recognised prefix from the current thread name
+ *   - cap at Discord's 100-char thread-name limit
+ *   - return undefined when nothing should change
+ */
+export function deriveThreadNameFromSessionTitle({ sessionTitle, currentName }) {
+  const trimmed = typeof sessionTitle === 'string' ? sessionTitle.trim() : '';
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^new session\s*-/i.test(trimmed)) {
+    return undefined;
+  }
+  const current = typeof currentName === 'string' ? currentName : '';
+  const matchedPrefix = PRESERVED_THREAD_PREFIXES.find((p) => current.startsWith(p)) ?? '';
+  const candidate = `${matchedPrefix}${trimmed}`.slice(0, DISCORD_THREAD_NAME_MAX);
+  if (candidate === current) {
+    return undefined;
+  }
+  return candidate;
 }

@@ -6,12 +6,11 @@
  *
  *   - `quiet`   — only the assistant's final text. Reasoning markers and tool
  *                 activity are suppressed entirely.
- *   - `normal`  — assistant text + reasoning markers + a compact one-liner per
- *                 tool run (the historical default).
- *   - `verbose` — everything `normal` shows, PLUS the full tool input and the
- *                 tool output/error for each call, wrapped in a Discord spoiler
- *                 (`||…||`) so the details stay collapsed "under a cut" until a
- *                 reader expands them.
+ *   - `normal`  — compact activity feed (the default): one short line per tool
+ *                 run (name + summary, errors inline) and a `thinking…` process
+ *                 marker — no payloads, no reasoning text.
+ *   - `verbose` — everything, formatted for readability: commands and outputs
+ *                 in fenced blocks, edits as diffs, reasoning as quoted text.
  *
  * Both the OpenChamber settings UI and the in-chat `/verbosity` command write to
  * the same store, so the level can be changed from either side.
