@@ -1773,4 +1773,12 @@ export const settingsDict = {
   "settings.promptTemplates.page.toast.created": "Plantilla creada",
   "settings.promptTemplates.page.toast.createFailed": "Error al crear la plantilla",
   "settings.promptTemplates.page.toast.saveUnexpectedError": "Ocurrió un error inesperado al guardar",
+  "settings.otto.upgrade.title": "Actualización",
+  "settings.otto.upgrade.currentVersionLabel": "Versión actual",
+  "settings.otto.upgrade.availableLabel": "Disponible",
+  "settings.otto.upgrade.upToDate": "Otto está actualizado",
+  "settings.otto.upgrade.checking": "Comprobando...",
+  "settings.otto.upgrade.checkAction": "Buscar actualizaciones",
+  "settings.otto.upgrade.upgrading": "Actualizando...",
+  "settings.otto.upgrade.upgradeAction": "Actualizar a {version}",
 } as const;

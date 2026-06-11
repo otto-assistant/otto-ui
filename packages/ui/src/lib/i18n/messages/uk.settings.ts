@@ -1773,4 +1773,12 @@ export const settingsDict = {
   "settings.promptTemplates.page.toast.created": "Шаблон створено",
   "settings.promptTemplates.page.toast.createFailed": "Не вдалося створити шаблон",
   "settings.promptTemplates.page.toast.saveUnexpectedError": "Сталася неочікувана помилка під час збереження",
+  "settings.otto.upgrade.title": "Оновлення",
+  "settings.otto.upgrade.currentVersionLabel": "Поточна версія",
+  "settings.otto.upgrade.availableLabel": "Доступно",
+  "settings.otto.upgrade.upToDate": "Otto має найновішу версію",
+  "settings.otto.upgrade.checking": "Перевірка...",
+  "settings.otto.upgrade.checkAction": "Перевірити оновлення",
+  "settings.otto.upgrade.upgrading": "Оновлення...",
+  "settings.otto.upgrade.upgradeAction": "Оновити до {version}",
 } as const;

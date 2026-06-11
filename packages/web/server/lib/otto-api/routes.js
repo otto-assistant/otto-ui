@@ -2,7 +2,14 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { AGENT_DIR, readConfigLayers } from '../opencode/shared.js';
-import { parseOttoJsonObject, readOttoCliVersion, runOttoCli, stripOttoLogLines } from './otto-cli.js';
+import {
+  parseOttoJsonObject,
+  readOttoCliVersion,
+  runCommandAsync,
+  runOttoCli,
+  runOttoCliAsync,
+  stripOttoLogLines,
+} from './otto-cli.js';
 import { getAllTasks, getTaskById, createTask, updateTask, deleteTask } from './task-store.js';
 import { receiveExternalTask, handleDiscordTaskUpdate, notifyDiscordRelay } from './task-sync-bridge.js';
 
@@ -74,6 +81,38 @@ const collectDiskAgentNames = (workingDirectory) => {
   return [...names].sort((a, b) => a.localeCompare(b));
 };
 
+const parsePipeDelimitedTasks = (lines) => {
+  const headerIndex = lines.findIndex((line) => /^id\s*\|/i.test(line));
+  if (headerIndex === -1) {
+    return null;
+  }
+
+  const columns = lines[headerIndex].split('|').map((cell) => cell.trim());
+  const tasks = [];
+
+  for (const line of lines.slice(headerIndex + 1)) {
+    const cells = line.split('|').map((cell) => cell.trim());
+    if (cells.length < 2) {
+      continue;
+    }
+
+    const task = {};
+    columns.forEach((column, index) => {
+      if (!column) {
+        return;
+      }
+      const value = cells[index] ?? '';
+      task[column] = value === '-' ? null : value;
+    });
+
+    if (task.id) {
+      tasks.push(task);
+    }
+  }
+
+  return tasks;
+};
+
 const parseScheduledTasksPayload = (raw) => {
   const cleaned = stripOttoLogLines(raw);
   const lowered = cleaned.toLowerCase();
@@ -100,6 +139,13 @@ const parseScheduledTasksPayload = (raw) => {
 
   if (lines.length === 0) {
     return { tasks: [], source: 'otto-none', raw: cleaned };
+  }
+
+  // `otto task list` prints a pipe-delimited table:
+  // id | status | message | channelId | projectName | folderName | timeRemaining | firesAt | cron
+  const tableTasks = parsePipeDelimitedTasks(lines);
+  if (tableTasks) {
+    return { tasks: tableTasks, source: 'otto-table', raw: cleaned };
   }
 
   return {
@@ -173,6 +219,78 @@ export const registerOttoApiRoutes = (app, dependencies) => {
       console.error('[OttoAPI] Failed to assemble status:', error);
       return res.status(500).json({ error: 'Failed to build Otto status snapshot' });
     }
+  });
+
+  const extractSemver = (value) => {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const match = value.match(/\d+\.\d+\.\d+(?:[-+][\w.]+)?/);
+    return match ? match[0] : null;
+  };
+
+  // Checks npm for a newer Otto CLI release (mirrors the Discord bot's
+  // /upgrade-and-restart version check).
+  router.get('/upgrade/check', async (_req, res) => {
+    const installedRaw = readOttoCliVersion();
+    const current = extractSemver(installedRaw);
+
+    if (!current) {
+      return res.status(503).json({
+        current: null,
+        latest: null,
+        updateAvailable: false,
+        error: 'Otto CLI is not installed or not on PATH',
+      });
+    }
+
+    const { code, combined } = await runCommandAsync(
+      'npm',
+      ['view', '@otto-assistant/otto', 'version'],
+      { timeoutMs: 20_000 },
+    );
+
+    const latest = code === 0 ? extractSemver(combined) : null;
+
+    return res.json({
+      current,
+      latest,
+      updateAvailable: Boolean(latest && latest !== current),
+      ...(latest ? {} : { notice: 'Unable to determine latest published version' }),
+    });
+  });
+
+  // Upgrades the Otto CLI to the latest release (web equivalent of the
+  // Discord /upgrade-and-restart command).
+  router.post('/upgrade', async (_req, res) => {
+    const previousVersion = extractSemver(readOttoCliVersion());
+
+    if (!previousVersion) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Otto CLI is not installed or not on PATH',
+      });
+    }
+
+    const { code, combined } = await runOttoCliAsync(['upgrade'], { timeoutMs: 180_000 });
+
+    if (code !== 0) {
+      return res.status(500).json({
+        ok: false,
+        previousVersion,
+        error: stripOttoLogLines(combined) || 'otto upgrade failed',
+      });
+    }
+
+    const currentVersion = extractSemver(readOttoCliVersion()) ?? previousVersion;
+
+    return res.json({
+      ok: true,
+      previousVersion,
+      currentVersion,
+      upgraded: currentVersion !== previousVersion,
+      output: stripOttoLogLines(combined),
+    });
   });
 
   router.get('/agents', async (req, res) => {
@@ -408,6 +526,98 @@ export const registerOttoApiRoutes = (app, dependencies) => {
       return res.json({ ok: true, task: updated });
     }
     return res.status(400).json({ error: 'action (create|update) required' });
+  });
+
+  // Lists scheduled tasks managed by the Otto CLI (`otto send --send-at`),
+  // mirroring the Discord /tasks command.
+  router.get('/schedule/cli', async (req, res) => {
+    const args = ['task', 'list'];
+    if (req.query?.all === 'true' || req.query?.all === '1') {
+      args.push('--all');
+    }
+
+    const { code, combined } = await runOttoCliAsync(args, { timeoutMs: 30_000 });
+
+    if (code === null) {
+      return res.status(503).json({
+        tasks: [],
+        source: 'otto-unavailable',
+        error: 'Otto CLI is not installed or not on PATH',
+      });
+    }
+
+    if (code !== 0) {
+      return res.status(500).json({
+        tasks: [],
+        source: 'otto-error',
+        error: stripOttoLogLines(combined) || 'otto task list failed',
+      });
+    }
+
+    return res.json(parseScheduledTasksPayload(combined));
+  });
+
+  // Schedules a one-shot or cron prompt through the Otto CLI
+  // (web equivalent of `otto send --send-at`).
+  router.post('/schedule/cli', async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const prompt = asNonEmptyString(body.prompt || body.title);
+    const sendAt = asNonEmptyString(body.sendAt || body.dueAt);
+
+    if (!prompt || !sendAt) {
+      return res.status(400).json({ error: 'prompt and sendAt are required' });
+    }
+
+    const args = buildSendScheduledArgs({
+      prompt,
+      sendAt,
+      channelId: typeof body.channelId === 'string' ? body.channelId : undefined,
+      projectDirectory: typeof body.projectDirectory === 'string' ? body.projectDirectory : undefined,
+    });
+
+    const { code, combined } = await runOttoCliAsync(args, { timeoutMs: 60_000 });
+
+    if (code === null) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Otto CLI is not installed or not on PATH',
+      });
+    }
+
+    if (code !== 0) {
+      return res.status(500).json({
+        ok: false,
+        error: stripOttoLogLines(combined) || 'otto send --send-at failed',
+      });
+    }
+
+    return res.status(201).json({ ok: true, output: stripOttoLogLines(combined) });
+  });
+
+  // Cancels a scheduled Otto CLI task (mirrors the Delete button on /tasks).
+  router.delete('/schedule/cli/:id', async (req, res) => {
+    const taskId = asNonEmptyString(req.params?.id);
+    if (!taskId) {
+      return res.status(400).json({ error: 'task id is required' });
+    }
+
+    const { code, combined } = await runOttoCliAsync(['task', 'delete', taskId], { timeoutMs: 30_000 });
+
+    if (code === null) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Otto CLI is not installed or not on PATH',
+      });
+    }
+
+    if (code !== 0) {
+      return res.status(500).json({
+        ok: false,
+        error: stripOttoLogLines(combined) || 'otto task delete failed',
+      });
+    }
+
+    return res.json({ ok: true, id: taskId });
   });
 
   router.get('/memory/search', (req, res) => {

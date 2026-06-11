@@ -1773,4 +1773,12 @@ export const settingsDict = {
   'settings.promptTemplates.page.toast.created': '템플릿이 생성되었습니다',
   'settings.promptTemplates.page.toast.createFailed': '템플릿 생성 실패',
   'settings.promptTemplates.page.toast.saveUnexpectedError': '저장 중 예기치 않은 오류가 발생했습니다',
+  'settings.otto.upgrade.title': '업그레이드',
+  'settings.otto.upgrade.currentVersionLabel': '현재 버전',
+  'settings.otto.upgrade.availableLabel': '사용 가능',
+  'settings.otto.upgrade.upToDate': 'Otto가 최신 버전입니다',
+  'settings.otto.upgrade.checking': '확인 중...',
+  'settings.otto.upgrade.checkAction': '업데이트 확인',
+  'settings.otto.upgrade.upgrading': '업그레이드 중...',
+  'settings.otto.upgrade.upgradeAction': '{version}(으)로 업그레이드',
 } as const;

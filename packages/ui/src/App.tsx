@@ -13,6 +13,7 @@ import { useSessionStatusBootstrap } from '@/hooks/useSessionStatusBootstrap';
 import { useRouter } from '@/hooks/useRouter';
 import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
 import { useOttoWebSocket } from '@/hooks/useOttoWebSocket';
+import { useOttoSync } from '@/hooks/useOttoSync';
 import { useMessengerBridgeToasts } from '@/hooks/useMessengerBridgeToasts';
 import { useWebNotificationStream } from '@/hooks/useWebNotificationStream';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
@@ -675,6 +676,8 @@ function App({ apis }: AppProps) {
   // Activate the Otto realtime WS so messenger.bridge.* events, approval
   // decisions and incoming Telegram/Discord messages reach the UI.
   useOttoWebSocket();
+  // Refresh tasks / dashboard / memory / persona stores on matching realtime events.
+  useOttoSync();
   // Surface bridge events as user-visible toasts.
   useMessengerBridgeToasts();
   useWebNotificationStream({ enabled: embeddedBackgroundWorkEnabled });
