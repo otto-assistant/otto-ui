@@ -39,7 +39,6 @@ import {
   DEFAULT_UPSTREAM_STALL_TIMEOUT_MS,
   UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS,
 } from './lib/event-stream/index.js';
-import { createOttoEventsWebSocketRuntime } from './lib/otto-api/websocket.js';
 import { createFsSearchRuntime as createFsSearchRuntimeFactory } from './lib/fs/search.js';
 import { createOpenCodeLifecycleRuntime } from './lib/opencode/lifecycle.js';
 import { createOpenCodeEnvRuntime } from './lib/opencode/env-runtime.js';
@@ -78,12 +77,11 @@ import { createPushRuntime } from './lib/notifications/push-runtime.js';
 import { createNotificationTemplateRuntime } from './lib/notifications/template-runtime.js';
 import { createGracefulShutdownRuntime } from './lib/opencode/shutdown-runtime.js';
 import { createProjectConfigRuntime } from './lib/projects/project-config.js';
-import { getAgentConfig, updateAgent } from './lib/opencode/agents.js';
-import { registerOttoApiRoutes } from './lib/otto-api/routes.js';
-import { createDiscordSyncRouter } from './lib/otto-api/discord-sync.js';
 import { createMessengerSyncRouter } from './lib/otto-api/messenger-sync.js';
-import { createMempalaceBridgeRouter } from './lib/otto-api/mempalace-bridge.js';
-import { broadcast as ottoEventsBroadcast } from './lib/otto-api/websocket.js';
+import {
+  createOttoEventsWebSocketRuntime,
+  broadcast as ottoEventsBroadcast,
+} from './lib/otto-api/websocket.js';
 import { createRemoteClientAuthRuntime } from './lib/client-auth/remote-clients.js';
 import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
@@ -1225,11 +1223,8 @@ async function main(options = {}) {
     writeSseEvent,
   });
 
-  // MemPalace memory bridge
-  app.use('/api/otto/mempalace', createMempalaceBridgeRouter());
-
-  // Messenger sync routes (Discord + Telegram). The bridge plumbing lets
-  // listeners forward inbound messages to OpenCode and mirror streamed
+  // Discord messenger bridge routes. The bridge plumbing lets the Discord
+  // listener forward inbound messages to OpenCode and mirror streamed
   // responses back into the originating channel/thread.
   const { router: messengerRouter, discordListener } = createMessengerSyncRouter({
     // Bridge approval button clicks to both the WS clients (UI) and
@@ -1251,26 +1246,6 @@ async function main(options = {}) {
     sanitizeProjects,
   });
   app.use('/api/otto/messenger', messengerRouter);
-
-  // Discord ↔ Web UI sync routes
-  app.use('/api/otto/discord', createDiscordSyncRouter({
-    broadcastEvent: (type, data) => ottoEventsBroadcast(type, data),
-  }));
-
-  registerOttoApiRoutes(app, {
-    fetchAgentsSnapshot,
-    getAgentConfig,
-    updateAgent,
-    refreshOpenCodeAfterConfigChange,
-    clientReloadDelayMs: CLIENT_RELOAD_DELAY_MS,
-    resolveOptionalProjectDirectory,
-    resolveProjectDirectory,
-    openchamberVersion: OPENCHAMBER_VERSION,
-    getRuntimeSlice: () => ({
-      isOpenCodeReady,
-      openCodePort,
-    }),
-  });
 
   const previewProxyRuntime = createPreviewProxyRuntime({
     crypto,
@@ -1364,7 +1339,7 @@ async function main(options = {}) {
       // ignore — defaults to empty
     }
 
-    const resolveProject = ({ channelId, guildId }) => {
+    const resolveProject = () => {
       if (projects.length === 1) {
         const p = projects[0];
         return p?.path ? { path: p.path, label: p.label ?? p.path } : null;

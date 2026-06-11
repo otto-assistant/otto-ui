@@ -1,7 +1,7 @@
 {
-  "name": "otto-ui",
-  "version": "0.1.0",
-  "description": "Otto UI — agent-centric web interface for your AI assistant (based on OpenChamber)",
+  "name": "openchamber-monorepo",
+  "version": "1.12.3",
+  "description": "OpenChamber monorepo workspace for web, ui, and desktop runtimes",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.5",
@@ -12,25 +12,21 @@
     "node": ">=20.0.0"
   },
   "keywords": [
-    "otto",
     "opencode",
     "ai",
-    "agent",
-    "assistant",
-    "openchamber"
+    "coding",
+    "openchamber",
+    "cli"
   ],
   "author": "Bohdan Triapitsyn",
-  "contributors": ["Serhii D <otto-assistant>"],
   "license": "MIT",
   "scripts": {
-    "dev": "concurrently -n \"webhmr,ui\" -c \"magenta,yellow\" \"node ./scripts/dev-web-hmr.mjs\" \"bun run --cwd packages/ui dev\"",
-    "dev:legacy": "concurrently -n \"server,web,ui\" -c \"cyan,magenta,yellow\" \"bun run --cwd packages/web dev:server:watch\" \"bun run --cwd packages/web build:watch\" \"bun run --cwd packages/ui dev\"",
+    "dev": "node ./scripts/dev-web-hmr.mjs",
     "build": "bun run --filter '*' build",
     "build:web": "bun run --cwd packages/web build",
     "build:ui": "bun run --cwd packages/ui build",
     "build:electron": "bun run --cwd packages/electron build",
     "type-check": "bun run --filter '*' type-check",
-    "type-check:ci": "bun run type-check",
     "type-check:web": "bun run --cwd packages/web type-check",
     "type-check:ui": "bun run --cwd packages/ui type-check",
     "type-check:electron": "bun run --cwd packages/electron type-check",
@@ -41,7 +37,6 @@
     "clean": "bun run --filter '*' clean",
     "changelog-card": "node scripts/changelog-card/generate.mjs",
     "postinstall": "node ./fix-deprecation.js && patch-package",
-    "dev:metrics": "node ./scripts/dev-route-metrics.mjs",
     "dev:web": "bun run --cwd packages/web build:watch",
     "dev:web:server": "bun run --cwd packages/web dev:server:watch",
     "dev:web:full": "node ./scripts/dev-web-full.mjs",
@@ -64,9 +59,7 @@
     "release:prepare": "bun run build && bun run type-check && bun run lint",
     "release:test": "./scripts/test-release-build.sh",
     "release:test:intel": "./scripts/test-release-build.sh x86_64",
-    "release:test:arm": "./scripts/test-release-build.sh aarch64",
-    "playwright:install": "bunx playwright install --with-deps chromium",
-    "playwright:smoke": "cross-env PLAYWRIGHT_SMOKE=1 bunx playwright test"
+    "release:test:arm": "./scripts/test-release-build.sh aarch64"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.0",
@@ -96,7 +89,6 @@
     "@heroui/theme": "^2.4.23",
     "@ibm/plex": "^6.4.1",
     "@lezer/highlight": "^1.2.3",
-    "@mempalace/core": "^0.1.1",
     "@octokit/rest": "^22.0.1",
     "@opencode-ai/sdk": "^1.16.0",
     "@radix-ui/react-collapsible": "^1.1.12",
@@ -117,7 +109,6 @@
     "cmdk": "^1.1.1",
     "express": "^5.1.0",
     "ghostty-web": "0.3.0",
-    "grammy": "^1.43.0",
     "http-proxy-middleware": "^3.0.5",
     "next-themes": "^0.4.6",
     "node-pty": "1.2.0-beta.12",
@@ -164,7 +155,6 @@
     "tw-animate-css": "^1.3.8",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.39.1",
-    "vite": "^7.1.2",
-    "@playwright/test": "^1.56.1"
+    "vite": "^7.1.2"
   }
 }

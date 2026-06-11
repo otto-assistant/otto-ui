@@ -113,7 +113,7 @@ function withContentCache(files: FilesAPI): FilesAPI {
           return { content: hit.content, path: hit.path };
         }
 
-        return readFreshFile(path, options);
+        return readFreshFile(path);
       }
     : undefined;
 

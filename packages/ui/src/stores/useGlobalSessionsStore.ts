@@ -13,7 +13,6 @@ type LoadResult = {
 type GlobalSessionsState = {
   activeSessions: Session[];
   archivedSessions: Session[];
-  sessionsByDirectory: Map<string, Session[]>;
   hasLoaded: boolean;
   status: GlobalSessionsStatus;
   loadSessions: (fallbackActive?: Session[]) => Promise<LoadResult>;
@@ -128,23 +127,6 @@ export const mergeSessionDirectoryMetadata = (incoming: Session, existing?: Sess
   }
 
   return changed ? next : incoming;
-};
-
-const buildSessionsByDirectory = (sessions: Session[]): Map<string, Session[]> => {
-  const next = new Map<string, Session[]>();
-  for (const session of sessions) {
-    const directory = resolveGlobalSessionDirectory(session);
-    if (!directory) {
-      continue;
-    }
-    const existing = next.get(directory);
-    if (existing) {
-      existing.push(session);
-      continue;
-    }
-    next.set(directory, [session]);
-  }
-  return next;
 };
 
 const getSessionSignature = (session: Session): string => {
@@ -348,7 +330,6 @@ const applySnapshot = (
 export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => ({
   activeSessions: [],
   archivedSessions: [],
-  sessionsByDirectory: new Map(),
   hasLoaded: false,
   status: 'idle',
 
@@ -507,14 +488,9 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
         nextArchivedSessions = state.archivedSessions;
       }
 
-      const nextSessionsByDirectory = nextActiveSessions === state.activeSessions
-        ? state.sessionsByDirectory
-        : buildSessionsByDirectory(nextActiveSessions);
-
       if (
         nextActiveSessions === state.activeSessions
         && nextArchivedSessions === state.archivedSessions
-        && nextSessionsByDirectory === state.sessionsByDirectory
       ) {
         return state;
       }
@@ -522,7 +498,6 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: nextArchivedSessions,
-        sessionsByDirectory: nextSessionsByDirectory,
       };
     });
 

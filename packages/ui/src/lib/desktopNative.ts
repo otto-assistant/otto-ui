@@ -1,6 +1,4 @@
-import { hasDesktopInvoke, invokeDesktop, isDesktopShell, isElectronShell } from '@/lib/desktop';
-
-const isElectronDesktop = (): boolean => isElectronShell();
+import { hasDesktopInvoke, invokeDesktop, isDesktopShell } from '@/lib/desktop';
 
 type InvokeArgs = Record<string, unknown>;
 
@@ -72,26 +70,6 @@ export const setDesktopWindowTheme = async (
   } catch {
     // ignore
   }
-};
-
-export const getDesktopAutostartEnabled = async (): Promise<boolean | null> => {
-  if (!isDesktopShell() || isElectronDesktop()) {
-    return null;
-  }
-
-  try {
-    return await invokeDesktopCommand<boolean>('get_autostart_enabled');
-  } catch {
-    return null;
-  }
-};
-
-export const setDesktopAutostartEnabled = async (enabled: boolean): Promise<void> => {
-  if (!isDesktopShell() || isElectronDesktop()) {
-    return;
-  }
-
-  await invokeDesktopCommand('set_autostart_enabled', { enabled });
 };
 
 export const getDesktopAppVersion = async (): Promise<string | null> => {

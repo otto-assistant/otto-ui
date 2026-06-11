@@ -1,14 +1,12 @@
 import React from 'react';
-import { ConnectionsSection, MessengerSection } from '@/components/sections/otto-settings';
+import { MessengerSection } from '@/components/sections/otto-settings/MessengerSection';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 
 /**
  * Settings → Integrations.
  *
- * Hosts external integrations (Discord, Telegram, the Otto backend / relay
- * connection status). Previously these surfaced inline on the SettingsLandingView
- * tile dashboard; centralizing them here lets users find them alongside other
- * configuration in the Settings menu.
+ * Hosts external integrations (currently the Discord messenger bridge),
+ * letting users find them alongside other configuration in the Settings menu.
  */
 export const IntegrationsPage: React.FC = () => {
   return (
@@ -17,13 +15,11 @@ export const IntegrationsPage: React.FC = () => {
         <div>
           <h2 className="typography-ui-header font-semibold text-foreground">Integrations</h2>
           <p className="typography-meta text-muted-foreground">
-            Connect Otto to external messengers and inspect backend connection status.
+            Connect external messengers to chat with your assistant.
           </p>
         </div>
 
         <MessengerSection />
-
-        <ConnectionsSection />
       </div>
     </ScrollableOverlay>
   );

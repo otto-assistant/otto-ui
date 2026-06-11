@@ -3,7 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { getSafeStorage } from './utils/safeStorage';
 import { useProjectsStore } from './useProjectsStore';
 
-export type MessengerType = 'discord' | 'telegram';
+export type MessengerType = 'discord';
 export type SyncMode = 'full' | 'notifications' | 'off';
 export type MessengerVerbosity = 'quiet' | 'normal' | 'verbose';
 
@@ -54,38 +54,10 @@ export interface MessengerConnection {
   discordCreateThreads?: boolean;
   webhookSecret?: string;
 
-  // Telegram-specific
-  telegramBotToken?: string;
-  /** Telegram chat id (negative number for groups, e.g. -1001234567890). */
-  telegramChatId?: string;
-  telegramChatTitle?: string;
-  telegramChatType?: string;
-  telegramIsForum?: boolean;
-  telegramBotUsername?: string;
-  telegramBotId?: number;
-  /**
-   * Bot privacy capability from getMe. When false (default for new bots), the
-   * bot cannot see plain group messages — only commands, mentions and replies.
-   * This is the #1 reason "I message the bot and get no reply".
-   */
-  telegramBotCanReadAllGroupMessages?: boolean;
-  telegramBotCanJoinGroups?: boolean;
-
   // Last activity (test message / sync now)
   lastSyncAt: number | null;
   lastSyncStatus: 'idle' | 'sending' | 'ok' | 'error';
   lastSyncMessage: string | null;
-  /** Per-project results from the most recent telegram sync (forum mode). */
-  lastSyncTopics?: {
-    projectId: string;
-    projectLabel: string;
-    topicId: string | null;
-    topicName: string;
-    messageId: number | null;
-    created: boolean;
-    error: string | null;
-  }[];
-  lastSyncPostedTo?: 'forum' | 'chat';
   /** Per-project results from the most recent Discord guild sync. */
   lastSyncChannels?: {
     projectId: string;
@@ -106,16 +78,7 @@ export interface MessengerConnection {
     threadError?: string | null;
   }[];
 
-  // Telegram long-poll listener state (set after start/status calls)
-  telegramListenerRunning?: boolean;
-  telegramListenerStartedAt?: number | null;
-  telegramListenerLastUpdateAt?: number | null;
-  telegramListenerTotalReceived?: number;
-  telegramListenerTotalReplied?: number;
-  telegramListenerError?: string | null;
-  telegramListenerAutoReply?: boolean;
-
-  // Discord Gateway listener state (parity with the Telegram listener block).
+  // Discord Gateway listener state.
   discordListenerRunning?: boolean;
   discordListenerConnected?: boolean;
   discordListenerStartedAt?: number | null;
@@ -156,10 +119,9 @@ export interface ProjectMessengerMapping {
     threadId?: string;
     threadName?: string;
   };
-  telegram?: { topicId: string; topicName: string };
 }
 
-export interface TelegramDiagnosisCheck {
+export interface MessengerDiagnosisCheck {
   id: string;
   ok: boolean;
   severity: 'ok' | 'warn' | 'error' | 'info';
@@ -169,7 +131,7 @@ export interface TelegramDiagnosisCheck {
 }
 
 export interface MessengerInboundMessage {
-  /** Either Telegram update_id (number) or Discord message id (string). */
+  /** Discord message id. */
   updateId: number | string;
   chatId: number | string | null;
   chatTitle: string | null;
@@ -213,9 +175,9 @@ export interface MessengerApproval {
   id: string;
   type: MessengerType;
   prompt: string;
-  /** chat_id for Telegram, channel_id for Discord. */
+  /** Discord channel_id. */
   target: string;
-  /** Telegram message_id or Discord message id. */
+  /** Discord message id. */
   messageId: string | number | null;
   sentAt: number;
   decision: MessengerApprovalDecision | null;
@@ -232,53 +194,26 @@ export interface MessengerApproval {
   permissionContext?: string;
 }
 
-export interface TelegramInboundMessage {
-  updateId: number;
-  chatId: number | string;
-  chatTitle: string | null;
-  chatType: string | null;
-  threadId: number | null;
-  from:
-    | {
-        id: number;
-        username: string | null;
-        firstName: string | null;
-        isBot: boolean;
-      }
-    | null;
-  text: string | null;
-  receivedAt: string;
-}
-
 interface MessengerState {
   connections: MessengerConnection[];
   projectMappings: ProjectMessengerMapping[];
   onboardingStep: number | null;
   onboardingType: MessengerType | null;
 
-  /** In-memory ring buffer of recent inbound Telegram messages (newest first). */
-  telegramInbound: TelegramInboundMessage[];
   /** Same shape for Discord — newest first, capped at 50. */
   discordInbound: MessengerInboundMessage[];
   /** Last-50-messages history fetched via /discord/history. */
   discordHistory: DiscordHistoryMessage[];
 
-  /** Latest diagnose-run output. Cleared when token/chat id changes. */
-  telegramDiagnosis: {
-    runAt: number;
-    ok: boolean;
-    checks: TelegramDiagnosisCheck[];
-  } | null;
-  telegramDiagnosisRunning: boolean;
-  /** Parallel diagnose for Discord. */
+  /** Latest diagnose-run output. Cleared when token/guild id changes. */
   discordDiagnosis: {
     runAt: number;
     ok: boolean;
-    checks: TelegramDiagnosisCheck[];
+    checks: MessengerDiagnosisCheck[];
   } | null;
   discordDiagnosisRunning: boolean;
 
-  /** Pending + answered approvals across both messengers, newest first. */
+  /** Pending + answered approvals, newest first. */
   approvals: MessengerApproval[];
 
   /**
@@ -318,7 +253,6 @@ interface MessengerState {
   updateConnection: (type: MessengerType, updates: Partial<MessengerConnection>) => void;
   removeConnection: (type: MessengerType) => void;
   testConnection: (type: MessengerType) => Promise<boolean>;
-  resolveTelegramChat: () => Promise<boolean>;
   resolveDiscordChannel: () => Promise<boolean>;
   resolveDiscordGuild: () => Promise<boolean>;
   fetchDiscordInviteUrl: () => Promise<string | null>;
@@ -328,11 +262,6 @@ interface MessengerState {
   ) => Promise<boolean>;
   sendTestMessage: (type: MessengerType) => Promise<boolean>;
   sendSyncSummary: (type: MessengerType, summary: string) => Promise<boolean>;
-  syncTelegramProjects: (
-    projects: { id: string; label: string; body: string }[],
-    summary: string,
-  ) => Promise<boolean>;
-  diagnoseTelegram: () => Promise<boolean>;
   diagnoseDiscord: () => Promise<boolean>;
   refreshBridgeStatus: (type?: MessengerType) => Promise<void>;
   setBridgeVerbosity: (type: MessengerType, level: MessengerVerbosity) => Promise<boolean>;
@@ -366,11 +295,6 @@ interface MessengerState {
     by: string | null,
   ) => void;
   clearApprovals: () => void;
-  startTelegramListener: () => Promise<boolean>;
-  stopTelegramListener: () => Promise<boolean>;
-  refreshTelegramListenerStatus: () => Promise<void>;
-  loadRecentTelegramMessages: () => Promise<void>;
-  ingestTelegramInbound: (msg: TelegramInboundMessage) => void;
   setProjectMapping: (mapping: ProjectMessengerMapping) => void;
   removeProjectMapping: (projectId: string) => void;
   startOnboarding: (type: MessengerType) => void;
@@ -409,11 +333,8 @@ export const useMessengerStore = create<MessengerState>()(
       projectMappings: [],
       onboardingStep: null,
       onboardingType: null,
-      telegramInbound: [],
       discordInbound: [],
       discordHistory: [],
-      telegramDiagnosis: null,
-      telegramDiagnosisRunning: false,
       discordDiagnosis: null,
       discordDiagnosisRunning: false,
       approvals: [],
@@ -440,7 +361,6 @@ export const useMessengerStore = create<MessengerState>()(
           projectMappings: get().projectMappings.map((m) => {
             const next = { ...m };
             if (type === 'discord') delete next.discord;
-            if (type === 'telegram') delete next.telegram;
             return next;
           }),
         });
@@ -477,34 +397,6 @@ export const useMessengerStore = create<MessengerState>()(
             if (data.id) {
               get().fetchDiscordInviteUrl();
             }
-            return true;
-          }
-
-          if (type === 'telegram' && conn.telegramBotToken) {
-            // Route through backend so we also capture the bot's privacy /
-            // group capability flags (used to warn the user about
-            // `can_read_all_group_messages: false`).
-            const data = await postJson<{
-              ok: boolean;
-              error?: string;
-              id?: number;
-              username?: string;
-              firstName?: string;
-              canJoinGroups?: boolean;
-              canReadAllGroupMessages?: boolean;
-            }>('/api/otto/messenger/test', {
-              type: 'telegram',
-              token: conn.telegramBotToken,
-            });
-            if (!data.ok) throw new Error(data.error ?? 'Invalid token');
-            get().updateConnection(type, {
-              status: 'connected',
-              lastConnectedAt: Date.now(),
-              telegramBotId: data.id,
-              telegramBotUsername: data.username,
-              telegramBotCanJoinGroups: data.canJoinGroups,
-              telegramBotCanReadAllGroupMessages: data.canReadAllGroupMessages,
-            });
             return true;
           }
 
@@ -715,62 +607,21 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
-      resolveTelegramChat: async () => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken || !conn.telegramChatId) return false;
-
-        try {
-          const data = await postJson<{
-            ok: boolean;
-            error?: string;
-            title?: string | null;
-            type?: string | null;
-            isForum?: boolean;
-            chatId?: number | string;
-          }>('/api/otto/messenger/telegram/resolve-chat', {
-            token: conn.telegramBotToken,
-            chatId: conn.telegramChatId,
-          });
-          if (!data.ok) {
-            get().updateConnection('telegram', {
-              error: data.error ?? 'Could not resolve chat',
-            });
-            return false;
-          }
-          get().updateConnection('telegram', {
-            telegramChatTitle: data.title ?? undefined,
-            telegramChatType: data.type ?? undefined,
-            telegramIsForum: Boolean(data.isForum),
-            error: null,
-          });
-          return true;
-        } catch (e) {
-          get().updateConnection('telegram', {
-            error: e instanceof Error ? e.message : 'resolve-chat failed',
-          });
-          return false;
-        }
-      },
-
       sendTestMessage: async (type) => {
         const conn = get().connections.find((c) => c.type === type);
         if (!conn) return false;
 
-        const token = type === 'discord' ? conn.botToken : conn.telegramBotToken;
-        // For Discord: fall back to the first text channel of the resolved
-        // server if no default channel is configured but a guild is set.
-        let target =
-          type === 'discord' ? conn.defaultChannelId : conn.telegramChatId;
-        if (!target && type === 'discord' && conn.discordGuildChannels && conn.discordGuildChannels.length > 0) {
+        const token = conn.botToken;
+        // Fall back to the first text channel of the resolved server if no
+        // default channel is configured but a guild is set.
+        let target = conn.defaultChannelId;
+        if (!target && conn.discordGuildChannels && conn.discordGuildChannels.length > 0) {
           target = conn.discordGuildChannels[0].id;
         }
         if (!token || !target) {
           get().updateConnection(type, {
             lastSyncStatus: 'error',
-            lastSyncMessage:
-              type === 'telegram'
-                ? 'Add your Telegram chat ID before sending'
-                : 'Add a Discord channel ID or Server ID before sending',
+            lastSyncMessage: 'Add a Discord channel ID or Server ID before sending',
           });
           return false;
         }
@@ -780,10 +631,7 @@ export const useMessengerStore = create<MessengerState>()(
           lastSyncMessage: 'Sending test message…',
         });
 
-        const text =
-          type === 'telegram'
-            ? `✅ Otto is connected.\nThis is a test message from your Otto assistant.\n\nFrom now on Otto can post project, task and schedule updates to this chat.`
-            : `**Otto connected ✓**\nThis is a test message from your Otto assistant.\nOtto can now post project, task and schedule updates to this channel.`;
+        const text = `**Otto connected ✓**\nThis is a test message from your Otto assistant.\nOtto can now post project updates to this channel.`;
 
         try {
           const data = await postJson<{ ok: boolean; error?: string }>(
@@ -815,15 +663,12 @@ export const useMessengerStore = create<MessengerState>()(
       sendSyncSummary: async (type, summary) => {
         const conn = get().connections.find((c) => c.type === type);
         if (!conn) return false;
-        const token = type === 'discord' ? conn.botToken : conn.telegramBotToken;
-        const target = type === 'discord' ? conn.defaultChannelId : conn.telegramChatId;
+        const token = conn.botToken;
+        const target = conn.defaultChannelId;
         if (!token || !target) {
           get().updateConnection(type, {
             lastSyncStatus: 'error',
-            lastSyncMessage:
-              type === 'telegram'
-                ? 'Add your Telegram chat ID first'
-                : 'Add a Discord channel ID first',
+            lastSyncMessage: 'Add a Discord channel ID first',
           });
           return false;
         }
@@ -858,273 +703,9 @@ export const useMessengerStore = create<MessengerState>()(
         }
       },
 
-      syncTelegramProjects: async (projects, summary) => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken || !conn.telegramChatId) {
-          get().updateConnection('telegram', {
-            lastSyncStatus: 'error',
-            lastSyncMessage: 'Add Telegram bot token and chat ID first',
-          });
-          return false;
-        }
-
-        get().updateConnection('telegram', {
-          lastSyncStatus: 'sending',
-          lastSyncMessage:
-            conn.telegramIsForum && projects.length > 0
-              ? `Creating ${projects.length} topic${projects.length === 1 ? '' : 's'}…`
-              : 'Sending sync summary…',
-        });
-
-        try {
-          const data = await postJson<{
-            ok: boolean;
-            postedTo?: 'forum' | 'chat';
-            error?: string;
-            topics?: {
-              projectId: string;
-              projectLabel: string;
-              topicId: string | null;
-              topicName: string;
-              messageId: number | null;
-              created: boolean;
-              error: string | null;
-            }[];
-          }>('/api/otto/messenger/telegram/sync-projects', {
-            token: conn.telegramBotToken,
-            chatId: conn.telegramChatId,
-            isForum: Boolean(conn.telegramIsForum),
-            summary,
-            projects,
-            mappings: get().projectMappings,
-          });
-
-          if (!data.ok && (!data.topics || data.topics.length === 0)) {
-            get().updateConnection('telegram', {
-              lastSyncStatus: 'error',
-              lastSyncMessage: data.error ?? 'Sync failed',
-            });
-            return false;
-          }
-
-          // Persist newly-created topic ids back into project mappings.
-          const newTopics = (data.topics ?? []).filter(
-            (t) => t.topicId && !t.error,
-          );
-          for (const t of newTopics) {
-            get().setProjectMapping({
-              projectId: t.projectId,
-              projectLabel: t.projectLabel,
-              telegram: { topicId: String(t.topicId), topicName: t.topicName },
-            });
-          }
-
-          const errored = (data.topics ?? []).filter((t) => t.error);
-          const createdCount = (data.topics ?? []).filter((t) => t.created).length;
-          const postedCount = (data.topics ?? []).filter((t) => t.messageId).length;
-
-          let summaryMsg: string;
-          if (data.postedTo === 'forum') {
-            const parts = [];
-            if (createdCount > 0) parts.push(`${createdCount} topic${createdCount === 1 ? '' : 's'} created`);
-            if (postedCount > 0) parts.push(`${postedCount} message${postedCount === 1 ? '' : 's'} sent`);
-            if (errored.length > 0) parts.push(`${errored.length} error${errored.length === 1 ? '' : 's'}`);
-            summaryMsg = parts.length > 0 ? parts.join(', ') + ' ✓' : 'Sync sent ✓';
-          } else {
-            summaryMsg = 'Sync summary sent ✓';
-          }
-
-          get().updateConnection('telegram', {
-            lastSyncAt: Date.now(),
-            lastSyncStatus: errored.length > 0 ? 'error' : 'ok',
-            lastSyncMessage:
-              errored.length > 0
-                ? `${summaryMsg} — first error: ${errored[0].error}`
-                : summaryMsg,
-            lastSyncTopics: data.topics ?? [],
-            lastSyncPostedTo: data.postedTo,
-          });
-          return errored.length === 0;
-        } catch (e) {
-          get().updateConnection('telegram', {
-            lastSyncStatus: 'error',
-            lastSyncMessage: e instanceof Error ? e.message : 'Sync failed',
-          });
-          return false;
-        }
-      },
-
-      startTelegramListener: async () => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken) return false;
-        const projects = useProjectsStore.getState().projects;
-        const projectBindings = get()
-          .projectMappings.flatMap((m) => {
-            if (!m.telegram) return [];
-            const project = projects.find((p) => p.id === m.projectId);
-            if (!project) return [];
-            return [
-              {
-                chatId: conn.telegramChatId,
-                threadId: m.telegram.topicId ?? null,
-                projectPath: project.path,
-                projectLabel: project.label ?? project.path,
-              },
-            ];
-          });
-        try {
-          const data = await postJson<{
-            ok: boolean;
-            running?: boolean;
-            startedAt?: number;
-            autoReply?: boolean;
-            bridgeEnabled?: boolean;
-            lastUpdateAt?: number | null;
-            totalReceived?: number;
-            totalReplied?: number;
-            lastError?: string | null;
-          }>('/api/otto/messenger/telegram/listener/start', {
-            token: conn.telegramBotToken,
-            autoReply: conn.telegramListenerAutoReply !== false,
-            bridgeEnabled: conn.bridgeEnabled !== false,
-            projectBindings,
-          });
-          if (!data.ok) return false;
-          get().updateConnection('telegram', {
-            telegramListenerRunning: data.running ?? true,
-            telegramListenerStartedAt: data.startedAt ?? Date.now(),
-            telegramListenerLastUpdateAt: data.lastUpdateAt ?? null,
-            telegramListenerTotalReceived: data.totalReceived ?? 0,
-            telegramListenerTotalReplied: data.totalReplied ?? 0,
-            telegramListenerError: data.lastError ?? null,
-            telegramListenerAutoReply: data.autoReply ?? true,
-          });
-          return true;
-        } catch (e) {
-          get().updateConnection('telegram', {
-            telegramListenerError: e instanceof Error ? e.message : 'start failed',
-            telegramListenerRunning: false,
-          });
-          return false;
-        }
-      },
-
-      stopTelegramListener: async () => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken) return false;
-        try {
-          await postJson('/api/otto/messenger/telegram/listener/stop', {
-            token: conn.telegramBotToken,
-          });
-          get().updateConnection('telegram', {
-            telegramListenerRunning: false,
-          });
-          return true;
-        } catch (e) {
-          get().updateConnection('telegram', {
-            telegramListenerError: e instanceof Error ? e.message : 'stop failed',
-          });
-          return false;
-        }
-      },
-
-      refreshTelegramListenerStatus: async () => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken) return;
-        try {
-          const data = await postJson<{
-            ok: boolean;
-            running?: boolean;
-            startedAt?: number;
-            autoReply?: boolean;
-            lastUpdateAt?: number | null;
-            totalReceived?: number;
-            totalReplied?: number;
-            lastError?: string | null;
-          }>('/api/otto/messenger/telegram/listener/status', {
-            token: conn.telegramBotToken,
-          });
-          if (!data.ok) return;
-          get().updateConnection('telegram', {
-            telegramListenerRunning: data.running ?? false,
-            telegramListenerStartedAt: data.startedAt ?? null,
-            telegramListenerLastUpdateAt: data.lastUpdateAt ?? null,
-            telegramListenerTotalReceived: data.totalReceived ?? 0,
-            telegramListenerTotalReplied: data.totalReplied ?? 0,
-            telegramListenerError: data.lastError ?? null,
-            telegramListenerAutoReply: data.autoReply ?? true,
-          });
-        } catch {
-          // ignore — background poll
-        }
-      },
-
-      loadRecentTelegramMessages: async () => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken) return;
-        try {
-          const data = await postJson<{
-            ok: boolean;
-            running?: boolean;
-            messages?: TelegramInboundMessage[];
-          }>('/api/otto/messenger/telegram/listener/recent', {
-            token: conn.telegramBotToken,
-            limit: 25,
-          });
-          if (data.ok && Array.isArray(data.messages)) {
-            set({ telegramInbound: data.messages });
-          }
-        } catch {
-          // ignore
-        }
-      },
-
-      diagnoseTelegram: async () => {
-        const conn = get().connections.find((c) => c.type === 'telegram');
-        if (!conn?.telegramBotToken) return false;
-        set({ telegramDiagnosisRunning: true });
-        try {
-          const data = await postJson<{
-            ok: boolean;
-            error?: string;
-            checks?: TelegramDiagnosisCheck[];
-          }>('/api/otto/messenger/telegram/diagnose', {
-            token: conn.telegramBotToken,
-            chatId: conn.telegramChatId,
-          });
-          set({
-            telegramDiagnosis: {
-              runAt: Date.now(),
-              ok: Boolean(data.ok),
-              checks: data.checks ?? [],
-            },
-            telegramDiagnosisRunning: false,
-          });
-          return Boolean(data.ok);
-        } catch (e) {
-          set({
-            telegramDiagnosis: {
-              runAt: Date.now(),
-              ok: false,
-              checks: [
-                {
-                  id: 'network',
-                  ok: false,
-                  severity: 'error',
-                  title: 'Diagnose failed',
-                  detail: e instanceof Error ? e.message : 'Unknown error',
-                },
-              ],
-            },
-            telegramDiagnosisRunning: false,
-          });
-          return false;
-        }
-      },
-
       refreshBridgeStatus: async (type) => {
         const conn = type ? get().connections.find((c) => c.type === type) : undefined;
-        const token = type === 'telegram' ? conn?.telegramBotToken : conn?.botToken;
+        const token = conn?.botToken;
         try {
           const data = await postJson<{
             ok: boolean;
@@ -1169,7 +750,7 @@ export const useMessengerStore = create<MessengerState>()(
         try {
           const data = await postJson<{
             ok: boolean;
-            checks?: TelegramDiagnosisCheck[];
+            checks?: MessengerDiagnosisCheck[];
           }>('/api/otto/messenger/discord/diagnose', {
             token: conn.botToken,
             guildId: conn.discordGuildId,
@@ -1426,15 +1007,13 @@ export const useMessengerStore = create<MessengerState>()(
         const conn = get().connections.find((c) => c.type === type);
         if (!conn) return null;
 
-        // Resolve a target channel/chat. For Discord, fall back to the first
-        // text channel of the resolved server when defaultChannelId is unset.
-        let target =
-          opts?.target ??
-          (type === 'discord' ? conn.defaultChannelId : conn.telegramChatId);
-        if (!target && type === 'discord' && conn.discordGuildChannels && conn.discordGuildChannels.length > 0) {
+        // Resolve a target channel. Fall back to the first text channel of
+        // the resolved server when defaultChannelId is unset.
+        let target = opts?.target ?? conn.defaultChannelId;
+        if (!target && conn.discordGuildChannels && conn.discordGuildChannels.length > 0) {
           target = conn.discordGuildChannels[0].id;
         }
-        const token = type === 'discord' ? conn.botToken : conn.telegramBotToken;
+        const token = conn.botToken;
         if (!token || !target) {
           const failed: MessengerApproval = {
             id: `failed_${Date.now()}`,
@@ -1448,19 +1027,14 @@ export const useMessengerStore = create<MessengerState>()(
             decidedBy: null,
             error: !token
               ? 'Bot token is missing'
-              : type === 'discord'
-                ? 'No Discord channel configured — save a Channel ID or Server ID first'
-                : 'No Telegram chat ID configured',
+              : 'No Discord channel configured — save a Channel ID or Server ID first',
           };
           set({ approvals: [failed, ...get().approvals].slice(0, 50) });
           return null;
         }
 
         try {
-          const url =
-            type === 'discord'
-              ? '/api/otto/messenger/discord/send-approval'
-              : '/api/otto/messenger/telegram/send-approval';
+          const url = '/api/otto/messenger/discord/send-approval';
           const perm = opts?.permission;
           // Build the request body — include structured permission data when available
           const body: Record<string, unknown> = {
@@ -1479,12 +1053,7 @@ export const useMessengerStore = create<MessengerState>()(
                 }
               : {}),
           };
-          if (type === 'discord') {
-            body.channelId = target;
-          } else {
-            body.chatId = target;
-            if (opts?.threadId) body.threadId = opts.threadId;
-          }
+          body.channelId = target;
           const data = await postJson<{
             ok: boolean;
             error?: string;
@@ -1564,13 +1133,6 @@ export const useMessengerStore = create<MessengerState>()(
 
       clearApprovals: () => set({ approvals: [] }),
 
-      ingestTelegramInbound: (msg) => {
-        const cur = get().telegramInbound;
-        // Dedupe by updateId; keep newest first; cap at 50.
-        const next = [msg, ...cur.filter((m) => m.updateId !== msg.updateId)].slice(0, 50);
-        set({ telegramInbound: next });
-      },
-
       setProjectMapping: (mapping) => {
         set({
           projectMappings: [
@@ -1612,10 +1174,6 @@ export const useMessengerStore = create<MessengerState>()(
           lastSyncMessage: null,
           // Listener state lives on the server — clear it on persist so the
           // UI always re-syncs from the server after reload (via auto-start).
-          telegramListenerRunning: false,
-          telegramListenerStartedAt: null,
-          telegramListenerLastUpdateAt: null,
-          telegramListenerError: null,
           discordListenerRunning: false,
           discordListenerConnected: false,
           discordListenerStartedAt: null,

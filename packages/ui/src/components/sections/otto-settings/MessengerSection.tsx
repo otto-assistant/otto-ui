@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   RiDiscordLine,
-  RiTelegramLine,
   RiCheckLine,
   RiCloseLine,
   RiLoader4Line,
@@ -19,7 +18,6 @@ import {
   RiStopCircleLine,
   RiChatSmile3Line,
   RiStethoscopeLine,
-  RiErrorWarningLine,
 } from '@remixicon/react';
 import {
   useMessengerStore,
@@ -27,14 +25,12 @@ import {
   type MessengerConnection,
   type MessengerVerbosity,
   type SyncMode,
-  type TelegramInboundMessage,
-  type TelegramDiagnosisCheck,
+  type MessengerDiagnosisCheck,
   type MessengerInboundMessage,
   type MessengerApproval,
 } from '@/stores/useMessengerStore';
 import { useOttoEventsStore, type OttoUiRealtimeEvent } from '@/stores/useOttoEventsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
-import { useTasksStore } from '@/stores/useTasksStore';
 import { cn } from '@/lib/utils';
 
 interface MessengerMeta {
@@ -77,44 +73,6 @@ const MESSENGER_META: Record<MessengerType, MessengerMeta> = {
         text channel and choose <strong>"Copy Channel ID"</strong>. Your bot must already be a
         member of that server and have <em>View Channel</em> + <em>Send Messages</em> permission —
         if not, use the invite link above first.
-      </>
-    ),
-  },
-  telegram: {
-    name: 'Telegram',
-    icon: RiTelegramLine,
-    color: 'text-[#26A5E4]',
-    tokenLabel: 'Bot Token',
-    tokenHelp: (
-      <>
-        Open{' '}
-        <a
-          href="https://t.me/BotFather"
-          target="_blank"
-          rel="noreferrer"
-          className="text-primary hover:underline inline-flex items-center gap-0.5"
-        >
-          @BotFather <RiExternalLinkLine className="size-3" />
-        </a>{' '}
-        on Telegram → <code className="text-[10px] bg-muted px-1 rounded">/newbot</code> → copy the
-        token it sends back.
-      </>
-    ),
-    targetLabel: 'Chat ID',
-    targetPlaceholder: 'e.g. -1001234567890',
-    targetHelp: (
-      <>
-        Add your bot to the target chat/group, then forward any message from that chat to{' '}
-        <a
-          href="https://t.me/userinfobot"
-          target="_blank"
-          rel="noreferrer"
-          className="text-primary hover:underline inline-flex items-center gap-0.5"
-        >
-          @userinfobot <RiExternalLinkLine className="size-3" />
-        </a>{' '}
-        — it will reply with the chat ID. Groups start with a minus sign (e.g.{' '}
-        <code className="text-[10px] bg-muted px-1 rounded">-1001234567890</code>).
       </>
     ),
   },
@@ -186,389 +144,11 @@ function formatRelative(ts: number | null | undefined): string {
   return new Date(ts).toLocaleString();
 }
 
-function TelegramListenerPanel({
-  conn,
-  inbound,
-  startListener,
-  stopListener,
-  refreshStatus,
-  loadRecent,
-  onToggleAutoReply,
-}: {
-  conn: MessengerConnection;
-  inbound: TelegramInboundMessage[];
-  startListener: () => Promise<boolean>;
-  stopListener: () => Promise<boolean>;
-  refreshStatus: () => Promise<void>;
-  loadRecent: () => Promise<void>;
-  onToggleAutoReply: (v: boolean) => void;
-}) {
-  const running = Boolean(conn.telegramListenerRunning);
-  const autoReply = conn.telegramListenerAutoReply !== false;
-  const subscribeToEvents = useOttoEventsStore((s) => s.subscribeToEvents);
-  const ingestTelegramInbound = useMessengerStore((s) => s.ingestTelegramInbound);
-
-  // Subscribe to realtime telegram message_received events so the UI updates
-  // instantly when a new message arrives, without waiting for the next poll.
-  useEffect(() => {
-    if (!running) return;
-    const handler = (event: OttoUiRealtimeEvent) => {
-      if (event.eventType !== 'messenger.telegram.message_received') return;
-      const data = event.data as TelegramInboundMessage | undefined;
-      if (data && typeof data === 'object' && 'updateId' in data) {
-        ingestTelegramInbound(data as TelegramInboundMessage);
-      }
-    };
-    return subscribeToEvents(handler);
-  }, [running, subscribeToEvents, ingestTelegramInbound]);
-
-  // Refresh status + recent every 10s while listener is running (fallback when
-  // WS isn't connected).
-  useEffect(() => {
-    if (!running) return;
-    let cancelled = false;
-    const tick = async () => {
-      if (cancelled) return;
-      await Promise.all([refreshStatus(), loadRecent()]);
-    };
-    tick();
-    const id = setInterval(tick, 10_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [running, refreshStatus, loadRecent]);
-
-  // On mount, fetch server-side status so reload reflects the real state.
-  useEffect(() => {
-    refreshStatus();
-    loadRecent();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return (
-    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-3">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
-          <RiChatSmile3Line className="size-4 text-primary" />
-          Listen for incoming messages
-          <span
-            className={cn(
-              'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
-              running
-                ? 'bg-green-500/20 text-green-600 dark:text-green-400'
-                : 'bg-muted text-muted-foreground',
-            )}
-          >
-            {running ? 'live' : 'off'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {!running ? (
-            <button
-              type="button"
-              onClick={() => startListener()}
-              className="inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              <RiPlayCircleLine className="size-3.5" />
-              Start listening
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => stopListener()}
-              className="inline-flex items-center gap-1 rounded border border-destructive/40 px-2.5 py-1 text-[11px] font-medium text-destructive hover:bg-destructive/10"
-            >
-              <RiStopCircleLine className="size-3.5" />
-              Stop
-            </button>
-          )}
-          <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoReply}
-              onChange={(e) => onToggleAutoReply(e.target.checked)}
-              className="rounded border-border accent-primary"
-            />
-            Auto-reply
-          </label>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-3 gap-2 text-[10px]">
-        <div className="rounded bg-background border border-border px-2 py-1.5">
-          <div className="text-muted-foreground">Received</div>
-          <div className="text-foreground font-medium">
-            {conn.telegramListenerTotalReceived ?? 0}
-          </div>
-        </div>
-        <div className="rounded bg-background border border-border px-2 py-1.5">
-          <div className="text-muted-foreground">Replied</div>
-          <div className="text-foreground font-medium">
-            {conn.telegramListenerTotalReplied ?? 0}
-          </div>
-        </div>
-        <div className="rounded bg-background border border-border px-2 py-1.5">
-          <div className="text-muted-foreground">Last update</div>
-          <div className="text-foreground font-medium">
-            {formatRelative(conn.telegramListenerLastUpdateAt ?? null)}
-          </div>
-        </div>
-      </div>
-
-      {conn.telegramListenerError && (
-        <div className="text-[11px] text-destructive flex items-start gap-1.5">
-          <RiAlertLine className="size-3.5 shrink-0 mt-0.5" />
-          {conn.telegramListenerError}
-        </div>
-      )}
-
-      {!running ? (
-        <div className="text-[11px] text-muted-foreground leading-snug">
-          Start the listener so Otto can answer messages sent to the bot. While running,
-          incoming messages appear below, and the auto-reply confirms each round-trip.
-          Open Telegram → message your bot → send <code className="bg-muted px-1 rounded">/start</code>{' '}
-          or any text. You'll see it here within seconds.
-        </div>
-      ) : inbound.length === 0 ? (
-        <div className="text-[11px] text-muted-foreground italic">
-          Waiting for messages… Send your bot a message in Telegram to test.
-        </div>
-      ) : (
-        <ul className="space-y-1.5 max-h-48 overflow-y-auto">
-          {inbound.slice(0, 8).map((m) => (
-            <li
-              key={m.updateId}
-              className="rounded bg-background border border-border px-2 py-1.5 text-[11px] space-y-0.5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-foreground truncate">
-                  {m.from?.firstName ?? m.from?.username ?? 'Unknown'}
-                  {m.from?.username ? (
-                    <span className="text-muted-foreground"> @{m.from.username}</span>
-                  ) : null}
-                </span>
-                <span className="text-[9px] text-muted-foreground shrink-0">
-                  {new Date(m.receivedAt).toLocaleTimeString()}
-                </span>
-              </div>
-              <div className="text-muted-foreground break-words">
-                {m.text ?? <em>(non-text message)</em>}
-              </div>
-              <div className="text-[9px] text-muted-foreground">
-                {m.chatTitle ?? `chat ${m.chatId}`}
-                {m.threadId ? ` · topic ${m.threadId}` : ''}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function TelegramWarnings({ conn }: { conn: MessengerConnection }) {
-  const warnings: { id: string; severity: 'warn' | 'info'; title: string; detail: string }[] = [];
-
-  if (conn.telegramBotCanReadAllGroupMessages === false) {
-    warnings.push({
-      id: 'privacy',
-      severity: 'warn',
-      title: 'Privacy mode is ON — bot will not see plain group messages',
-      detail:
-        'By default Telegram filters out every message that is not a /command, @mention or reply. Open @BotFather → /setprivacy → choose your bot → Disable, then remove and re-add the bot to the group.',
-    });
-  }
-  if (conn.telegramChatId && conn.telegramIsForum === false) {
-    const isPrivate = conn.telegramChatType === 'private';
-    warnings.push({
-      id: 'forum',
-      severity: isPrivate ? 'info' : 'warn',
-      title: isPrivate
-        ? 'This is a private DM — per-project topics are not supported'
-        : 'This chat does not have Topics enabled — sync will post a single summary message',
-      detail: isPrivate
-        ? 'Otto will post one summary message here. Use a supergroup with Topics to get one topic per project.'
-        : 'Per-project topics require a supergroup with Topics enabled. In the group → Manage Group → Topics → enable.',
-    });
-  }
-
-  if (warnings.length === 0) return null;
-  return (
-    <div className="space-y-2">
-      {warnings.map((w) => (
-        <div
-          key={w.id}
-          className={cn(
-            'rounded-md border px-3 py-2 text-[11px] flex items-start gap-2',
-            w.severity === 'warn'
-              ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-800 dark:text-yellow-300'
-              : 'border-border bg-muted/40 text-muted-foreground',
-          )}
-        >
-          <RiErrorWarningLine className="size-3.5 shrink-0 mt-0.5" />
-          <div>
-            <div className="font-medium">{w.title}</div>
-            <div className="leading-snug mt-0.5">{w.detail}</div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function severityClass(s: TelegramDiagnosisCheck['severity']) {
+function severityClass(s: MessengerDiagnosisCheck['severity']) {
   if (s === 'ok') return 'text-green-600 dark:text-green-400';
   if (s === 'warn') return 'text-yellow-600 dark:text-yellow-400';
   if (s === 'error') return 'text-destructive';
   return 'text-muted-foreground';
-}
-
-function TelegramDiagnosePanel({
-  conn,
-  diagnosis,
-  running,
-  runDiagnose,
-}: {
-  conn: MessengerConnection;
-  diagnosis: ReturnType<typeof useMessengerStore.getState>['telegramDiagnosis'];
-  running: boolean;
-  runDiagnose: () => Promise<boolean>;
-}) {
-  const hasIssue = diagnosis?.checks?.some((c) => !c.ok) ?? false;
-
-  return (
-    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
-          <RiStethoscopeLine className="size-4 text-primary" />
-          Diagnose
-          {diagnosis && (
-            <span
-              className={cn(
-                'rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
-                hasIssue
-                  ? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-300'
-                  : 'bg-green-500/20 text-green-700 dark:text-green-400',
-              )}
-            >
-              {hasIssue ? 'issues' : 'all clear'}
-            </span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => runDiagnose()}
-          disabled={running}
-          className="inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-        >
-          {running ? (
-            <RiLoader4Line className="size-3.5 animate-spin" />
-          ) : (
-            <RiStethoscopeLine className="size-3.5" />
-          )}
-          {running ? 'Running…' : diagnosis ? 'Re-run diagnose' : 'Run diagnose'}
-        </button>
-      </div>
-      {!diagnosis && (
-        <div className="text-[11px] text-muted-foreground leading-snug">
-          Diagnose calls Telegram's API on your behalf to verify the token, privacy mode, chat
-          access, forum status and the bot's admin rights. Use it whenever sync or auto-reply
-          doesn't work as expected.
-        </div>
-      )}
-      {diagnosis && diagnosis.checks.length > 0 && (
-        <ul className="space-y-1.5">
-          {diagnosis.checks.map((c) => (
-            <li key={c.id} className="rounded bg-background border border-border px-2 py-1.5">
-              <div className="flex items-start gap-1.5">
-                <span className={cn('text-xs leading-none mt-0.5', severityClass(c.severity))}>
-                  {c.severity === 'ok' ? '✓' : c.severity === 'warn' ? '⚠' : c.severity === 'error' ? '✗' : 'ⓘ'}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className={cn('text-[11px] font-medium', severityClass(c.severity))}>
-                    {c.title}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground leading-snug mt-0.5 break-words">
-                    {c.detail}
-                  </div>
-                  {c.fix && (
-                    <div className="text-[10px] text-foreground leading-snug mt-1">
-                      <span className="font-medium">Fix: </span>
-                      {c.fix}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-      {diagnosis && (
-        <div className="text-[10px] text-muted-foreground">
-          Last run {formatRelative(diagnosis.runAt)} for token of @{conn.telegramBotUsername ?? 'bot'}.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TelegramSyncResults({
-  topics,
-  postedTo,
-}: {
-  topics: NonNullable<MessengerConnection['lastSyncTopics']>;
-  postedTo: 'forum' | 'chat';
-}) {
-  return (
-    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
-      <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
-        <RiCheckLine className="size-3.5 text-primary" />
-        Last sync result{' '}
-        <span className="text-[10px] font-normal text-muted-foreground">
-          ({postedTo === 'forum' ? 'forum topics' : 'main chat'})
-        </span>
-      </div>
-      <ul className="space-y-1">
-        {topics.map((t) => (
-          <li
-            key={t.projectId}
-            className="rounded bg-background border border-border px-2 py-1.5 text-[11px] flex items-start gap-2"
-          >
-            <span
-              className={cn(
-                'mt-0.5',
-                t.error
-                  ? 'text-destructive'
-                  : t.created
-                    ? 'text-green-600 dark:text-green-400'
-                    : 'text-muted-foreground',
-              )}
-            >
-              {t.error ? '✗' : t.created ? '✓ new' : '·'}
-            </span>
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-foreground truncate">
-                {t.projectLabel}{' '}
-                <span className="text-muted-foreground font-normal">
-                  → {t.topicName}
-                  {t.topicId ? ` (topic ${t.topicId})` : ''}
-                </span>
-              </div>
-              {t.error && (
-                <div className="text-destructive leading-snug">{t.error}</div>
-              )}
-              {!t.error && t.messageId && (
-                <div className="text-[10px] text-muted-foreground">
-                  message {t.messageId} sent
-                </div>
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
 }
 
 function DiscordListenerPanel({
@@ -837,8 +417,7 @@ function DiscordListenerPanel({
         </ul>
       )}
 
-      {/* History fetch — only works on Discord; Telegram bots cannot fetch
-          pre-listener-start history due to a fundamental Bot API limitation. */}
+      {/* History fetch — last messages from the configured channel. */}
       <div className="border-t border-border/60 pt-2 space-y-1.5">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="text-[11px] font-medium text-foreground">Channel history</div>
@@ -993,11 +572,7 @@ function ApprovalsPanel({
 
   useEffect(() => {
     const handler = (event: OttoUiRealtimeEvent) => {
-      const wanted =
-        type === 'telegram'
-          ? 'messenger.telegram.approval'
-          : 'messenger.discord.approval';
-      if (event.eventType !== wanted) return;
+      if (event.eventType !== 'messenger.discord.approval') return;
       const d = event.data as
         | {
             approvalId: string;
@@ -1158,15 +733,13 @@ function BridgePanel({
         </label>
       </div>
       <div className="text-[11px] text-muted-foreground leading-snug">
-        When on, every non-command message posted to a{' '}
-        {type === 'telegram' ? 'chat / topic' : 'channel'} is forwarded to an OpenCode session
-        in the matching project's directory. The bridge{' '}
-        <strong>auto-resolves project ↔ {type === 'telegram' ? 'chat' : 'channel'}</strong> by
-        slug-matching the {type === 'telegram' ? 'chat title' : 'channel name'} against your
-        project labels — no manual mapping needed. OpenCode's streaming response is edited back
-        into the same {type === 'telegram' ? 'chat' : 'channel'}, so the conversation is shared
-        with the web UI. (Manual mapping is still available below if you want a specific
-        override; restart the listener after toggling.)
+        When on, every non-command message posted to a channel is forwarded to an OpenCode
+        session in the matching project's directory. The bridge{' '}
+        <strong>auto-resolves project ↔ channel</strong> by slug-matching the channel name
+        against your project labels — no manual mapping needed. OpenCode's streaming response
+        is edited back into the same channel, so the conversation is shared with the web UI.
+        (Manual mapping is still available below if you want a specific override; restart the
+        listener after toggling.)
       </div>
       {!bridgeStatus.enabled && (
         <div className="text-[10px] text-yellow-700 dark:text-yellow-400">
@@ -1199,8 +772,8 @@ function BridgePanel({
           ))}
         </div>
         <div className="text-[10px] text-muted-foreground leading-snug">
-          {VERBOSITY_OPTIONS.find((o) => o.id === currentVerbosity)?.desc}. Change it from{' '}
-          {type === 'telegram' ? 'the chat' : 'Discord'} too with{' '}
+          {VERBOSITY_OPTIONS.find((o) => o.id === currentVerbosity)?.desc}. Change it from
+          Discord too with{' '}
           <code className="bg-muted px-1 rounded">/verbosity {currentVerbosity}</code> (this
           conversation) or <code className="bg-muted px-1 rounded">/verbosity default verbose</code>{' '}
           (everywhere). At <strong>Verbose</strong>, every tool call and result is posted under a
@@ -1328,22 +901,12 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const updateConnection = useMessengerStore((s) => s.updateConnection);
   const testConnection = useMessengerStore((s) => s.testConnection);
   const removeConnection = useMessengerStore((s) => s.removeConnection);
-  const resolveTelegramChat = useMessengerStore((s) => s.resolveTelegramChat);
   const resolveDiscordChannel = useMessengerStore((s) => s.resolveDiscordChannel);
   const resolveDiscordGuild = useMessengerStore((s) => s.resolveDiscordGuild);
   const syncDiscordGuildProjects = useMessengerStore((s) => s.syncDiscordGuildProjects);
   const fetchDiscordInviteUrl = useMessengerStore((s) => s.fetchDiscordInviteUrl);
   const sendTestMessage = useMessengerStore((s) => s.sendTestMessage);
   const sendSyncSummary = useMessengerStore((s) => s.sendSyncSummary);
-  const syncTelegramProjects = useMessengerStore((s) => s.syncTelegramProjects);
-  const startTelegramListener = useMessengerStore((s) => s.startTelegramListener);
-  const stopTelegramListener = useMessengerStore((s) => s.stopTelegramListener);
-  const refreshTelegramListenerStatus = useMessengerStore((s) => s.refreshTelegramListenerStatus);
-  const loadRecentTelegramMessages = useMessengerStore((s) => s.loadRecentTelegramMessages);
-  const telegramInbound = useMessengerStore((s) => s.telegramInbound);
-  const diagnoseTelegram = useMessengerStore((s) => s.diagnoseTelegram);
-  const telegramDiagnosis = useMessengerStore((s) => s.telegramDiagnosis);
-  const telegramDiagnosisRunning = useMessengerStore((s) => s.telegramDiagnosisRunning);
   const diagnoseDiscord = useMessengerStore((s) => s.diagnoseDiscord);
   const discordDiagnosis = useMessengerStore((s) => s.discordDiagnosis);
   const discordDiagnosisRunning = useMessengerStore((s) => s.discordDiagnosisRunning);
@@ -1360,7 +923,6 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const sendApprovalRequest = useMessengerStore((s) => s.sendApprovalRequest);
   const approvals = useMessengerStore((s) => s.approvals);
   const projects = useProjectsStore((s) => s.projects);
-  const tasks = useTasksStore((s) => s.tasks);
   const projectMappings = useMessengerStore((s) => s.projectMappings);
   const setProjectMapping = useMessengerStore((s) => s.setProjectMapping);
 
@@ -1373,8 +935,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const [targetInput, setTargetInput] = useState('');
   const [guildInput, setGuildInput] = useState('');
 
-  const token = conn.type === 'discord' ? conn.botToken : conn.telegramBotToken;
-  const target = conn.type === 'discord' ? conn.defaultChannelId : conn.telegramChatId;
+  const token = conn.botToken;
+  const target = conn.defaultChannelId;
 
   const hasToken = Boolean(token);
   const hasTarget = Boolean(target);
@@ -1385,7 +947,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   // the server-side auto-start on reboot picks it up. Runs when the
   // ConnectionCard first renders (user visits Messenger settings page).
   useEffect(() => {
-    if (conn.type === 'discord' && conn.botToken) {
+    if (conn.botToken) {
       saveDiscordConfig();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1393,13 +955,9 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
 
   const handleSaveToken = () => {
     if (!tokenInput.trim()) return;
-    if (conn.type === 'discord') {
-      updateConnection('discord', { botToken: tokenInput.trim(), enabled: true });
-      // Persist to server-side settings.json so auto-start works on reboot
-      setTimeout(() => saveDiscordConfig(), 0);
-    } else {
-      updateConnection('telegram', { telegramBotToken: tokenInput.trim(), enabled: true });
-    }
+    updateConnection('discord', { botToken: tokenInput.trim(), enabled: true });
+    // Persist to server-side settings.json so auto-start works on reboot
+    setTimeout(() => saveDiscordConfig(), 0);
     setTokenInput('');
     setShowToken(false);
     setShowTokenPlain(false);
@@ -1408,19 +966,12 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const handleSaveTarget = async () => {
     const value = targetInput.trim();
     if (!value) return;
-    if (conn.type === 'discord') {
-      updateConnection('discord', { defaultChannelId: value });
-      // Persist to server-side settings.json so auto-start works on reboot
-      setTimeout(() => saveDiscordConfig(), 0);
-      setTimeout(() => {
-        resolveDiscordChannel();
-      }, 0);
-    } else {
-      updateConnection('telegram', { telegramChatId: value });
-      setTimeout(() => {
-        resolveTelegramChat();
-      }, 0);
-    }
+    updateConnection('discord', { defaultChannelId: value });
+    // Persist to server-side settings.json so auto-start works on reboot
+    setTimeout(() => saveDiscordConfig(), 0);
+    setTimeout(() => {
+      resolveDiscordChannel();
+    }, 0);
     setTargetInput('');
   };
 
@@ -1431,63 +982,19 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
     const now = new Date().toLocaleString();
     return projects.map((p) => {
       const label = p.label || p.path.split('/').pop() || p.path;
-      const projectTasks = tasks.filter(
-        (t) => t.projectId === p.id || t.projectPath === p.path,
-      );
-      const open = projectTasks.filter(
-        (t) => t.status !== 'done' && t.status !== 'cancelled',
-      );
-      const done = projectTasks.filter((t) => t.status === 'done');
-      const next = projectTasks
-        .filter((t) => t.dueAt && t.status !== 'done' && t.status !== 'cancelled')
-        .sort((a, b) => Date.parse(a.dueAt!) - Date.parse(b.dueAt!))
-        .slice(0, 3);
-      const lines = [
-        `🤖 Otto sync — ${label}`,
-        '',
-        `• Open tasks: ${open.length}`,
-        `• Done: ${done.length}`,
-      ];
-      if (next.length > 0) {
-        lines.push('', 'Upcoming:');
-        for (const t of next) {
-          const when = t.dueAt ? new Date(t.dueAt).toLocaleString() : '';
-          lines.push(`• ${t.title}${when ? ` — ${when}` : ''}`);
-        }
-      }
-      lines.push('', `Last synced ${now}`);
+      const lines = [`🤖 Otto sync — ${label}`, '', `Last synced ${now}`];
       return { id: p.id, path: p.path, label, body: lines.join('\n') };
     });
   };
 
   const buildSummary = (): string => {
-    const projectCount = projects.length;
-    const openTasks = tasks.filter((t) => t.status !== 'done' && t.status !== 'cancelled').length;
-    const doneToday = tasks.filter((t) => {
-      if (t.status !== 'done') return false;
-      const ts = t.updatedAt ? Date.parse(t.updatedAt) : NaN;
-      return Number.isFinite(ts) && Date.now() - ts < 86_400_000;
-    }).length;
-    const upcoming = tasks
-      .filter((t) => t.dueAt && t.status !== 'done' && t.status !== 'cancelled')
-      .sort((a, b) => Date.parse(a.dueAt!) - Date.parse(b.dueAt!))
-      .slice(0, 3);
-
     const lines = [
-      conn.type === 'telegram' ? '🤖 *Otto sync summary*' : '**🤖 Otto sync summary**',
+      '**🤖 Otto sync summary**',
       '',
-      `• Projects: ${projectCount}`,
-      `• Open tasks: ${openTasks}`,
-      `• Completed (24h): ${doneToday}`,
+      `• Projects: ${projects.length}`,
+      '',
+      `_Sent ${new Date().toLocaleString()}_`,
     ];
-    if (upcoming.length > 0) {
-      lines.push('', 'Next up:');
-      for (const t of upcoming) {
-        const when = t.dueAt ? new Date(t.dueAt).toLocaleString() : '';
-        lines.push(`• ${t.title}${when ? ` — ${when}` : ''}`);
-      }
-    }
-    lines.push('', `_Sent ${new Date().toLocaleString()}_`);
     return lines.join('\n');
   };
 
@@ -1499,10 +1006,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           <Icon className={cn('size-5', meta.color)} />
           <span className="text-sm font-medium text-foreground">{meta.name}</span>
           <StatusBadge status={conn.status} />
-          {conn.type === 'telegram' && conn.telegramBotUsername && (
-            <span className="text-[10px] text-muted-foreground">@{conn.telegramBotUsername}</span>
-          )}
-          {conn.type === 'discord' && conn.discordBotUsername && (
+          {conn.discordBotUsername && (
             <span className="text-[10px] text-muted-foreground">
               {conn.discordBotUsername}
               {conn.discordBotDiscriminator && conn.discordBotDiscriminator !== '0'
@@ -1566,27 +1070,19 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
               !hasToken
                 ? undefined
                 : isConnected
-                  ? conn.type === 'telegram'
-                    ? `connected as ${conn.telegramBotUsername ? '@' + conn.telegramBotUsername : 'bot'}`
-                    : `connected as ${conn.discordBotUsername ?? 'bot'} — ${conn.discordGuilds?.length ?? 0} server${(conn.discordGuilds?.length ?? 0) === 1 ? '' : 's'}`
+                  ? `connected as ${conn.discordBotUsername ?? 'bot'} — ${conn.discordGuilds?.length ?? 0} server${(conn.discordGuilds?.length ?? 0) === 1 ? '' : 's'}`
                   : 'click "Verify token" above'
             }
           />
           <ChecklistItem
-            done={hasTarget || (conn.type === 'discord' && Boolean(conn.discordGuildId))}
-            label={
-              conn.type === 'telegram'
-                ? '3. Add chat ID'
-                : '3. Add Server ID (or single channel ID)'
-            }
+            done={hasTarget || Boolean(conn.discordGuildId)}
+            label="3. Add Server ID (or single channel ID)"
             hint={
               hasTarget
-                ? conn.type === 'telegram'
-                  ? (conn.telegramChatTitle ?? conn.telegramChatId)
-                  : conn.discordChannelName
-                    ? `#${conn.discordChannelName}${conn.guildName ? ` (${conn.guildName})` : ''}`
-                    : conn.defaultChannelId
-                : conn.type === 'discord' && conn.discordGuildId
+                ? conn.discordChannelName
+                  ? `#${conn.discordChannelName}${conn.guildName ? ` (${conn.guildName})` : ''}`
+                  : conn.defaultChannelId
+                : conn.discordGuildId
                   ? `${conn.guildName ?? conn.discordGuildId} · ${conn.discordGuildChannels?.length ?? 0} channel${(conn.discordGuildChannels?.length ?? 0) === 1 ? '' : 's'}`
                   : 'see the field below'
             }
@@ -1604,14 +1100,10 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
 
         {setupComplete && (
           <div className="mt-1.5 text-[11px] text-green-700 dark:text-green-400 leading-snug">
-            Otto will post task completions, schedule triggers and errors to{' '}
-            {conn.type === 'telegram'
-              ? conn.telegramChatTitle
-                ? `"${conn.telegramChatTitle}"`
-                : 'your chat'
-              : conn.discordChannelName
-                ? `#${conn.discordChannelName}${conn.guildName ? ` in ${conn.guildName}` : ''}`
-                : 'your channel'}{' '}
+            Otto will post updates to{' '}
+            {conn.discordChannelName
+              ? `#${conn.discordChannelName}${conn.guildName ? ` in ${conn.guildName}` : ''}`
+              : 'your channel'}{' '}
             based on the sync mode below.
           </div>
         )}
@@ -1687,8 +1179,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         </div>
       )}
 
-      {/* Discord-only: invite bot to server hint */}
-      {conn.type === 'discord' && token && isConnected && (
+      {/* Invite bot to server hint */}
+      {token && isConnected && (
         <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs space-y-1.5">
           <div className="font-medium text-foreground flex items-center gap-1.5">
             <RiInformationLine className="size-3.5 text-primary" />
@@ -1748,7 +1240,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
       {/* Discord-only: server (guild) ID for server-wide sync.
           Rendered as soon as the token is saved so users see the option
           before verify succeeds (resolve-guild itself surfaces bad-token errors). */}
-      {conn.type === 'discord' && token && (
+      {token && (
         <div className="rounded-md border border-primary/20 bg-primary/5 p-3 text-xs space-y-2">
           <div className="font-medium text-foreground flex items-center gap-1.5">
             <RiDiscordLine className="size-3.5 text-[#5865F2]" />
@@ -1945,20 +1437,14 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
               <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground">
                 {target}
               </code>
-              {conn.type === 'telegram' && conn.telegramChatTitle && (
-                <span className="text-muted-foreground">
-                  {conn.telegramChatTitle}
-                  {conn.telegramChatType ? ` (${conn.telegramChatType})` : ''}
-                </span>
-              )}
-              {conn.type === 'discord' && conn.discordChannelName && (
+              {conn.discordChannelName && (
                 <span className="text-muted-foreground">
                   #{conn.discordChannelName}
                   {conn.guildName ? ` · ${conn.guildName}` : ''}
                   {conn.discordChannelTypeLabel ? ` · ${conn.discordChannelTypeLabel}` : ''}
                 </span>
               )}
-              {conn.type === 'discord' && conn.botToken && conn.defaultChannelId && !conn.discordChannelName && (
+              {conn.botToken && conn.defaultChannelId && !conn.discordChannelName && (
                 <button
                   type="button"
                   onClick={() => resolveDiscordChannel()}
@@ -1971,23 +1457,14 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
               <button
                 type="button"
                 onClick={() => {
-                  if (conn.type === 'discord') {
-                    updateConnection('discord', {
-                      defaultChannelId: undefined,
-                      discordChannelName: undefined,
-                      discordChannelType: undefined,
-                      discordChannelTypeLabel: undefined,
-                    });
-                    // Persist to server-side settings.json so auto-start works on reboot
-                    setTimeout(() => saveDiscordConfig(), 0);
-                  } else {
-                    updateConnection('telegram', {
-                      telegramChatId: undefined,
-                      telegramChatTitle: undefined,
-                      telegramChatType: undefined,
-                      telegramIsForum: undefined,
-                    });
-                  }
+                  updateConnection('discord', {
+                    defaultChannelId: undefined,
+                    discordChannelName: undefined,
+                    discordChannelType: undefined,
+                    discordChannelTypeLabel: undefined,
+                  });
+                  // Persist to server-side settings.json so auto-start works on reboot
+                  setTimeout(() => saveDiscordConfig(), 0);
                 }}
                 className="text-primary text-[10px] hover:underline"
               >
@@ -2000,7 +1477,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
 
       {/* Optional: Discord owner user ID — auto-joins web-created threads so
           they appear under the channel for you (a bot-only thread stays hidden). */}
-      {token && conn.type === 'discord' && (
+      {token && (
         <div className="space-y-2">
           <div className="text-xs font-medium text-foreground">Your Discord user ID (optional)</div>
           <div className="text-[11px] text-muted-foreground leading-snug">
@@ -2020,7 +1497,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
 
       {/* Step 3: Action buttons - the visible "what next" call to action.
           For Discord, server-id alone also unlocks the CTA (Sync now works with just guildId). */}
-      {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (
+      {hasToken && (hasTarget || conn.discordGuildId) && (
         <div className="space-y-2 rounded-md border border-primary/20 bg-primary/5 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -2039,10 +1516,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
             <button
               type="button"
               onClick={() => {
-                if (conn.type === 'telegram') {
-                  // Per-project sync that also creates forum topics when applicable.
-                  syncTelegramProjects(buildProjectPayloads(), buildSummary());
-                } else if (conn.type === 'discord' && conn.discordGuildId) {
+                if (conn.discordGuildId) {
                   // Server-wide sync: per-project channel + thread.
                   syncDiscordGuildProjects(buildProjectPayloads(), buildSummary());
                 } else {
@@ -2078,16 +1552,11 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         </div>
       )}
 
-      {/* Telegram inline warnings — explain real Telegram pitfalls before the user clicks Sync now */}
-      {conn.type === 'telegram' && hasToken && isConnected && (
-        <TelegramWarnings conn={conn} />
-      )}
-
       {/* OpenCode bridge — when on, the listeners route inbound messages
           through OpenCode and stream the response back. This is what turns
           the messenger into a real OpenChamber chat surface, instead of the
           legacy "Otto received: ..." ping echo. */}
-      {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (
+      {hasToken && (hasTarget || conn.discordGuildId) && (
         <BridgePanel
           conn={conn}
           type={conn.type}
@@ -2095,46 +1564,14 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           refreshBridgeStatus={refreshBridgeStatus}
           onToggle={(v) => {
             updateConnection(conn.type, { bridgeEnabled: v });
-            // Persist to server-side settings.json when toggling bridge for Discord
-            if (conn.type === 'discord') setTimeout(() => saveDiscordConfig(), 0);
+            // Persist to server-side settings.json when toggling the bridge
+            setTimeout(() => saveDiscordConfig(), 0);
           }}
         />
       )}
 
-      {/* Telegram inbound listener */}
-      {conn.type === 'telegram' && hasToken && hasTarget && (
-        <TelegramListenerPanel
-          conn={conn}
-          inbound={telegramInbound}
-          startListener={startTelegramListener}
-          stopListener={stopTelegramListener}
-          refreshStatus={refreshTelegramListenerStatus}
-          loadRecent={loadRecentTelegramMessages}
-          onToggleAutoReply={(v) =>
-            updateConnection('telegram', { telegramListenerAutoReply: v })
-          }
-        />
-      )}
-
-      {/* Telegram diagnose + per-topic sync results */}
-      {conn.type === 'telegram' && hasToken && (
-        <TelegramDiagnosePanel
-          conn={conn}
-          diagnosis={telegramDiagnosis}
-          running={telegramDiagnosisRunning}
-          runDiagnose={diagnoseTelegram}
-        />
-      )}
-
-      {conn.type === 'telegram' && conn.lastSyncTopics && conn.lastSyncTopics.length > 0 && (
-        <TelegramSyncResults
-          topics={conn.lastSyncTopics}
-          postedTo={conn.lastSyncPostedTo ?? 'forum'}
-        />
-      )}
-
-      {/* Discord Gateway listener + history (parity with Telegram listener) */}
-      {conn.type === 'discord' && hasToken && (conn.discordGuildId || conn.defaultChannelId) && (
+      {/* Discord Gateway listener + history */}
+      {hasToken && (conn.discordGuildId || conn.defaultChannelId) && (
         <DiscordListenerPanel
           conn={conn}
           inbound={discordInbound}
@@ -2150,8 +1587,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         />
       )}
 
-      {/* Discord diagnose (parity with Telegram) */}
-      {conn.type === 'discord' && hasToken && (
+      {/* Discord diagnose */}
+      {hasToken && (
         <DiscordDiagnosePanel
           conn={conn}
           diagnosis={discordDiagnosis}
@@ -2160,13 +1597,12 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         />
       )}
 
-      {conn.type === 'discord' && conn.lastSyncChannels && conn.lastSyncChannels.length > 0 && (
+      {conn.lastSyncChannels && conn.lastSyncChannels.length > 0 && (
         <DiscordSyncResults channels={conn.lastSyncChannels} guildName={conn.guildName} />
       )}
 
-      {/* Approval requests panel — shared by both messengers, only rendered when
-          this card has a usable target. */}
-      {hasToken && (hasTarget || (conn.type === 'discord' && conn.discordGuildId)) && (
+      {/* Approval requests panel — only rendered when this card has a usable target. */}
+      {hasToken && (hasTarget || conn.discordGuildId) && (
         <ApprovalsPanel
           type={conn.type}
           approvals={approvals.filter((a) => a.type === conn.type)}
@@ -2228,16 +1664,13 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
       {conn.syncProjects && projects.length > 0 && (
         <details className="group">
           <summary className="cursor-pointer text-xs font-medium text-foreground select-none">
-            Project → {conn.type === 'discord' ? 'Channel' : 'Topic'} Mapping{' '}
+            Project → Channel Mapping{' '}
             <span className="text-[10px] text-muted-foreground font-normal">(optional)</span>
           </summary>
           <div className="mt-2 space-y-2">
             {projects.slice(0, 10).map((project) => {
               const mapping = projectMappings.find((m) => m.projectId === project.id);
-              const channelName =
-                conn.type === 'discord'
-                  ? mapping?.discord?.channelName
-                  : mapping?.telegram?.topicName;
+              const channelName = mapping?.discord?.channelName;
               return (
                 <div key={project.id} className="flex items-center gap-2 text-xs">
                   <span className="text-foreground min-w-0 truncate flex-1">
@@ -2253,9 +1686,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
                         projectId: project.id,
                         projectLabel:
                           project.label || project.path.split('/').pop() || project.path,
-                        ...(conn.type === 'discord'
-                          ? { discord: { channelId: project.id, channelName: name } }
-                          : { telegram: { topicId: project.id, topicName: name } }),
+                        discord: { channelId: project.id, channelName: name },
                       };
                       setProjectMapping(update);
                     }}
@@ -2280,7 +1711,7 @@ export const MessengerSection: React.FC = () => {
 
   const availableTypes: MessengerType[] = useMemo(
     () =>
-      (['discord', 'telegram'] as const).filter(
+      (['discord'] as const).filter(
         (type) => !connections.some((c) => c.type === type),
       ),
     [connections],
@@ -2292,7 +1723,7 @@ export const MessengerSection: React.FC = () => {
         <div>
           <h3 className="text-sm font-medium text-foreground">Messenger Sync</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Push Otto task, project and schedule updates to Discord and Telegram.
+            Chat with your assistant from Discord and mirror project updates into your server.
           </p>
         </div>
       </div>

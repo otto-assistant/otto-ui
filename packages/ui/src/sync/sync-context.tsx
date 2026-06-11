@@ -1651,6 +1651,12 @@ export function SyncProvider(props: {
               config: globalState.config,
               projects: globalState.projects,
               providers: globalState.providers,
+              // Global path metadata lets bootstrapDirectory skip a redundant
+              // per-directory path.get round-trip (the SDK call is not
+              // directory-scoped, so the response is identical anyway).
+              // Only seed once bootstrapGlobal actually resolved it — the
+              // initial placeholder is a truthy object with empty fields.
+              path: globalState.path.directory ? globalState.path : undefined,
             },
             loadSessions: (dir) => retry(async () => {
               const rootSessions = (await listGlobalSessionPages(props.sdk, {

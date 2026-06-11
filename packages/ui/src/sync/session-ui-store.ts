@@ -57,7 +57,6 @@ import { useSelectionStore } from "./selection-store"
 import { getViewportSessionMemory, useViewportStore, viewportSessionKey } from "./viewport-store"
 import { useSessionWorktreeStore } from "./session-worktree-store"
 import { getAttachedSessionDirectory } from "./session-worktree-contract"
-import { useHiddenSessionsStore } from "@/stores/useHiddenSessionsStore"
 import { setSessionOpener } from "./session-navigation"
 import { getRuntimeKey } from "@/lib/runtime-switch"
 import { rememberRuntimeLiveStatus } from "./runtime-live-memory"
@@ -842,18 +841,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         get().resolvePendingDraftWorktreeTarget(draft.pendingWorktreeRequestId, draftDirectoryOverride)
       }
 
-      const pendingHiddenTaskId = useHiddenSessionsStore.getState().consumePendingHiddenTask()
-
       const created = await get().createSession(draft.title, draftDirectoryOverride, draft.parentID ?? null)
       if (!created?.id) throw new Error("Failed to create session")
-
-      if (pendingHiddenTaskId) {
-        useHiddenSessionsStore.getState().hideSession(created.id, pendingHiddenTaskId)
-        // Record the session id back on the task so the user can surface it later.
-        void import("@/stores/useTasksStore").then(({ useTasksStore }) => {
-          useTasksStore.getState().updateTask(pendingHiddenTaskId, { lastSessionId: created.id })
-        }).catch(() => { /* ignored */ })
-      }
 
       persistDraftTarget({
         projectId: draftProjectId,
@@ -880,9 +869,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       get().initializeNewOpenChamberSession(created.id, configState.agents ?? [])
 
       get().closeNewSessionDraft()
-      if (!pendingHiddenTaskId) {
-        get().setCurrentSession(created.id, createdDirectory)
-      }
+      get().setCurrentSession(created.id, createdDirectory)
 
       if (draftTargetFolderId) {
         const scopeKey = draftDirectoryOverride || created.directory || null

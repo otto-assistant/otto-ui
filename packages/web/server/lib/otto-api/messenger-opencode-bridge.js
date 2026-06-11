@@ -5,34 +5,30 @@ import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js'
 import { renderPartForMessenger, renderPermissionContext, escapeMd, clipBlock } from './messenger-render.js';
 
 /**
- * Bidirectional bridge between Discord/Telegram and OpenCode chat sessions.
+ * Bidirectional bridge between Discord and OpenCode chat sessions.
  *
  * Threading model (modelled after https://github.com/remorses/kimaki):
  *   - Each new conversation starter in a Discord text channel spawns a public
  *     Thread on that message via POST /channels/:id/messages/:id/threads. The
  *     OpenCode session is bound to the THREAD, not the channel. Follow-up
  *     messages posted inside the thread reuse the same session.
- *   - Telegram already gets per-topic surfaces from message_thread_id; no
- *     thread creation needed.
  *
  * Outbound model:
- *   - One new Discord/Telegram message per renderable OpenCode part.
+ *   - One new Discord message per renderable OpenCode part.
  *     No edit-in-place — text streams complete (part.time.end set) before
  *     they're posted, tool runs post a single one-liner per state change,
  *     reasoning posts a `┣ thinking` marker.
  *   - Tool summaries follow kimaki's compact format: file name and ±line
  *     count for edits, file name for reads, escaped command for bash,
  *     match count for glob/grep, etc. Not `[⋯ tool-name]`.
- *   - Typing indicator pulses every 7s (Discord) / 4s (Telegram) while a
- *     session has unfinished assistant work — to give the user a visible
- *     "thinking…" affordance without spamming the chat.
+ *   - Typing indicator pulses every 7s while a session has unfinished
+ *     assistant work — to give the user a visible "thinking…" affordance
+ *     without spamming the chat.
  */
 
 const DISCORD_LIMIT = 2000;
-const TELEGRAM_LIMIT = 4096;
 const NAME_TTL_MS = 5 * 60_000;
 const TYPING_PULSE_DISCORD_MS = 7_000;
-const TYPING_PULSE_TELEGRAM_MS = 4_000;
 
 function tokenHash(token) {
   if (!token) return '';
@@ -49,8 +45,6 @@ function tokenHash(token) {
  *   exists we key purely by the thread id. The parent-channel id is
  *   irrelevant from then on (and Discord MESSAGE_CREATE on a follow-up
  *   gives us `channel_id = thread_id` with no `parent_id` in the payload).
- *
- * Telegram: forum topics are scoped per-chat, so we keep "chat:topic".
  */
 function targetKey({ type, channelId, threadId }) {
   if (type === 'discord') {
@@ -59,8 +53,8 @@ function targetKey({ type, channelId, threadId }) {
   return threadId ? `${channelId}:${threadId}` : `${channelId}`;
 }
 
-function maxLenFor(type) {
-  return type === 'discord' ? DISCORD_LIMIT : TELEGRAM_LIMIT;
+function maxLenFor(_type) {
+  return DISCORD_LIMIT;
 }
 
 function slugify(s) {
@@ -93,7 +87,7 @@ function pickProjectForName(projects, name) {
 }
 
 // ---------------------------------------------------------------------------
-// Discord / Telegram REST adapters
+// Discord REST adapters
 // ---------------------------------------------------------------------------
 
 async function sendDiscord({ token, channelId, content }) {
@@ -108,19 +102,6 @@ async function sendDiscord({ token, channelId, content }) {
   if (!r.ok) return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
   const data = await r.json();
   return { ok: true, id: data.id };
-}
-
-async function sendTelegram({ token, chatId, threadId, content }) {
-  const body = { chat_id: chatId, text: content.slice(0, TELEGRAM_LIMIT) };
-  if (threadId) body.message_thread_id = Number(threadId);
-  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const d = await r.json();
-  if (!d.ok) return { ok: false, error: d.description ?? `Telegram ${r.status}` };
-  return { ok: true, id: d.result?.message_id };
 }
 
 // ── Approval flow helpers ─────────────────────────────────────────────
@@ -194,36 +175,7 @@ async function sendApprovalToSurface({ type, token, channelId, threadId, permiss
     return { ok: true, approvalId, messageId: data.id };
   }
 
-  // Telegram
-  // Build Telegram inline keyboard: Approve, Always Allow, Deny
-  const tgButtons = [
-    { text: '✅ Allow Once', callback_data: `otto-approve:${approvalId}` },
-    { text: alwaysStr ? `Always: ${alwaysStr}` : '♻️ Always Allow', callback_data: `otto-approve-always:${approvalId}` },
-    { text: '❌ Deny', callback_data: `otto-deny:${approvalId}` },
-  ];
-
-  const tgBody = {
-    chat_id: channelId,
-    text: content.slice(0, TELEGRAM_LIMIT),
-    reply_markup: {
-      inline_keyboard: [tgButtons],
-    },
-  };
-  if (threadId) tgBody.message_thread_id = Number(threadId);
-
-  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(tgBody),
-  });
-  const d = await r.json();
-  if (!d.ok) {
-    console.error('[BRIDGE] Failed to send approval to Telegram:', d.description ?? `HTTP ${r.status}`);
-    return { ok: false, error: d.description ?? `Telegram ${r.status}` };
-  }
-  // Only store context after the Telegram API call succeeds
-  storeApprovalContext();
-  return { ok: true, approvalId, messageId: d.result?.message_id };
+  return { ok: false, error: `Unsupported messenger type: ${type}` };
 }
 
 /**
@@ -319,20 +271,6 @@ async function discordTyping({ token, channelId }) {
   }
 }
 
-async function telegramTyping({ token, chatId, threadId }) {
-  try {
-    const body = { chat_id: chatId, action: 'typing' };
-    if (threadId) body.message_thread_id = Number(threadId);
-    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch {
-    // ignore
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Bridge factory
 // ---------------------------------------------------------------------------
@@ -368,7 +306,7 @@ export function createMessengerOpencodeBridge({
   getGlobalDefaults = null,
   /**
    * Optional default messenger target for web-originated OpenCode sessions.
-   * Discord/Telegram-originated sessions already have a bound context; this
+   * Discord-originated sessions already have a bound context; this
    * lets unbound web UI sessions mirror into the configured messenger space.
    * Signature: ({ sessionId, projectPath }) => { type, token, channelId, threadId?, projectPath? } | null
    */
@@ -406,7 +344,7 @@ export function createMessengerOpencodeBridge({
   // OpenCode events should be routed to, and the set of part ids we've
   // already posted (so we don't double-post on partial-update events).
   /** @type {Map<string, {
-   *   type: 'discord'|'telegram',
+   *   type: 'discord',
    *   token: string,
    *   channelId: string,
    *   threadId: string|null,
@@ -497,7 +435,7 @@ export function createMessengerOpencodeBridge({
   /** @type {Map<string, Promise<object|null>>} */
   const pendingContextCreations = new Map();
 
-  // Prompts that arrived FROM a messenger (Discord/Telegram inbound). OpenCode
+  // Prompts that arrived FROM a messenger (Discord inbound). OpenCode
   // echoes every prompt back as a `user` part; when the session also mirrors web
   // activity into the messenger (a thread that was created from the web UI but is
   // later answered from Discord), that echo would re-post the user's own message
@@ -588,14 +526,6 @@ export function createMessengerOpencodeBridge({
           const data = await r.json();
           name = data.name ?? null;
         }
-      } else if (type === 'telegram') {
-        const r = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: channelId }),
-        });
-        const data = await r.json();
-        if (data.ok) name = data.result?.title ?? data.result?.username ?? null;
       }
     } catch {
       // ignore
@@ -894,7 +824,7 @@ export function createMessengerOpencodeBridge({
       const ch = threadId ?? channelId;
       return sendDiscord({ token, channelId: ch, content });
     }
-    return sendTelegram({ token, chatId: channelId, threadId, content });
+    return { ok: false, error: `Unsupported messenger type: ${type}` };
   }
 
   function startTypingPulse(ctx) {
@@ -903,13 +833,8 @@ export function createMessengerOpencodeBridge({
       if (!sessionContexts.has(ctx.sessionId)) return;
       if (ctx.type === 'discord') {
         await discordTyping({ token: ctx.token, channelId: ctx.threadId ?? ctx.channelId });
-      } else {
-        await telegramTyping({ token: ctx.token, chatId: ctx.channelId, threadId: ctx.threadId });
       }
-      ctx.typingTimer = setTimeout(
-        pulse,
-        ctx.type === 'discord' ? TYPING_PULSE_DISCORD_MS : TYPING_PULSE_TELEGRAM_MS,
-      );
+      ctx.typingTimer = setTimeout(pulse, TYPING_PULSE_DISCORD_MS);
     };
     // First pulse immediately so the user sees the indicator right away.
     void pulse();
@@ -1064,7 +989,7 @@ export function createMessengerOpencodeBridge({
     const verbosity = normalizeVerbosity(ctx.verbosity);
 
     // Skip duplicates we've already posted (parts get many updates as they
-    // stream — we only want one Discord/Telegram message per logical part).
+    // stream — we only want one Discord message per logical part).
     // Tools transition pending → running → completed/error; we want the
     // running/error/completed event with a stable state, not every delta.
     if (partType === 'text') {
@@ -1131,17 +1056,17 @@ export function createMessengerOpencodeBridge({
       if (role === 'user') {
         // Mirror the user's own prompt into the messenger as a **Web** block.
         // Only for web-originated sessions: a session already bound to a
-        // Discord/Telegram surface had its prompt typed there already, so
+        // Discord surface had its prompt typed there already, so
         // echoing it back would duplicate it.
         const ctx = sessionContexts.get(sessionId);
         if (!ctx) {
-          // Check the bridge store: if this session has a Discord/Telegram
+          // Check the bridge store: if this session has a Discord
           // binding, the user's prompt came from a messenger, not the web.
           // This handles edge cases where the in-memory context was lost
           // (e.g. server restart while a session was actively streaming).
           const messengerBindings = bridgeStore
             .lookupBySessionId(sessionId)
-            .filter((b) => b.type === 'discord' || b.type === 'telegram');
+            .filter((b) => b.type === 'discord');
           if (messengerBindings.length === 0) {
             await emitWebUserPart(sessionId, part, { projectPath: envelopeDirectory });
           }
@@ -1457,7 +1382,7 @@ export function createMessengerOpencodeBridge({
   // --- Inbound: bridge a messenger message into OpenCode -----------------
   /**
    * @param {object} args
-   * @param {'discord'|'telegram'} args.type
+   * @param {'discord'} args.type
    * @param {string} args.token
    * @param {string} args.channelId
    * @param {string|null} [args.threadId]
@@ -1714,7 +1639,7 @@ export function createMessengerOpencodeBridge({
     //      thread was spawned still applies to the conversation that
     //      thread hosts
     //   3. project default    — settable from `/model default <X>` or the
-    //      OpenChamber UI; applies to every Discord/Telegram surface
+    //      OpenChamber UI; applies to every Discord surface
     //      that lands in this project
     //   4. OpenCode default   — nothing set, server picks
     let modelOverride = null;
@@ -1876,14 +1801,14 @@ export function createMessengerOpencodeBridge({
 
   /**
    * Wire up the bridge to listen for approval button clicks from the
-   * Discord/Telegram listeners and respond to OpenCode.
+   * Discord listener and respond to OpenCode.
    *
    * @param {Function} respondToOpenCode - async ({ sessionID, requestID, reply, directory }) => void
    */
   /**
-   * Direct handler for approval decisions from Discord/Telegram button clicks.
+   * Direct handler for approval decisions from Discord button clicks.
    * Bypasses the global event hub to avoid routing issues.
-   * Called by the Discord/Telegram listeners directly or via initApprovalListener.
+   * Called by the Discord listener directly or via initApprovalListener.
    *
    * @param {string} approvalId
    * @param {'approve'|'approve-always'|'deny'} decision
@@ -1929,7 +1854,7 @@ export function createMessengerOpencodeBridge({
       const payload = event?.payload ?? event;
       if (!payload || typeof payload !== 'object') return;
       const type = payload.type ?? payload.event ?? null;
-      if (type !== 'messenger.discord.approval' && type !== 'messenger.telegram.approval') return;
+      if (type !== 'messenger.discord.approval') return;
       handleApprovalDecision(payload.approvalId, payload.decision);
     };
     const unsub = globalEventHub.subscribeEvent?.(handler);

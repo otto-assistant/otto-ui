@@ -355,8 +355,6 @@ export const registerOpenCodeProxy = (app, deps) => {
   });
 
   // Readiness gate — return 503 while OpenCode is starting/restarting
-  // NOTE: req.path is relative to the '/api' mount point, so a request
-  // to /api/opencode/health has req.path === '/opencode/health'.
   app.use('/api', (req, res, next) => {
     if (
       req.path.startsWith('/themes/custom') ||
@@ -366,8 +364,7 @@ export const registerOpenCodeProxy = (app, deps) => {
       req.path.startsWith('/config/settings') ||
       req.path.startsWith('/config/skills') ||
       req.path === '/config/reload' ||
-      req.path === '/health' ||
-      req.path.startsWith('/opencode/health')
+      req.path === '/health'
     ) {
       return next();
     }

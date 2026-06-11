@@ -1520,32 +1520,6 @@ export async function setLocalIdentity(directory, profile) {
 // iterate the list. The cutoffs are intentionally generous: any real-world
 // "show me what changed" workflow fits well under 5000 entries.
 const STATUS_FILES_HARD_CAP = 5000;
-const STATUS_LINE_COUNT_THRESHOLD = 500;
-const STATUS_NEW_FILE_READ_CONCURRENCY = 16;
-const STATUS_NEW_FILE_MAX_BYTES = 2 * 1024 * 1024;
-
-async function mapWithConcurrency(items, concurrency, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const index = cursor;
-      if (index >= items.length) return;
-      cursor = index + 1;
-      try {
-        results[index] = await fn(items[index], index);
-      } catch (error) {
-        results[index] = undefined;
-        // Per-file errors are swallowed — getStatus already treats them as best-effort.
-        if (error) {
-          console.warn('[git.getStatus] file work failed:', error?.message ?? error);
-        }
-      }
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
 
 export async function getStatus(directory, options = {}) {
   const lightMode = options.mode === 'light';
@@ -1613,7 +1587,7 @@ export async function getStatus(directory, options = {}) {
     const newFileStats = [];
 
     if (!lightMode) {
-      for (const file of status.files) {
+      for (const file of cappedFiles) {
         if (newFileStats.length >= MAX_NEW_FILE_STATS) {
           break;
         }
@@ -1804,7 +1778,7 @@ export async function getStatus(directory, options = {}) {
       ahead,
       behind,
       upstreamComparison,
-      files: status.files.map((f) => ({
+      files: cappedFiles.map((f) => ({
         path: f.path,
         index: f.index,
         working_dir: f.working_dir,

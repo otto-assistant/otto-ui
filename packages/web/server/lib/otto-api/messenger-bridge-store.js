@@ -88,7 +88,7 @@ export class MessengerBridgeStore {
     // Per-project defaults. Resolution order at prompt time:
     //   surface override (channel/thread)  >  parent-channel fallback  >
     //   project default  >  OpenCode default.
-    // Settable from Discord/Telegram via `/model default <p/m>` and from
+    // Settable from Discord via `/model default <p/m>` and from
     // the OpenChamber UI via POST /api/otto/messenger/bridge/project-defaults.
     this.db.run(`
       CREATE TABLE IF NOT EXISTS messenger_project_defaults (

@@ -13,7 +13,6 @@ import { useSessionStatusBootstrap } from '@/hooks/useSessionStatusBootstrap';
 import { useRouter } from '@/hooks/useRouter';
 import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
 import { useOttoWebSocket } from '@/hooks/useOttoWebSocket';
-import { useOttoSync } from '@/hooks/useOttoSync';
 import { useMessengerBridgeToasts } from '@/hooks/useMessengerBridgeToasts';
 import { useWebNotificationStream } from '@/hooks/useWebNotificationStream';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
@@ -64,14 +63,6 @@ import { markStartupTrace, startupTraceEnabled } from '@/lib/startupTrace';
 // Lazy-loaded heavy views — loaded on demand to reduce initial bundle size.
 const OnboardingScreen = lazyWithChunkRecovery(() =>
   import('@/components/onboarding/OnboardingScreen').then((m) => ({ default: m.OnboardingScreen })),
-);
-
-const VSCodeLayoutLazy = lazyWithChunkRecovery(() =>
-  import('@/components/layout/VSCodeLayout').then((m) => ({ default: m.VSCodeLayout })),
-);
-
-const AgentManagerViewLazy = lazyWithChunkRecovery(() =>
-  import('@/components/views/agent-manager').then((m) => ({ default: m.AgentManagerView })),
 );
 
 const AboutDialogWrapper: React.FC = () => {
@@ -674,10 +665,8 @@ function App({ apis }: AppProps) {
 
   usePushVisibilityBeacon({ enabled: embeddedBackgroundWorkEnabled });
   // Activate the Otto realtime WS so messenger.bridge.* events, approval
-  // decisions and incoming Telegram/Discord messages reach the UI.
+  // decisions and incoming Discord messages reach the UI.
   useOttoWebSocket();
-  // Refresh tasks / dashboard / memory / persona stores on matching realtime events.
-  useOttoSync();
   // Surface bridge events as user-visible toasts.
   useMessengerBridgeToasts();
   useWebNotificationStream({ enabled: embeddedBackgroundWorkEnabled });
@@ -900,54 +889,6 @@ function App({ apis }: AppProps) {
           onRetry={() => { void handleManualInitRetry(); }}
           isRetrying={manualInitRetrying}
         />
-      </ErrorBoundary>
-    );
-  }
-
-  // VS Code runtime - simplified layout without git/terminal views
-  if (isVSCodeRuntime) {
-    // Check if this is the Agent Manager panel
-    const panelType = typeof window !== 'undefined'
-      ? (window as { __OPENCHAMBER_PANEL_TYPE__?: 'chat' | 'agentManager' }).__OPENCHAMBER_PANEL_TYPE__
-      : 'chat';
-
-    if (panelType === 'agentManager') {
-    return (
-      <ErrorBoundary>
-        <SyncProvider sdk={opencodeClient.getSdkClient()} directory={currentDirectory || ''}>
-          <RuntimeAPIProvider apis={apis}>
-            <TooltipProvider delayDuration={700} skipDelayDuration={150}>
-              <div className="h-full text-foreground bg-background">
-                <SyncAppEffects embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled} />
-                <React.Suspense fallback={<div className="h-full" />}>
-                  <AgentManagerViewLazy />
-                </React.Suspense>
-                <Toaster />
-              </div>
-            </TooltipProvider>
-          </RuntimeAPIProvider>
-        </SyncProvider>
-      </ErrorBoundary>
-    );
-    }
-
-    return (
-      <ErrorBoundary>
-        <SyncProvider sdk={opencodeClient.getSdkClient()} directory={currentDirectory || ''}>
-          <RuntimeAPIProvider apis={apis}>
-            <FireworksProvider>
-              <TooltipProvider delayDuration={700} skipDelayDuration={150}>
-                <div className="h-full text-foreground bg-background">
-                  <SyncAppEffects embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled} />
-                  <React.Suspense fallback={<div className="h-full" />}>
-                    <VSCodeLayoutLazy />
-                  </React.Suspense>
-                  <Toaster />
-                </div>
-              </TooltipProvider>
-            </FireworksProvider>
-          </RuntimeAPIProvider>
-        </SyncProvider>
       </ErrorBoundary>
     );
   }

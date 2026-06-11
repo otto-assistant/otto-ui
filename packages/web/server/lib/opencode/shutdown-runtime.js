@@ -70,13 +70,13 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       }
     }
 
-    const ottoEventsWebSocketRuntime = getOttoEventsWebSocketRuntime();
+    const ottoEventsWebSocketRuntime = getOttoEventsWebSocketRuntime?.();
     if (ottoEventsWebSocketRuntime) {
       try {
         await ottoEventsWebSocketRuntime.close();
       } catch {
       } finally {
-        setOttoEventsWebSocketRuntime(null);
+        setOttoEventsWebSocketRuntime?.(null);
       }
     }
 

@@ -11,7 +11,6 @@ import { VoiceSettings } from './VoiceSettings';
 import { TunnelSettings } from './TunnelSettings';
 import { OpenCodeCliSettings } from './OpenCodeCliSettings';
 import { DesktopNetworkSettings } from './DesktopNetworkSettings';
-import { DesktopAutostartSettings } from './DesktopAutostartSettings';
 import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { useDeviceInfo } from '@/lib/device';
@@ -64,9 +63,6 @@ export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section }) => 
                             <OpenCodeCliSettings />
                         </div>
                     )}
-                    <div className="border-t border-border/40 pt-6">
-                        <DesktopAutostartSettings />
-                    </div>
                     <div className="border-t border-border/40 pt-6">
                         <SessionRetentionSettings />
                     </div>
@@ -169,9 +165,6 @@ const SessionsSectionContent: React.FC = () => {
                     <OpenCodeCliSettings />
                 </div>
             )}
-            <div className="border-t border-border/40 pt-6">
-                <DesktopAutostartSettings />
-            </div>
             <div className="border-t border-border/40 pt-6">
                 <SessionRetentionSettings />
             </div>

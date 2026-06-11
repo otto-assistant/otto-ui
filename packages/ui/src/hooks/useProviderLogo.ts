@@ -25,8 +25,6 @@ const LOGO_ALIAS = new Map<string, string>([
     ['ollama-cloud', 'ollama'],
     ['wafer-ai', 'wafer.ai'],
     ['wafer', 'wafer.ai'],
-    ['opencode-go', 'opencode'],
-    ['opencode-zen', 'opencode'],
 ]);
 
 const normalizeProviderId = (providerId: string | null | undefined) => {

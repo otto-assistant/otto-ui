@@ -1,5 +1,4 @@
 import express, { Router } from 'express';
-import { createTelegramListenerRegistry } from './telegram-listener.js';
 import {
   createDiscordListenerRegistry,
   generateApprovalId,
@@ -7,12 +6,12 @@ import {
 import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
 import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js';
 import { bootstrapProject as bootstrapProjectFn } from '../projects/project-bootstrap.js';
-import { renderPermissionContext, escapeMd, clipBlock } from './messenger-render.js';
+import { renderPermissionContext, escapeMd } from './messenger-render.js';
 import { discoverSkills } from '../opencode/skills.js';
 
 /**
- * Unified messenger sync routes for Discord and Telegram.
- * Handles project↔channel/topic mapping, message format adaptation, and onboarding.
+ * Messenger sync routes for Discord.
+ * Handles project↔channel mapping, message format adaptation, and onboarding.
  */
 /** Map a Discord HTTP failure into a short, human-friendly message. */
 function friendlyDiscordError(status, rawText) {
@@ -88,13 +87,6 @@ export function createMessengerSyncRouter({
           const targetKey = binding.targetKey;
           const threadId = null; // targetKey is already the thread
           return { type: 'discord', token, targetKey, threadId, projectPath: binding.projectPath };
-        }
-        if (binding.type === 'telegram') {
-          const telegram = settings.telegram || settings.telegramConnections?.[0] || {};
-          const token = telegram.botToken;
-          if (!token) return null;
-          const targetKey = binding.targetKey;
-          return { type: 'telegram', token, targetKey, threadId: null, projectPath: binding.projectPath };
         }
       } catch {
         // lookup failed — return null
@@ -300,22 +292,16 @@ export function createMessengerSyncRouter({
     }
   }
 
-  const telegramListener = createTelegramListenerRegistry({ broadcastEvent, bridge });
   const discordListener = createDiscordListenerRegistry({ broadcastEvent, bridge });
 
   // Messenger configuration
   router.get('/config', (_req, res) => {
     res.json({
-      supportedMessengers: ['discord', 'telegram'],
+      supportedMessengers: ['discord'],
       discord: {
         features: ['channels', 'threads', 'embeds', 'reactions', 'files'],
         maxMessageLength: 2000,
         formatting: 'markdown-discord',
-      },
-      telegram: {
-        features: ['groups', 'topics', 'markdown', 'buttons', 'files'],
-        maxMessageLength: 4096,
-        formatting: 'markdown-telegram',
       },
     });
   });
@@ -365,28 +351,6 @@ export function createMessengerSyncRouter({
         });
       }
 
-      if (type === 'telegram') {
-        const resp = await fetch(`https://api.telegram.org/bot${token}/getMe`);
-        const data = await resp.json();
-        if (!data.ok) {
-          return res.json({ ok: false, error: data.description ?? 'Invalid token' });
-        }
-        const r = data.result ?? {};
-        return res.json({
-          ok: true,
-          id: r.id,
-          username: r.username,
-          firstName: r.first_name,
-          // Bot privacy / group capability flags. `can_read_all_group_messages: false`
-          // means Privacy Mode is enabled, so the bot only sees commands, mentions,
-          // and replies in groups — the #1 cause of "I message the bot and get no
-          // reply".
-          canJoinGroups: Boolean(r.can_join_groups),
-          canReadAllGroupMessages: Boolean(r.can_read_all_group_messages),
-          supportsInlineQueries: Boolean(r.supports_inline_queries),
-        });
-      }
-
       return res.status(400).json({ error: `Unknown messenger type: ${type}` });
     } catch (err) {
       return res.json({ ok: false, error: err.message ?? 'Connection failed' });
@@ -394,39 +358,18 @@ export function createMessengerSyncRouter({
   });
 
   /**
-   * Send a real message to a Telegram chat or Discord channel.
-   * Body: { type: 'telegram' | 'discord', token, target, text, parseMode? }
-   *   - target: chat_id for Telegram, channel_id for Discord
-   *   - parseMode: Telegram only (e.g. 'Markdown', 'MarkdownV2', 'HTML')
+   * Send a real message to a Discord channel.
+   * Body: { type: 'discord', token, target, text }
+   *   - target: channel_id
    */
   router.post('/send', async (req, res) => {
-    const { type, token, target, text, parseMode } = req.body ?? {};
+    const { type, token, target, text } = req.body ?? {};
 
     if (!type || !token || !target || !text) {
       return res.status(400).json({ error: 'type, token, target and text are required' });
     }
 
     try {
-      if (type === 'telegram') {
-        const body = {
-          chat_id: target,
-          text: String(text).slice(0, 4096),
-        };
-        if (parseMode) body.parse_mode = parseMode;
-
-        const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const data = await resp.json();
-        if (!data.ok) {
-          return res.json({ ok: false, error: data.description ?? `Telegram error ${resp.status}` });
-        }
-        broadcastEvent?.('messenger.telegram.sent', { target, messageId: data.result?.message_id });
-        return res.json({ ok: true, messageId: data.result?.message_id, sentAt: new Date().toISOString() });
-      }
-
       if (type === 'discord') {
         const resp = await fetch(`https://discord.com/api/v10/channels/${encodeURIComponent(target)}/messages`, {
           method: 'POST',
@@ -928,7 +871,7 @@ export function createMessengerSyncRouter({
   });
 
   // ──────────────────────────────────────────────────────────────────────────
-  // Discord Gateway listener (parity with Telegram long-poll listener)
+  // Discord Gateway listener
   // ──────────────────────────────────────────────────────────────────────────
   // Snapshot of the OpenCode bridge — list of channel↔session bindings and
   // any prompts currently in flight. Useful for the settings UI to show
@@ -940,7 +883,6 @@ export function createMessengerSyncRouter({
     const { type, token } = req.body ?? {};
     const verbosity = {
       discord: bridge.store.getVerbosityDefault?.('discord') ?? null,
-      telegram: bridge.store.getVerbosityDefault?.('telegram') ?? null,
     };
     return res.json({
       ok: true,
@@ -953,17 +895,17 @@ export function createMessengerSyncRouter({
   /**
    * Per-messenger default verbosity (`quiet` | `normal` | `verbose`). This is
    * the same value the in-chat `/verbosity default <level>` command writes, so
-   * the OpenChamber UI and Discord/Telegram stay in sync. A per-conversation
+   * the OpenChamber UI and Discord stay in sync. A per-conversation
    * `/verbosity <level>` override always wins over this default.
    *
-   * POST body: { type: 'discord'|'telegram', level }  (level null clears it)
+   * POST body: { type: 'discord', level }  (level null clears it)
    * GET query: ?type=discord
    */
   router.post('/bridge/verbosity', (req, res) => {
     if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
     const { type, level } = req.body ?? {};
-    if (type !== 'discord' && type !== 'telegram') {
-      return res.status(400).json({ ok: false, error: "type must be 'discord' or 'telegram'" });
+    if (type !== 'discord') {
+      return res.status(400).json({ ok: false, error: "type must be 'discord'" });
     }
     if (level == null || level === '') {
       bridge.store.setVerbosityDefault(type, null);
@@ -982,7 +924,7 @@ export function createMessengerSyncRouter({
   router.get('/bridge/verbosity', (req, res) => {
     if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
     const type = typeof req.query?.type === 'string' ? req.query.type : '';
-    if (type === 'discord' || type === 'telegram') {
+    if (type === 'discord') {
       return res.json({ ok: true, type, level: bridge.store.getVerbosityDefault?.(type) ?? null });
     }
     return res.json({
@@ -990,7 +932,6 @@ export function createMessengerSyncRouter({
       levels: VERBOSITY_LEVELS,
       verbosity: {
         discord: bridge.store.getVerbosityDefault?.('discord') ?? null,
-        telegram: bridge.store.getVerbosityDefault?.('telegram') ?? null,
       },
     });
   });
@@ -1000,7 +941,6 @@ export function createMessengerSyncRouter({
    * Creates a matching surface in every connected messenger:
    *   - Discord: a new text channel named after the project's slug, posted
    *     in the configured guild + parent category.
-   *   - Telegram: a new forum topic when the configured chat is a forum.
    * Best-effort — failures are reported but don't block the project create.
    */
   async function autoCreateMessengerSurfacesForProject(project, opts = {}) {
@@ -1062,45 +1002,6 @@ export function createMessengerSyncRouter({
       }
     }
 
-    const telegram = opts.telegram ?? null;
-    if (telegram?.token && telegram?.chatId && telegram?.isForum) {
-      try {
-        const r = await fetch(`https://api.telegram.org/bot${telegram.token}/createForumTopic`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: telegram.chatId, name: projectLabel.slice(0, 128) }),
-        });
-        const data = await r.json();
-        if (data.ok && data.result?.message_thread_id != null) {
-          results.push({
-            type: 'telegram',
-            ok: true,
-            chatId: telegram.chatId,
-            topicId: String(data.result.message_thread_id),
-            topicName: projectLabel,
-          });
-          if (bridge?.store) {
-            const tokenHash = (await import('node:crypto'))
-              .createHash('sha256')
-              .update(telegram.token)
-              .digest('hex')
-              .slice(0, 12);
-            bridge.store.bind({
-              type: 'telegram',
-              botTokenHash: tokenHash,
-              targetKey: `${telegram.chatId}:${data.result.message_thread_id}`,
-              sessionId: '',
-              projectPath: project.path,
-              projectLabel,
-            });
-          }
-        } else {
-          results.push({ type: 'telegram', ok: false, error: data.description ?? 'createForumTopic failed' });
-        }
-      } catch (err) {
-        results.push({ type: 'telegram', ok: false, error: err?.message ?? 'create-topic failed' });
-      }
-    }
     broadcastEvent?.('messenger.bridge.project_autocreated', {
       projectId: project.id,
       projectLabel,
@@ -1114,21 +1015,20 @@ export function createMessengerSyncRouter({
    * we don't tightly couple settings-runtime to messenger code.
    * Body: {
    *   project: { id, path, label },
-   *   discord?: { token, guildId, parentCategoryId? },
-   *   telegram?: { token, chatId, isForum }
+   *   discord?: { token, guildId, parentCategoryId? }
    * }
    */
   router.post('/bridge/project-added', async (req, res) => {
-    const { project, discord, telegram } = req.body ?? {};
+    const { project, discord } = req.body ?? {};
     if (!project || !project.path) {
       return res.status(400).json({ ok: false, error: 'project { id, path, label } required' });
     }
-    const results = await autoCreateMessengerSurfacesForProject(project, { discord, telegram });
+    const results = await autoCreateMessengerSurfacesForProject(project, { discord });
     res.json({ ok: results.every((r) => r.ok), results });
   });
 
   /**
-   * Bootstrap a new OpenChamber project from a Discord/Telegram conversation
+   * Bootstrap a new OpenChamber project from a Discord conversation
    * (or programmatically). Body: { action: 'clone'|'path'|'new', url?, path?, label? }.
    * Returns { ok, project } on success or { ok: false, error } on failure.
    * Powers the in-chat dialogue ("clone <url>" etc.) AND can be used by the
@@ -1137,7 +1037,7 @@ export function createMessengerSyncRouter({
   /**
    * Per-project bridge defaults (model + agent). The same layer the
    * `/model default <p/m>` and `/agent default <name>` commands write to
-   * from Discord/Telegram — exposed here so the OpenChamber UI's project
+   * from Discord — exposed here so the OpenChamber UI's project
    * settings can read/write the same values.
    *
    * POST body: { projectPath, projectLabel?, modelDefault?, agentDefault? }
@@ -1482,61 +1382,7 @@ export function createMessengerSyncRouter({
   });
 
   /**
-   * Post an approval-request message with an inline keyboard in Telegram.
-   * Body: { token, chatId, threadId?, prompt, approvalId?, permission? }
-   * When `permission` is provided, rich context is rendered from its metadata.
-   */
-  router.post('/telegram/send-approval', async (req, res) => {
-    const { token, chatId, threadId, prompt, approvalId, permission } = req.body ?? {};
-    if (!token || !chatId || !prompt) {
-      return res.status(400).json({ error: 'token, chatId and prompt required' });
-    }
-    const id = approvalId || generateApprovalId();
-
-    // Render rich permission context if provided
-    const permissionContext = permission ? renderPermissionContext(permission) : '';
-    const preamble = `⚠️ *Permission Required* — \`${escapeMd(String(permission?.permission ?? 'approval'))}\``;
-    const bodyText = permissionContext
-      ? `${preamble}\n\n${permissionContext}\n\n${String(prompt).slice(0, 3000)}`
-      : `🤖 Otto needs approval\n\n${String(prompt).slice(0, 3800)}`;
-
-    const body = {
-      chat_id: chatId,
-      text: bodyText.slice(0, 4096),
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '✅ Approve', callback_data: `otto-approve:${id}` },
-            { text: '❌ Deny', callback_data: `otto-deny:${id}` },
-          ],
-        ],
-      },
-    };
-    if (threadId) body.message_thread_id = Number(threadId);
-    try {
-      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await r.json();
-      if (!data.ok) {
-        return res.json({ ok: false, error: data.description ?? `Telegram error ${r.status}` });
-      }
-      return res.json({
-        ok: true,
-        approvalId: id,
-        messageId: data.result?.message_id,
-        chatId,
-        sentAt: new Date().toISOString(),
-      });
-    } catch (err) {
-      return res.json({ ok: false, error: err?.message ?? 'send-approval failed' });
-    }
-  });
-
-  /**
-   * Discord setup diagnosis — parity with /telegram/diagnose.
+   * Discord setup diagnosis.
    * Verifies token, intents, guild access, default channel post + admin rights.
    * Body: { token, guildId?, channelId? }
    */
@@ -1787,496 +1633,6 @@ export function createMessengerSyncRouter({
     return res.json({ ok: true, url });
   });
 
-  /**
-   * Resolve a Telegram chat by id (helpful confirmation after the user pastes a chat id).
-   * Body: { token, chatId }
-   */
-  router.post('/telegram/resolve-chat', async (req, res) => {
-    const { token, chatId } = req.body ?? {};
-    if (!token || !chatId) {
-      return res.status(400).json({ error: 'token and chatId required' });
-    }
-    try {
-      const resp = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId }),
-      });
-      const data = await resp.json();
-      if (!data.ok) {
-        return res.json({ ok: false, error: data.description ?? 'getChat failed' });
-      }
-      const c = data.result || {};
-      return res.json({
-        ok: true,
-        chatId: c.id,
-        title: c.title ?? c.username ?? c.first_name ?? null,
-        type: c.type ?? null,
-        isForum: Boolean(c.is_forum),
-      });
-    } catch (err) {
-      return res.json({ ok: false, error: err?.message ?? 'resolve-chat failed' });
-    }
-  });
-
-  /**
-   * Run a full setup diagnosis for a Telegram bot + chat.
-   * Body: { token, chatId }
-   * Returns: { ok, checks: [{ id, ok, severity, title, detail, fix? }] }
-   *
-   * Each check is a structured row the UI renders as a green/yellow/red bullet.
-   * Diagnosed problems include: invalid token, Privacy Mode enabled, chat not
-   * found, chat not a forum (so no per-project topics), bot not in chat, bot
-   * not admin, bot admin but missing manage_topics permission, etc.
-   */
-  router.post('/telegram/diagnose', async (req, res) => {
-    const { token, chatId } = req.body ?? {};
-    if (!token) return res.status(400).json({ error: 'token required' });
-
-    const tgGet = async (method, body) => {
-      const init = body
-        ? {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          }
-        : undefined;
-      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, init);
-      return r.json();
-    };
-
-    const checks = [];
-    const push = (c) => checks.push(c);
-
-    // 1) Token / bot identity
-    let bot = null;
-    try {
-      const me = await tgGet('getMe');
-      if (!me.ok) {
-        push({
-          id: 'token',
-          ok: false,
-          severity: 'error',
-          title: 'Invalid bot token',
-          detail: me.description ?? 'getMe failed',
-          fix: 'Re-paste the token from @BotFather (/mybots → your bot → API Token).',
-        });
-        return res.json({ ok: false, checks });
-      }
-      bot = me.result;
-      push({
-        id: 'token',
-        ok: true,
-        severity: 'ok',
-        title: `Bot is reachable as @${bot.username}`,
-        detail: `Bot id ${bot.id}.`,
-      });
-
-      // 2) Privacy mode — by far the most common reason a bot 'doesn't reply' in groups.
-      if (bot.can_read_all_group_messages) {
-        push({
-          id: 'privacy',
-          ok: true,
-          severity: 'ok',
-          title: 'Privacy mode is OFF',
-          detail: 'Bot can read every message in groups it joins.',
-        });
-      } else {
-        push({
-          id: 'privacy',
-          ok: false,
-          severity: 'warn',
-          title: 'Privacy mode is ON — bot only sees /commands, @mentions and replies in groups',
-          detail:
-            'This is the #1 reason a Telegram bot looks unresponsive: plain group messages never reach getUpdates.',
-          fix: 'Open @BotFather → /setprivacy → choose your bot → Disable. Then remove and re-add the bot to the group so the new privacy setting takes effect.',
-        });
-      }
-    } catch (err) {
-      push({
-        id: 'token',
-        ok: false,
-        severity: 'error',
-        title: 'Could not reach Telegram',
-        detail: err?.message ?? 'network error',
-      });
-      return res.json({ ok: false, checks });
-    }
-
-    if (!chatId) {
-      push({
-        id: 'chat',
-        ok: false,
-        severity: 'warn',
-        title: 'No chat ID configured yet',
-        detail: 'Save a chat ID first to run the chat / membership / topic checks.',
-      });
-      return res.json({ ok: checks.every((c) => c.ok), checks });
-    }
-
-    // 3) Chat exists / type / forum
-    let chat = null;
-    try {
-      const gc = await tgGet('getChat', { chat_id: chatId });
-      if (!gc.ok) {
-        push({
-          id: 'chat',
-          ok: false,
-          severity: 'error',
-          title: 'Chat not found / bot has no access',
-          detail: gc.description ?? 'getChat failed',
-          fix: 'Make sure the bot has been added to the target chat and that the chat ID is correct (groups start with -100…).',
-        });
-        return res.json({ ok: false, checks });
-      }
-      chat = gc.result;
-      push({
-        id: 'chat',
-        ok: true,
-        severity: 'ok',
-        title: `Chat "${chat.title ?? chat.username ?? chat.id}" reachable`,
-        detail: `Type: ${chat.type}${chat.is_forum ? ' · forum (topics enabled)' : ''}.`,
-      });
-
-      // 4) Forum capability for per-project topics
-      if (chat.type === 'private') {
-        push({
-          id: 'forum',
-          ok: false,
-          severity: 'info',
-          title: 'Chat is a private DM',
-          detail: 'Otto will post one summary message; per-project topics only work in supergroups with topics enabled.',
-        });
-      } else if (chat.is_forum) {
-        push({
-          id: 'forum',
-          ok: true,
-          severity: 'ok',
-          title: 'Topics are enabled in this chat',
-          detail: 'Sync now will create / re-use one forum topic per project.',
-        });
-      } else {
-        push({
-          id: 'forum',
-          ok: false,
-          severity: 'warn',
-          title: 'Topics are NOT enabled in this chat',
-          detail: 'Sync now will fall back to a single summary message in the main chat.',
-          fix:
-            chat.type === 'supergroup' || chat.type === 'group'
-              ? 'In Telegram open the group → Manage Group → Topics → enable. (Requires the supergroup to have ≥ 200 members on some clients, or convert via Manage Group → Group Type → Public/Private supergroup.)'
-              : 'Per-project topics are only supported in supergroups with topics enabled.',
-        });
-      }
-    } catch (err) {
-      push({
-        id: 'chat',
-        ok: false,
-        severity: 'error',
-        title: 'getChat failed',
-        detail: err?.message ?? 'network error',
-      });
-      return res.json({ ok: false, checks });
-    }
-
-    // 5) Membership / admin / manage_topics permission
-    if (chat.type === 'group' || chat.type === 'supergroup' || chat.type === 'channel') {
-      try {
-        const cm = await tgGet('getChatMember', { chat_id: chatId, user_id: bot.id });
-        if (!cm.ok) {
-          push({
-            id: 'membership',
-            ok: false,
-            severity: 'error',
-            title: 'Could not check bot membership',
-            detail: cm.description ?? 'getChatMember failed',
-            fix: 'Add the bot to the chat (Group settings → Add Member → search by username).',
-          });
-        } else {
-          const m = cm.result;
-          const status = m.status; // 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked'
-          if (status === 'left' || status === 'kicked') {
-            push({
-              id: 'membership',
-              ok: false,
-              severity: 'error',
-              title: 'Bot is not in the chat',
-              detail: `getChatMember returned status="${status}".`,
-              fix: 'Open the chat → Members → Add → search for your bot by username and add it.',
-            });
-          } else if (status === 'restricted') {
-            push({
-              id: 'membership',
-              ok: false,
-              severity: 'warn',
-              title: 'Bot is restricted in this chat',
-              detail: 'Restricted bots cannot post messages.',
-              fix: 'Promote the bot or remove the restriction in Group → Manage → Permissions.',
-            });
-          } else if (status === 'administrator' || status === 'creator') {
-            const canManageTopics = m.can_manage_topics ?? false;
-            if (chat.is_forum && !canManageTopics) {
-              push({
-                id: 'membership',
-                ok: false,
-                severity: 'warn',
-                title: 'Bot is admin but cannot manage topics',
-                detail:
-                  'createForumTopic will fail with "not enough rights to manage topics".',
-                fix: 'Group → Manage → Administrators → your bot → enable "Manage topics", then save.',
-              });
-            } else {
-              push({
-                id: 'membership',
-                ok: true,
-                severity: 'ok',
-                title: `Bot is ${status === 'creator' ? 'the creator' : 'an administrator'}`,
-                detail: chat.is_forum
-                  ? `Manage topics: ${canManageTopics ? 'yes' : 'no'}.`
-                  : 'Admin permissions confirmed.',
-              });
-            }
-          } else {
-            // status === 'member'
-            if (chat.is_forum) {
-              push({
-                id: 'membership',
-                ok: false,
-                severity: 'warn',
-                title: 'Bot is a regular member, not admin',
-                detail:
-                  'createForumTopic requires the bot to be admin with the "Manage topics" right.',
-                fix: 'Group → Manage → Administrators → Add → pick your bot → enable "Manage topics".',
-              });
-            } else {
-              push({
-                id: 'membership',
-                ok: true,
-                severity: 'ok',
-                title: 'Bot is a member',
-                detail: 'Plain sendMessage will work; admin rights only required for managing topics.',
-              });
-            }
-          }
-        }
-      } catch (err) {
-        push({
-          id: 'membership',
-          ok: false,
-          severity: 'error',
-          title: 'Could not check bot membership',
-          detail: err?.message ?? 'network error',
-        });
-      }
-    } else {
-      push({
-        id: 'membership',
-        ok: true,
-        severity: 'ok',
-        title: 'Private chat — no membership/admin check needed',
-        detail: 'Direct messages always reach the bot.',
-      });
-    }
-
-    return res.json({ ok: checks.every((c) => c.ok), checks });
-  });
-
-  /**
-   * Start a Telegram long-poll listener for incoming messages.
-   * Body: { token, autoReply? }
-   * Idempotent: returns the existing listener if one is already running for that token.
-   */
-  router.post('/telegram/listener/start', (req, res) => {
-    const { token, autoReply, bridgeEnabled, projectBindings } = req.body ?? {};
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'token required' });
-    }
-    // Per-chat (and per-topic) project resolution from the user-defined
-    // mappings in the UI. The UI sends bindings like:
-    //   [{ chatId, threadId?, projectPath, projectLabel }]
-    // and the listener calls resolveProject({ chatId, threadId }) on every
-    // inbound message to figure out which project's cwd OpenCode should run in.
-    const bindingMap = new Map(
-      Array.isArray(projectBindings)
-        ? projectBindings
-            .filter((b) => b && b.chatId)
-            .map((b) => [
-              `${b.chatId}${b.threadId ? `:${b.threadId}` : ''}`,
-              { path: b.projectPath ?? null, label: b.projectLabel ?? null },
-            ])
-        : [],
-    );
-    const resolveProject = ({ chatId, threadId }) => {
-      const key = `${chatId}${threadId ? `:${threadId}` : ''}`;
-      return bindingMap.get(key) ?? bindingMap.get(String(chatId)) ?? null;
-    };
-    const result = telegramListener.start(token, {
-      autoReply: autoReply !== false,
-      bridgeEnabled: bridgeEnabled !== false && Boolean(bridge),
-      resolveProject,
-    });
-    res.json(result);
-  });
-
-  router.post('/telegram/listener/stop', (req, res) => {
-    const { token } = req.body ?? {};
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'token required' });
-    }
-    res.json(telegramListener.stop(token));
-  });
-
-  router.post('/telegram/listener/status', (req, res) => {
-    const token = req.body?.token ?? req.query?.token;
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'token required' });
-    }
-    res.json(telegramListener.status(token));
-  });
-
-  router.post('/telegram/listener/recent', (req, res) => {
-    const token = req.body?.token ?? req.query?.token;
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'token required' });
-    }
-    const limit = req.body?.limit ?? 25;
-    res.json(telegramListener.recent(token, limit));
-  });
-
-  /**
-   * Telegram per-project sync. For forum chats this creates a forum topic per
-   * project (using stored mappings when present) and posts a status message
-   * inside each topic. For non-forum chats it falls back to one bullet-list
-   * message in the main chat.
-   *
-   * Body: {
-   *   token: string,
-   *   chatId: string | number,
-   *   isForum: boolean,
-   *   summary: string,                 // top-line summary (non-forum mode + intro)
-   *   projects: [{ id, label, body }], // per-project payload
-   *   mappings: [{ projectId, telegram?: { topicId, topicName } }],
-   * }
-   *
-   * Returns: { ok, postedTo: 'forum'|'chat', topics: [{ projectId, topicId, topicName, messageId, created, error? }] }
-   */
-  router.post('/telegram/sync-projects', async (req, res) => {
-    const { token, chatId, isForum, summary, projects, mappings } = req.body ?? {};
-    if (!token || !chatId) {
-      return res.status(400).json({ error: 'token and chatId required' });
-    }
-    const projectList = Array.isArray(projects) ? projects : [];
-    const mappingByProject = new Map(
-      (Array.isArray(mappings) ? mappings : [])
-        .filter((m) => m && m.projectId)
-        .map((m) => [m.projectId, m]),
-    );
-
-    const tgCall = async (method, body) => {
-      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      return r.json();
-    };
-
-    // Non-forum: send the summary as a single message, optionally followed by per-project lines.
-    if (!isForum || projectList.length === 0) {
-      const text =
-        summary && summary.trim().length > 0
-          ? summary
-          : projectList.length === 0
-            ? '🤖 Otto sync — no projects configured yet.'
-            : `🤖 Otto sync\n\n${projectList.map((p) => `• ${p.label}`).join('\n')}`;
-      const sent = await tgCall('sendMessage', {
-        chat_id: chatId,
-        text: String(text).slice(0, 4096),
-      });
-      if (!sent.ok) {
-        return res.json({
-          ok: false,
-          postedTo: 'chat',
-          error: sent.description ?? 'sendMessage failed',
-        });
-      }
-      return res.json({
-        ok: true,
-        postedTo: 'chat',
-        topics: [],
-        mainMessageId: sent.result?.message_id,
-      });
-    }
-
-    // Forum: optional summary in the General topic first.
-    let mainMessageId = null;
-    if (summary && summary.trim().length > 0) {
-      const sumResp = await tgCall('sendMessage', {
-        chat_id: chatId,
-        text: String(summary).slice(0, 4096),
-      });
-      if (sumResp.ok) {
-        mainMessageId = sumResp.result?.message_id ?? null;
-      }
-    }
-
-    const topics = [];
-    for (const project of projectList) {
-      const existing = mappingByProject.get(project.id)?.telegram;
-      let topicId = existing?.topicId && /^\d+$/.test(String(existing.topicId))
-        ? Number(existing.topicId)
-        : null;
-      const topicName = existing?.topicName || project.label || `Project ${project.id}`;
-      let created = false;
-      let entryError = null;
-
-      // Create the topic if we don't have one stored.
-      if (topicId == null) {
-        const createResp = await tgCall('createForumTopic', {
-          chat_id: chatId,
-          name: topicName.slice(0, 128),
-        });
-        if (createResp.ok && createResp.result?.message_thread_id) {
-          topicId = createResp.result.message_thread_id;
-          created = true;
-        } else {
-          entryError = createResp.description ?? 'createForumTopic failed';
-        }
-      }
-
-      let messageId = null;
-      if (topicId != null && !entryError) {
-        const msgResp = await tgCall('sendMessage', {
-          chat_id: chatId,
-          message_thread_id: topicId,
-          text: String(project.body ?? `🤖 Sync update for ${project.label}`).slice(0, 4096),
-        });
-        if (msgResp.ok) {
-          messageId = msgResp.result?.message_id ?? null;
-        } else {
-          entryError = msgResp.description ?? 'sendMessage failed';
-        }
-      }
-
-      topics.push({
-        projectId: project.id,
-        projectLabel: project.label,
-        topicId: topicId != null ? String(topicId) : null,
-        topicName,
-        messageId,
-        created,
-        error: entryError,
-      });
-    }
-
-    res.json({
-      ok: topics.every((t) => !t.error),
-      postedTo: 'forum',
-      mainMessageId,
-      topics,
-    });
-  });
-
   // Webhook for incoming messages from messengers
   router.post('/webhook/:type', (req, res) => {
     const { type } = req.params;
@@ -2307,7 +1663,7 @@ export function createMessengerSyncRouter({
     res.json({ formatted, target });
   });
 
-  return { router, discordListener, telegramListener };
+  return { router, discordListener };
 }
 
 /**
@@ -2317,9 +1673,6 @@ function adaptMessageFormat(content, sourceFormat, targetMessenger) {
   if (targetMessenger === 'discord') {
     return adaptToDiscord(content, sourceFormat);
   }
-  if (targetMessenger === 'telegram') {
-    return adaptToTelegram(content, sourceFormat);
-  }
   return content;
 }
 
@@ -2328,18 +1681,6 @@ function adaptToDiscord(content, _sourceFormat) {
   // Truncate to Discord's 2000 char limit
   if (text.length > 2000) {
     text = text.slice(0, 1950) + '\n\n_…truncated_';
-  }
-  return text;
-}
-
-function adaptToTelegram(content, _sourceFormat) {
-  let text = content;
-  // Convert Discord-style code blocks to Telegram MarkdownV2
-  // Telegram uses same ``` syntax but some differences in inline formatting
-  // Escape special chars for MarkdownV2: _ * [ ] ( ) ~ ` > # + - = | { } . !
-  // Keep code blocks as-is
-  if (text.length > 4096) {
-    text = text.slice(0, 4050) + '\n\n…truncated';
   }
   return text;
 }

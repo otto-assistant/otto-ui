@@ -34,7 +34,6 @@ import { SnippetsSidebar } from '@/components/sections/snippets/SnippetsSidebar'
 import { SnippetsPage } from '@/components/sections/snippets/SnippetsPage';
 import { GitPage } from '@/components/sections/git-identities/GitPage';
 import { IntegrationsPage } from '@/components/sections/integrations/IntegrationsPage';
-import { MemoryView } from '@/components/views/MemoryView';
 import type { OpenChamberSection } from '@/components/sections/openchamber/types';
 import { OpenChamberPage } from '@/components/sections/openchamber/OpenChamberPage';
 import { useDeviceInfo } from '@/lib/device';
@@ -86,7 +85,6 @@ const pageOrder: SettingsPageSlug[] = [
   'shortcuts',
   'git',
   'integrations',
-  'memory',
   'magic-prompts',
   'snippets',
   'projects',
@@ -195,8 +193,6 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
 
     case 'integrations':
       return 'external-link';
-    case 'memory':
-      return 'brain';
 
     case 'usage':
       return 'bar-chart-2';
@@ -485,8 +481,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return t('settings.page.git.title');
       case 'integrations':
         return 'Integrations';
-      case 'memory':
-        return t('settings.page.memory.title');
       case 'appearance':
         return t('settings.page.appearance.title');
       case 'chat':
@@ -588,8 +582,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <GitPage />;
       case 'integrations':
         return <IntegrationsPage />;
-      case 'memory':
-        return <MemoryView />;
       case 'appearance':
       case 'chat':
       case 'shortcuts':
