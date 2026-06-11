@@ -64,6 +64,13 @@ const buildFallbackConnections = (): OttoConnections => ({
   relay: { connected: false },
 });
 
+/** Extracts a clean semver from CLI banners like "otto/0.7.20 linux-x64 node-v22.14.0". */
+function extractSemver(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = value.match(/\d+\.\d+\.\d+(?:[-+][\w.]+)?/);
+  return match ? match[0] : null;
+}
+
 /**
  * Maps the `/api/otto/status` payload
  * (`{ version: { openchamber, otto }, uptime: { processSeconds }, health: { ottoCli, openCode } }`)
@@ -82,7 +89,7 @@ export function mapOttoStatusResponse(data: unknown): OttoStatus | null {
   const openCodeReady = health?.openCode === 'ready';
   const ottoCliOk = health?.ottoCli === 'ok';
 
-  const ottoVersion = typeof version?.otto === 'string' ? version.otto : null;
+  const ottoVersion = extractSemver(version?.otto) ?? (typeof version?.otto === 'string' ? version.otto : null);
   const openchamberVersion = typeof version?.openchamber === 'string' ? version.openchamber : null;
 
   return {
