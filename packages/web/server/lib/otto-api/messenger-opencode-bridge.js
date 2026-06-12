@@ -21,7 +21,7 @@ import {
   sanitizeWorktreeName,
   MERGE_CONFLICT_PROMPT,
 } from './messenger-worktrees.js';
-import { createMessengerScheduler, describeSchedule } from './messenger-scheduler.js';
+import parser from 'cron-parser';
 
 /**
  * Bidirectional bridge between Discord and OpenCode chat sessions.
@@ -353,6 +353,17 @@ export function createMessengerOpencodeBridge({
    *   ({ projectPath }) => Array<{ name, description?, scope?, source? }> (sync or async)
    */
   listSkills = null,
+  /**
+   * OpenChamber's per-project config runtime (scheduled task persistence).
+   * The Discord `/schedule` command creates tasks HERE — the same store the
+   * Scheduled-tasks dialog in the web UI uses — so both stay in sync.
+   */
+  projectConfigRuntime = null,
+  /**
+   * OpenChamber's scheduled-tasks runtime. Used to re-sync a project's
+   * timers after the Discord `/schedule` command mutates its tasks.
+   */
+  scheduledTasksRuntime = null,
 }) {
   const bridgeStore = store ?? new MessengerBridgeStore();
 
@@ -1068,6 +1079,29 @@ export function createMessengerOpencodeBridge({
     return rejected;
   }
 
+  // --- Last active Discord user --------------------------------------------------
+  // Web-created mirror threads have no Discord message author to add as a
+  // member, so without a configured owner they stay invisible in the channel
+  // sidebar. Remember the last user who messaged the bot (per token) and use
+  // them as the fallback owner for web threads.
+  function rememberLastActiveDiscordUser(token, userId) {
+    if (!token || !userId) return;
+    try {
+      bridgeStore.setSetting(`discord.lastActiveUserId.${tokenHash(token)}`, String(userId));
+    } catch {
+      // best-effort
+    }
+  }
+
+  function getLastActiveDiscordUserId(token) {
+    if (!token) return null;
+    try {
+      return bridgeStore.getSetting(`discord.lastActiveUserId.${tokenHash(token)}`) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   // --- Thread renaming from session titles -------------------------------------
   // OpenCode auto-generates a summary title for untitled sessions; we mirror
   // it onto the Discord thread. Discord rate-limits thread renames (~2 per
@@ -1140,108 +1174,145 @@ export function createMessengerOpencodeBridge({
     }
   }
 
-  // --- Scheduled prompts -------------------------------------------------------
-  // Tasks persist in the bridge store; on fire they are delivered through the
-  // normal inbound pipeline so answers stream back into the Discord surface.
-  async function resolveBotToken() {
-    if (typeof readSettings !== 'function') return null;
+  // Polling fallback for thread renames. The event-driven rename above can
+  // miss titles: OpenCode may generate the title BEFORE the mirror thread
+  // exists (web sessions create their thread lazily on first assistant
+  // output), the server may restart between the event and the rename, or the
+  // SSE stream may briefly drop. The reference bridge solves this with a
+  // periodic session sweep — we do the same: every sweep, fetch the session
+  // title for live Discord contexts and recently-used bindings and apply any
+  // title we haven't applied yet (the dedupe cache makes re-checks free).
+  const TITLE_SWEEP_INTERVAL_MS = 10_000;
+  const TITLE_SWEEP_MAX_SESSIONS = 25;
+  const TITLE_SWEEP_BINDING_WINDOW_MS = 6 * 60 * 60 * 1000; // recent = last 6h
+
+  async function sweepThreadTitles() {
+    /** @type {Map<string, string|null>} sessionId → projectPath */
+    const candidates = new Map();
+    for (const [sessionId, ctx] of sessionContexts) {
+      if (ctx?.type === 'discord' && ctx.threadId) {
+        candidates.set(sessionId, ctx.projectPath ?? null);
+      }
+    }
     try {
-      const settings = await readSettings();
-      return settings?.discord?.botToken ?? null;
+      const cutoff = Date.now() - TITLE_SWEEP_BINDING_WINDOW_MS;
+      for (const b of bridgeStore.list({ type: 'discord' })) {
+        if (!b.sessionId || candidates.has(b.sessionId)) continue;
+        const lastUsed = Number(b.lastUsedAt ?? b.updatedAt ?? 0);
+        if (lastUsed && lastUsed < cutoff) continue;
+        candidates.set(b.sessionId, b.projectPath ?? null);
+      }
+    } catch {
+      // store unavailable — live contexts still get swept
+    }
+
+    let checked = 0;
+    for (const [sessionId, projectPath] of candidates) {
+      if (checked >= TITLE_SWEEP_MAX_SESSIONS) break;
+      checked += 1;
+      try {
+        const dir = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
+        const res = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}${dir}`);
+        if (!res.ok) continue;
+        const session = await res.json().catch(() => null);
+        if (session?.title) {
+          await maybeRenameThreadFromSessionTitle(sessionId, session.title);
+        }
+      } catch {
+        // best-effort per session
+      }
+    }
+  }
+
+  let titleSweepTimer = null;
+  function startTitleSweep() {
+    if (titleSweepTimer) return;
+    titleSweepTimer = setInterval(() => void sweepThreadTitles().catch(() => {}), TITLE_SWEEP_INTERVAL_MS);
+    titleSweepTimer.unref?.();
+  }
+  startTitleSweep();
+
+  // --- Scheduled prompts -------------------------------------------------------
+  // The Discord `/schedule` command writes into OpenChamber's EXISTING
+  // per-project scheduler (the same one the web UI's Scheduled-tasks dialog
+  // manages), so tasks created from Discord, the UI or the agent all live in
+  // one place and stay in sync. Task runs create fresh OpenCode sessions; the
+  // web-session mirroring streams their output into Discord automatically.
+
+  /** Map a project path to its OpenChamber project id (for the scheduler API). */
+  async function resolveProjectIdForPath(projectPath) {
+    if (!projectPath || typeof listProjects !== 'function') return null;
+    try {
+      const projects = await listProjects();
+      const match = (projects ?? []).find((p) => p?.path === projectPath);
+      return match?.id ?? null;
     } catch {
       return null;
     }
   }
 
-  async function dispatchScheduledTask(task) {
-    const prompt = task.prompt;
-    const overrides = {
-      modelOverride: task.modelOverride ?? null,
-      agentOverride: task.agentOverride ?? null,
-    };
+  /**
+   * Parse the `/schedule <when>` token into the project scheduler's schedule
+   * shape. Accepts:
+   *   - 5-field cron (UTC):       `0 9 * * 1`
+   *   - one-time UTC ISO minute:  `2026-03-01T09:00` (trailing `Z`/seconds ok)
+   * Returns { schedule } or { error }.
+   */
+  function parseScheduleWhen(when) {
+    const raw = String(when ?? '').trim();
+    if (!raw) return { error: 'schedule time is required.' };
 
-    if (task.type === 'discord' && (task.threadId || task.channelId)) {
-      const token = await resolveBotToken();
-      if (!token) throw new Error('no Discord bot token configured');
-
-      if (task.threadId) {
-        // Existing thread — continue its bound session.
-        const result = await routeInbound({
-          type: 'discord',
-          token,
-          channelId: task.threadId,
-          threadId: null,
-          text: prompt,
-          projectPath: task.projectPath ?? null,
-          ...overrides,
-        });
-        if (!result.ok) throw new Error(result.error ?? 'delivery failed');
-        return;
-      }
-
-      // Channel target — start a NEW chat (starter message + thread + session),
-      // exactly like /session.
-      const starter = await sendDiscord({
-        token,
-        channelId: task.channelId,
-        content: `⏰ **Scheduled task** — ${clipBlock(prompt.split('\n')[0] ?? prompt, 160)}`,
-      });
-      const result = await routeInbound({
-        type: 'discord',
-        token,
-        channelId: task.channelId,
-        threadId: null,
-        sourceMessageId: starter.ok ? starter.id : null,
-        text: prompt,
-        projectPath: task.projectPath ?? null,
-        ...overrides,
-      });
-      if (!result.ok) throw new Error(result.error ?? 'delivery failed');
-      return;
+    const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d{1,3})?)?Z?$/);
+    if (isoMatch) {
+      const [, date, time] = isoMatch;
+      const runAt = Date.parse(`${date}T${time}:00Z`);
+      if (!Number.isFinite(runAt)) return { error: `invalid date: ${raw}` };
+      if (runAt <= Date.now()) return { error: `the date must be in the future (UTC): ${raw}` };
+      return { schedule: { kind: 'once', date, time, timezone: 'UTC' } };
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+      return { error: `dates must be UTC ISO format like 2026-03-01T09:00 (got: ${raw})` };
     }
 
-    // Project-only target (scheduled from the UI/API without a Discord
-    // surface): run a fresh OpenCode session directly. When Discord is
-    // configured, the web-session mirroring picks it up automatically.
-    if (task.projectPath) {
-      const sessionId = await createOpencodeSession({ projectPath: task.projectPath });
-      await sendOpencodePrompt({
-        sessionId,
-        projectPath: task.projectPath,
-        text: prompt,
-        modelOverride: overrides.modelOverride,
-        agentOverride: overrides.agentOverride,
-      });
-      return;
+    try {
+      parser.parseExpression(raw, { utc: true });
+    } catch {
+      return { error: `invalid cron expression: ${raw}` };
     }
-
-    throw new Error('task has no target (thread, channel or project)');
+    return { schedule: { kind: 'cron', cron: raw, timezone: 'UTC' } };
   }
 
-  const scheduler = createMessengerScheduler({
-    store: bridgeStore,
-    dispatch: dispatchScheduledTask,
-  });
-  scheduler.start();
+  /** Compact human description of a project scheduled task for Discord. */
+  function describeSchedule(task) {
+    const s = task?.schedule ?? {};
+    const tz = s.timezone ? ` (${s.timezone})` : '';
+    if (s.kind === 'once') return `once at ${s.date} ${s.time}${tz}`;
+    if (s.kind === 'cron') return `cron \`${s.cron}\`${tz}`;
+    if (s.kind === 'daily') return `daily at ${(s.times ?? [s.time]).filter(Boolean).join(', ')}${tz}`;
+    if (s.kind === 'weekly') return `weekly (${(s.weekdays ?? []).join(',')}) at ${(s.times ?? [s.time]).filter(Boolean).join(', ')}${tz}`;
+    return 'unknown schedule';
+  }
 
   /**
    * Compact scheduling instructions injected into each new session so the
-   * agent can set up reminders / recurring runs on request.
+   * agent can set up reminders / recurring runs on request. Points at the
+   * SAME per-project scheduler API the web UI uses.
    */
-  function buildSchedulingInstructions({ channelId, threadId }) {
+  async function buildSchedulingInstructions({ projectPath }) {
     const base = typeof getLocalApiBaseUrl === 'function' ? getLocalApiBaseUrl() : null;
-    if (!base) return null;
-    const api = `${base}/api/otto/messenger/schedule`;
+    if (!base || !projectConfigRuntime) return null;
+    const projectId = await resolveProjectIdForPath(projectPath);
+    if (!projectId) return null;
+    const api = `${base}/api/projects/${encodeURIComponent(projectId)}/scheduled-tasks`;
     return [
       '<scheduling>',
-      'You can schedule prompts (reminders, recurring jobs) via the local OpenChamber API using bash curl.',
-      `One-time (UTC ISO, must end with Z) into THIS conversation's thread:`,
-      `  curl -s -X POST ${api} -H 'Content-Type: application/json' -d '{"when":"2026-03-01T09:00:00Z","prompt":"<detailed prompt>","threadId":"${threadId ?? ''}"}'`,
-      `Recurring (5-field cron, UTC) as a NEW chat in this channel, optionally pinning the model/agent that must answer:`,
-      `  curl -s -X POST ${api} -H 'Content-Type: application/json' -d '{"when":"0 9 * * 1","prompt":"<detailed prompt>","channelId":"${channelId ?? ''}","model":"provider/model","agent":"build"}'`,
-      `Manage: curl -s ${api}   (list) · curl -s -X DELETE ${api}/<id>   (remove) · curl -s ${api}/help   (full reference)`,
-      'All times are UTC. Never guess the user timezone — ask for the UTC equivalent. Use detailed prompts: goal, constraints, expected output, completion criteria.',
-      'Always tell the user when you scheduled something (include the id and the UTC time).',
+      'You can schedule prompts (reminders, recurring jobs) in this project\'s task scheduler via the local OpenChamber API using bash curl. Scheduled tasks are visible and editable in the web UI.',
+      'Create / update (PUT). schedule.kind: "cron" (5-field, with timezone), "once" (date+time), "daily"/"weekly" (times). execution.providerID/modelID are REQUIRED — reuse the current session model unless the user asks otherwise:',
+      `  curl -s -X PUT ${api} -H 'Content-Type: application/json' -d '{"task":{"name":"<short name>","schedule":{"kind":"cron","cron":"0 9 * * 1","timezone":"UTC"},"execution":{"prompt":"<detailed prompt>","providerID":"<provider>","modelID":"<model>"}}}'`,
+      `One-time example: {"schedule":{"kind":"once","date":"2026-03-01","time":"09:00","timezone":"UTC"}}`,
+      `Manage: curl -s ${api}   (list) · curl -s -X DELETE ${api}/<taskId>   (remove)`,
+      'Use detailed prompts: goal, constraints, expected output, completion criteria. Never guess the user timezone — ask, or use UTC.',
+      'Always tell the user when you scheduled something (include the task id and when it runs next).',
       '</scheduling>',
     ].join('\n');
   }
@@ -1390,15 +1461,37 @@ export function createMessengerOpencodeBridge({
           // best-effort — fall through to creating a fresh thread
         }
         if (!threadId) {
-          const name = threadName || target.threadName || `Otto · ${target.projectLabel ?? 'web'}`;
+          // Thread name preference: the OpenCode-generated session title (when
+          // it already exists — title generation often finishes before the
+          // mirror thread is created), then the user's first line, then a
+          // generic project label. The polling title sweep upgrades the name
+          // later if the title lands after creation.
+          let name = threadName || target.threadName || `Otto · ${target.projectLabel ?? 'web'}`;
+          try {
+            const dir = effectiveProjectPath ? `?directory=${encodeURIComponent(effectiveProjectPath)}` : '';
+            const sRes = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}${dir}`);
+            if (sRes.ok) {
+              const s = await sRes.json().catch(() => null);
+              const t = String(s?.title ?? '').trim();
+              if (t && !/^new session\s*-/i.test(t)) name = t;
+            }
+          } catch {
+            // best-effort — keep the fallback name
+          }
           const created = await startStandaloneDiscordThread({
             token,
             channelId,
             name,
             // Add the configured Discord owner(s) so the thread is visible to
             // them under the channel right away (issue: UI-created threads were
-            // invisible because the bot was the only member).
-            userIds: target.userIds ?? target.userId ?? null,
+            // invisible because the bot was the only member). When no owner is
+            // configured, fall back to the last Discord user who talked to the
+            // bot — the reference bridge always has a message author to anchor
+            // membership on; this is our web-session equivalent.
+            userIds:
+              target.userIds ??
+              target.userId ??
+              getLastActiveDiscordUserId(token),
           });
           if (created.ok && created.threadId) {
             threadId = created.threadId;
@@ -1489,6 +1582,15 @@ export function createMessengerOpencodeBridge({
     if (!ctx) return;
     const partId = part?.id;
     const partType = part?.type;
+    // Re-resolve per part (cheap SQLite lookup) so `/verbosity` changes and
+    // UI default changes apply mid-turn — long-lived web-mirror contexts used
+    // to cache the level at creation and never pick up changes.
+    ctx.verbosity = resolveVerbosity({
+      type: ctx.type,
+      token: ctx.token,
+      channelId: ctx.channelId,
+      threadId: ctx.threadId,
+    });
     const verbosity = normalizeVerbosity(ctx.verbosity);
 
     // Skip duplicates we've already posted (parts get many updates as they
@@ -2148,34 +2250,92 @@ export function createMessengerOpencodeBridge({
       },
 
       async scheduleTask({ when, prompt, model, agent }) {
-        // Inside a thread the command's channel id IS the thread id — detect
-        // it so the task targets the existing conversation; otherwise the
-        // task starts a new chat in the channel.
-        const surfaceId = threadId ?? channelId;
-        const parentId = type === 'discord'
-          ? await resolveParentChannelId({ token, channelId: surfaceId })
-          : null;
-        const isThread = Boolean(parentId);
-        return scheduler.create({
-          type,
-          botTokenHash: hash,
-          channelId: isThread ? null : surfaceId,
-          threadId: isThread ? surfaceId : null,
-          projectPath: stored?.projectPath ?? null,
-          prompt,
-          when,
-          modelOverride: model ?? null,
-          agentOverride: agent ?? null,
-          createdBy: from?.username ?? from?.id ?? null,
-        });
+        if (!projectConfigRuntime) {
+          return { ok: false, error: 'the project scheduler is not available on this server.' };
+        }
+        // The task lives in the surface's bound project — same store the web
+        // UI's Scheduled-tasks dialog manages.
+        let projectDir = stored?.projectPath ?? null;
+        if (!projectDir) {
+          const auto = await autoResolveProject({ type, token, channelId, threadId }).catch(() => null);
+          projectDir = auto?.projectPath ?? null;
+        }
+        const projectId = await resolveProjectIdForPath(projectDir);
+        if (!projectId) {
+          return { ok: false, error: 'no project bound to this conversation — send a message first to bind one.' };
+        }
+
+        const parsed = parseScheduleWhen(when);
+        if (parsed.error) return { ok: false, error: parsed.error };
+
+        // The project scheduler requires an explicit model. Resolution:
+        // command pin → surface override → project default → global default.
+        let modelStr = model ?? stored?.modelOverride ?? null;
+        if (!modelStr && projectDir) {
+          modelStr = bridgeStore.getProjectDefaults?.(projectDir)?.modelDefault ?? null;
+        }
+        if (!modelStr) modelStr = globals.model ?? null;
+        if (!modelStr || !/^[^/]+\/.+$/.test(modelStr)) {
+          return {
+            ok: false,
+            error: 'no model resolved — pin one with `model=provider/model` or set a default via `/model`.',
+          };
+        }
+        const slash = modelStr.indexOf('/');
+        const providerID = modelStr.slice(0, slash);
+        const modelID = modelStr.slice(slash + 1);
+        const agentName = agent ?? stored?.agentOverride ?? null;
+
+        try {
+          const result = await projectConfigRuntime.upsertScheduledTask(projectId, {
+            name: clipBlock(prompt.split('\n')[0].trim(), 60) || 'Discord task',
+            enabled: true,
+            schedule: parsed.schedule,
+            execution: {
+              prompt,
+              providerID,
+              modelID,
+              ...(agentName ? { agent: agentName } : {}),
+            },
+          });
+          await scheduledTasksRuntime?.syncProject?.(projectId);
+          // Re-read so the reply includes the computed nextRunAt.
+          const tasks = await projectConfigRuntime.listScheduledTasks(projectId);
+          const task = tasks.find((t) => t.id === result.task.id) ?? result.task;
+          return { ok: true, task, projectId };
+        } catch (err) {
+          return { ok: false, error: err?.message ?? 'failed to save the scheduled task' };
+        }
       },
 
       async listSchedules() {
-        return scheduler.list();
+        if (!projectConfigRuntime) return [];
+        let projectDir = stored?.projectPath ?? null;
+        if (!projectDir) {
+          const auto = await autoResolveProject({ type, token, channelId, threadId }).catch(() => null);
+          projectDir = auto?.projectPath ?? null;
+        }
+        const projectId = await resolveProjectIdForPath(projectDir);
+        if (!projectId) return [];
+        return projectConfigRuntime.listScheduledTasks(projectId);
       },
 
       async deleteSchedule(id) {
-        return scheduler.delete(id);
+        if (!projectConfigRuntime) return false;
+        let projectDir = stored?.projectPath ?? null;
+        if (!projectDir) {
+          const auto = await autoResolveProject({ type, token, channelId, threadId }).catch(() => null);
+          projectDir = auto?.projectPath ?? null;
+        }
+        const projectId = await resolveProjectIdForPath(projectDir);
+        if (!projectId) return false;
+        try {
+          const result = await projectConfigRuntime.deleteScheduledTask(projectId, id);
+          await scheduledTasksRuntime?.syncProject?.(projectId);
+          return Boolean(result?.deleted ?? true);
+        } catch {
+          return false;
+        }
       },
 
       describeSchedule,
@@ -2307,6 +2467,12 @@ export function createMessengerOpencodeBridge({
       return { ok: false, error: 'empty text' };
     }
     ensureSubscribed();
+
+    // Remember who talked to the bot — web-created mirror threads add this
+    // user as a member so they appear in their Discord sidebar.
+    if (type === 'discord' && from?.id) {
+      rememberLastActiveDiscordUser(token, from.id);
+    }
 
     // -----------------------------------------------------------------
     // Step 0 — Slash command interceptor
@@ -2503,10 +2669,9 @@ export function createMessengerOpencodeBridge({
       const contextBlocks = [];
       const memory = await readProjectMemory(effectiveProjectPath);
       if (memory) contextBlocks.push(`<project-memory>\n${memory}\n</project-memory>`);
-      const scheduling = buildSchedulingInstructions({
-        channelId,
-        threadId: effectiveThreadId,
-      });
+      const scheduling = await buildSchedulingInstructions({
+        projectPath: effectiveProjectPath,
+      }).catch(() => null);
       if (scheduling) contextBlocks.push(scheduling);
       if (contextBlocks.length > 0) {
         text = `${contextBlocks.join('\n\n')}\n\n${text}`;
@@ -2832,14 +2997,14 @@ export function createMessengerOpencodeBridge({
     initApprovalListener,
     handleApprovalDecision,
     handleThreadDeleted,
-    /** Scheduled prompts — used by the HTTP routes. */
-    scheduler,
     /** Mention-only mode — checked by the Discord listener. */
     getMentionMode,
     /** Whether a surface already has a session binding (mention mode skips bound threads). */
     hasSurfaceBinding,
     /** Test seam — exposed so tests can drive events without an SSE stream. */
     _handleGlobalEvent: handleGlobalEvent,
+    /** Test seam — run one thread-title polling sweep. */
+    _sweepThreadTitles: sweepThreadTitles,
     store: bridgeStore,
     /** Shared approval context map — exposed so listeners can inspect it */
     approvalContexts,
