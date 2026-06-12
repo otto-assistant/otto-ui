@@ -1246,6 +1246,10 @@ async function main(options = {}) {
     sanitizeProjects,
     // Lets the bridge tell agents how to reach the scheduling API locally.
     getLocalApiBaseUrl: () => `http://127.0.0.1:${tunnelRuntimeContext.getActivePort() || port}`,
+    // Discord /schedule writes into the SAME per-project scheduler the web
+    // UI's Scheduled-tasks dialog manages, so both stay in sync.
+    projectConfigRuntime,
+    scheduledTasksRuntime,
   });
   app.use('/api/otto/messenger', messengerRouter);
 

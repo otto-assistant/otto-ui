@@ -45,6 +45,11 @@ export function createMessengerSyncRouter({
   sanitizeProjects = null,
   // Base URL of this OpenChamber server (for agent-facing scheduling docs).
   getLocalApiBaseUrl = null,
+  // OpenChamber's per-project scheduler — the Discord /schedule command and
+  // the agent-facing scheduling instructions create tasks THERE so they sync
+  // with the web UI's Scheduled-tasks dialog.
+  projectConfigRuntime = null,
+  scheduledTasksRuntime = null,
 }) {
   const router = Router();
 
@@ -221,6 +226,8 @@ export function createMessengerSyncRouter({
           // Settings access for voice-message STT (sttServerUrl/sttModel/sttLanguage).
           readSettings,
           getLocalApiBaseUrl,
+          projectConfigRuntime,
+          scheduledTasksRuntime,
           // Powers the Discord `/skill` picker — list skills available to the
           // agent in the surface's bound project (or user-level when unbound).
           listSkills: ({ projectPath } = {}) => {
@@ -1049,71 +1056,10 @@ export function createMessengerSyncRouter({
    *   Omit a field to leave it unchanged. Pass null to clear it.
    * Returns: { ok, project: { projectPath, projectLabel, modelDefault, agentDefault } }
    */
-  // ── Scheduled prompts ─────────────────────────────────────────────────
-  // Create / list / delete scheduled prompts. Used by the Discord /schedule
-  // command, the OpenChamber UI, AND by the agent itself (the bridge injects
-  // these endpoints into new sessions so the model can self-serve reminders).
-
-  const SCHEDULE_HELP_TEXT = [
-    'OpenChamber messenger scheduling API',
-    '',
-    'POST   /api/otto/messenger/schedule',
-    '  body: {',
-    '    "when":   "2026-03-01T09:00:00Z"  (one-time, UTC ISO ending with Z)',
-    '              or "0 9 * * 1"          (5-field cron, evaluated in UTC),',
-    '    "prompt": "<detailed prompt: goal, constraints, expected output>",',
-    '    "threadId":  "<discord thread id>"   → continue that conversation, or',
-    '    "channelId": "<discord channel id>"  → start a NEW chat there, or',
-    '    "projectPath": "/abs/path"           → new session in that project (no Discord surface),',
-    '    "model": "provider/model"  (optional — pins who answers),',
-    '    "agent": "name"            (optional)',
-    '  }',
-    'GET    /api/otto/messenger/schedule           → list tasks',
-    'DELETE /api/otto/messenger/schedule/:id       → remove a task',
-    '',
-    'Rules: all times are UTC; one-time dates must be in the future; recurring',
-    'tasks fire on the cron schedule until deleted. Answers stream back into',
-    'the Discord surface; web sessions appear in the OpenChamber sidebar.',
-  ].join('\n');
-
-  router.get('/schedule/help', (_req, res) => {
-    res.type('text/plain').send(SCHEDULE_HELP_TEXT);
-  });
-
-  router.get('/schedule', (_req, res) => {
-    if (!bridge?.scheduler) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
-    res.json({ ok: true, tasks: bridge.scheduler.list() });
-  });
-
-  router.post('/schedule', async (req, res) => {
-    if (!bridge?.scheduler) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
-    const { when, prompt, threadId, channelId, projectPath, model, agent, createdBy } = req.body ?? {};
-    if (!when || !prompt) {
-      return res.status(400).json({ ok: false, error: 'when and prompt are required (see GET /schedule/help)' });
-    }
-    if (!threadId && !channelId && !projectPath) {
-      return res.status(400).json({ ok: false, error: 'a target is required: threadId, channelId or projectPath' });
-    }
-    const result = bridge.scheduler.create({
-      type: 'discord',
-      channelId: channelId ?? null,
-      threadId: threadId ?? null,
-      projectPath: projectPath ?? null,
-      prompt,
-      when,
-      modelOverride: typeof model === 'string' && model.trim() ? model.trim() : null,
-      agentOverride: typeof agent === 'string' && agent.trim() ? agent.trim() : null,
-      createdBy: createdBy ?? 'api',
-    });
-    if (!result.ok) return res.status(400).json(result);
-    res.json(result);
-  });
-
-  router.delete('/schedule/:id', (req, res) => {
-    if (!bridge?.scheduler) return res.status(503).json({ ok: false, error: 'bridge unavailable' });
-    const removed = bridge.scheduler.delete(req.params.id);
-    res.json({ ok: removed, removed });
-  });
+  // Scheduled prompts live in OpenChamber's per-project scheduler
+  // (`/api/projects/:projectId/scheduled-tasks`) — the Discord /schedule
+  // command and the agent-facing instructions both target that API directly,
+  // so there are no messenger-specific scheduling endpoints here.
 
   router.post('/bridge/project-defaults', (req, res) => {
     if (!bridge) return res.status(503).json({ ok: false, error: 'bridge unavailable' });

@@ -715,3 +715,259 @@ describe('thread renaming from OpenCode session titles', () => {
     expect(calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(0);
   });
 });
+
+describe('thread title polling sweep (rename fallback)', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push([String(url), init]);
+      const u = String(url);
+      const method = init.method ?? 'GET';
+      if (u.startsWith('http://opencode/session/')) {
+        // OpenCode already generated a title — the rename event was missed.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'ses-sweep', title: 'Polled title win' }),
+          text: async () => '',
+        };
+      }
+      if (u.includes('discord.com') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'thread-sweep', type: 11, name: 'initial prompt line' }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('renames bound threads from polled session titles when the event was missed', async () => {
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        list: () => [
+          {
+            type: 'discord',
+            targetKey: 'thread-sweep',
+            sessionId: 'ses-sweep',
+            projectPath: '/p',
+            lastUsedAt: new Date().toISOString(),
+          },
+        ],
+        getSetting: () => null,
+        setSetting: () => {},
+      },
+      lookupMessengerTarget: () => ({
+        type: 'discord',
+        token: 'bot-token',
+        targetKey: 'thread-sweep',
+        threadId: null,
+        projectPath: '/p',
+      }),
+    });
+
+    await bridge._sweepThreadTitles();
+    await flush();
+
+    const patches = calls.filter(([, init]) => init.method === 'PATCH');
+    expect(patches).toHaveLength(1);
+    expect(JSON.parse(patches[0][1].body).name).toBe('Polled title win');
+  });
+
+  it('skips placeholder titles during the sweep', async () => {
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push([String(url), init]);
+      if (String(url).startsWith('http://opencode/session/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'ses-sweep', title: 'New session - 2026-06-12T07:00:00.000Z' }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ id: 'thread-sweep', type: 11, name: 'x' }), text: async () => '' };
+    });
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        list: () => [
+          { type: 'discord', targetKey: 'thread-sweep', sessionId: 'ses-sweep', projectPath: '/p', lastUsedAt: new Date().toISOString() },
+        ],
+        getSetting: () => null,
+        setSetting: () => {},
+      },
+    });
+
+    await bridge._sweepThreadTitles();
+    await flush();
+    expect(calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(0);
+  });
+});
+
+describe('/schedule — project scheduler integration', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => '',
+    }));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function makeScheduleBridge({ upserted, deleted, synced }) {
+    return makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: () => ({
+          sessionId: 'ses-1',
+          projectPath: '/proj/alpha',
+          projectLabel: 'alpha',
+          modelOverride: 'anthropic/claude-sonnet-4',
+          agentOverride: null,
+          verbosityOverride: null,
+        }),
+        getSetting: () => null,
+        setSetting: () => {},
+      },
+      listProjects: async () => [{ id: 'proj-alpha', path: '/proj/alpha', label: 'alpha' }],
+      projectConfigRuntime: {
+        upsertScheduledTask: async (projectId, task) => {
+          upserted.push({ projectId, task });
+          return { task: { ...task, id: 'task-1' }, created: true };
+        },
+        listScheduledTasks: async (projectId) => {
+          if (projectId !== 'proj-alpha') return [];
+          // Echo back whatever was upserted (with the computed state the real
+          // runtime would add); fall back to a static fixture for list tests.
+          if (upserted.length > 0) {
+            return upserted.map(({ task }) => ({
+              ...task,
+              id: 'task-1',
+              state: { createdAt: 1, updatedAt: 1, nextRunAt: 1781340000000 },
+            }));
+          }
+          return [
+            {
+              id: 'task-1',
+              name: 'Run the weekly tests',
+              enabled: true,
+              schedule: { kind: 'cron', cron: '0 9 * * 1', timezone: 'UTC' },
+              execution: { prompt: 'Run the weekly tests', providerID: 'anthropic', modelID: 'claude-sonnet-4' },
+              state: { createdAt: 1, updatedAt: 1, nextRunAt: 1781340000000 },
+            },
+          ];
+        },
+        deleteScheduledTask: async (projectId, taskId) => {
+          deleted.push({ projectId, taskId });
+          return { deleted: true, tasks: [] };
+        },
+      },
+      scheduledTasksRuntime: {
+        syncProject: async (projectId) => synced.push(projectId),
+      },
+    });
+  }
+
+  it('creates a cron task in the per-project scheduler and re-syncs timers', async () => {
+    const upserted = [];
+    const synced = [];
+    const bridge = makeScheduleBridge({ upserted, deleted: [], synced });
+
+    const result = await bridge.runCommand({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'chan-1',
+      commandName: 'schedule',
+      args: '0 9 * * 1 Run the weekly tests',
+      from: { id: 'u1', username: 'tester' },
+    });
+
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0].projectId).toBe('proj-alpha');
+    expect(upserted[0].task.schedule).toEqual({ kind: 'cron', cron: '0 9 * * 1', timezone: 'UTC' });
+    expect(upserted[0].task.execution).toMatchObject({
+      prompt: 'Run the weekly tests',
+      providerID: 'anthropic',
+      modelID: 'claude-sonnet-4',
+    });
+    expect(synced).toEqual(['proj-alpha']);
+    expect(result.reply).toContain('task-1');
+    expect(result.reply).toContain('anthropic/claude-sonnet-4');
+  });
+
+  it('creates a one-time task from a UTC ISO date', async () => {
+    const upserted = [];
+    const synced = [];
+    const bridge = makeScheduleBridge({ upserted, deleted: [], synced });
+
+    const result = await bridge.runCommand({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'chan-1',
+      commandName: 'schedule',
+      args: '2099-03-01T09:00 Review open PRs',
+      from: { id: 'u1' },
+    });
+
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0].task.schedule).toEqual({ kind: 'once', date: '2099-03-01', time: '09:00', timezone: 'UTC' });
+    expect(result.reply).toContain('once at 2099-03-01 09:00');
+  });
+
+  it('rejects past one-time dates and invalid cron', async () => {
+    const bridge = makeScheduleBridge({ upserted: [], deleted: [], synced: [] });
+
+    const past = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: '2020-01-01T09:00 Too late',
+    });
+    expect(past.reply).toContain('future');
+
+    const badCron = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'not-a-cron Run it',
+    });
+    expect(badCron.reply).toContain('✗');
+  });
+
+  it('lists and deletes tasks through the project scheduler', async () => {
+    const deleted = [];
+    const synced = [];
+    const bridge = makeScheduleBridge({ upserted: [], deleted, synced });
+
+    const list = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'list',
+    });
+    expect(list.reply).toContain('task-1');
+    expect(list.reply).toContain('cron `0 9 * * 1`');
+
+    const del = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'delete task-1',
+    });
+    expect(del.reply).toContain('Deleted');
+    expect(deleted).toEqual([{ projectId: 'proj-alpha', taskId: 'task-1' }]);
+    expect(synced).toEqual(['proj-alpha']);
+  });
+});
