@@ -11,7 +11,7 @@ import remend from 'remend';
 import { FadeInOnReveal } from './message/FadeInOnReveal';
 import type { Part } from '@opencode-ai/sdk/v2';
 import { cn } from '@/lib/utils';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import SyntaxHighlighter from './syntaxHighlighterAsync';
 import { toast } from '@/components/ui';
 import { Icon } from "@/components/icon/Icon";
 import { copyTextToClipboard } from '@/lib/clipboard';

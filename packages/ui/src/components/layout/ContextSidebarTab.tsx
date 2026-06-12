@@ -1,6 +1,6 @@
 import React from 'react';
 import type { Message, Part } from '@opencode-ai/sdk/v2';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import SyntaxHighlighter from '@/components/chat/syntaxHighlighterAsync';
 
 import { deriveMessageRole } from '@/components/chat/message/messageRole';
 import { Icon } from "@/components/icon/Icon";
