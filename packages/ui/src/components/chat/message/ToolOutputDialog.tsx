@@ -1,7 +1,7 @@
 import React from 'react';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { File as PierreFile, PatchDiff } from '@pierre/diffs/react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import SyntaxHighlighter from '@/components/chat/syntaxHighlighterAsync';
 import { createPortal } from 'react-dom';
 
 import { cn } from '@/lib/utils';

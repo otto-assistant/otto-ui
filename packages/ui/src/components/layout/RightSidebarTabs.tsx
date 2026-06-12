@@ -2,8 +2,12 @@ import React from 'react';
 
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
 import { ProjectNotesTodoPanel } from '@/components/session/ProjectNotesTodoPanel';
-import { GitView } from '@/components/views/GitView';
 import { Icon } from "@/components/icon/Icon";
+import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
+
+// Deferred: GitView pulls the diff-highlighting stack; only load it when the
+// Git tab is opened.
+const GitView = lazyWithChunkRecovery(() => import('@/components/views/GitView').then(m => ({ default: m.GitView })));
 import { useGitStore } from '@/stores/useGitStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
@@ -131,7 +135,7 @@ export const RightSidebarTabs: React.FC = () => {
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {rightSidebarTab === 'git' && <GitView />}
+        {rightSidebarTab === 'git' && <React.Suspense fallback={null}><GitView /></React.Suspense>}
         {rightSidebarTab === 'files' && <SidebarFilesTree />}
         {rightSidebarTab === 'context' && <ProjectContextPanel />}
       </div>

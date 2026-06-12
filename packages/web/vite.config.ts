@@ -76,7 +76,15 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },
   optimizeDeps: {
-    include: ['@opencode-ai/sdk/v2'],
+    include: [
+      '@opencode-ai/sdk/v2',
+      // Pre-bundle the on-demand Prism highlighter so its core + the small set
+      // of languages actually rendered are served as a handful of chunks. The
+      // full `react-syntax-highlighter` Prism build (refractor with ~200
+      // languages) is intentionally NOT pulled in — see
+      // packages/ui/src/components/chat/syntaxHighlighterAsync.ts.
+      'react-syntax-highlighter/dist/esm/prism-async-light',
+    ],
   },
   server: {
     port: 5173,

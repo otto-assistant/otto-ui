@@ -8,7 +8,7 @@ import { SimpleMarkdownRenderer } from '../../MarkdownRenderer';
 import { getToolMetadata } from '@/lib/toolHelpers';
 import type { ToolPart as ToolPartType, ToolState as ToolStateUnion } from '@opencode-ai/sdk/v2';
 import { toolDisplayStyles } from '@/lib/typography';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import SyntaxHighlighter from '@/components/chat/syntaxHighlighterAsync';
 import { useOptionalThemeSystem } from '@/contexts/useThemeSystem';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
