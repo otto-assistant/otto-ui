@@ -39,7 +39,8 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
     case 'commands':
       return 'slash-commands-2';
     case 'mcp':
-      return 'plug-2';
+      // Rendered as the custom McpIcon component by consumers (no sprite icon).
+      return null;
     case 'plugins':
       return 'code-box';
 
@@ -60,6 +61,8 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
       return 'mic';
     case 'tunnel':
       return 'global';
+    case 'about':
+      return 'information';
     case 'home':
       return null;
     default:

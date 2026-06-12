@@ -648,7 +648,6 @@ export interface SettingsPayload {
   opencodeBinary?: string;
   projects?: ProjectEntry[];
   activeProjectId?: string;
-  approvedDirectories?: string[];
   securityScopedBookmarks?: string[];
   pinnedDirectories?: string[];
   showReasoningTraces?: boolean;
@@ -1049,6 +1048,12 @@ export type GitHubAuthStatus = {
   user?: GitHubUserSummary | null;
   scope?: string;
   accounts?: GitHubAuthAccount[];
+  ghCli?: {
+    available: boolean;
+    disabled: boolean;
+    active: boolean;
+    user?: GitHubUserSummary | null;
+  } | null;
 };
 
 export type GitHubAuthAccount = {
@@ -1056,6 +1061,7 @@ export type GitHubAuthAccount = {
   user: GitHubUserSummary;
   scope?: string;
   current?: boolean;
+  source?: 'oauth' | 'gh-cli';
 };
 
 export type GitHubDeviceFlowStart = {
@@ -1078,6 +1084,7 @@ export interface GitHubAPI {
   authComplete(deviceCode: string): Promise<GitHubDeviceFlowComplete>;
   authDisconnect(): Promise<{ removed: boolean }>;
   authActivate(accountId: string): Promise<GitHubAuthStatus>;
+  authSetGhCliDisabled(disabled: boolean): Promise<{ disabled: boolean }>;
   me?(): Promise<GitHubUserSummary>;
 
   prStatus(directory: string, branch: string, remote?: string, options?: { force?: boolean }): Promise<GitHubPullRequestStatus>;

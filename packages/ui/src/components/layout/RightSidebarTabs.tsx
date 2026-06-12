@@ -84,7 +84,7 @@ export const ProjectContextPanel: React.FC = () => {
   }, [activeProject, gitDirectories]);
 
   return (
-    <div className="h-full min-h-0 overflow-auto bg-sidebar">
+    <div className="h-full min-h-0 overflow-auto bg-background">
       <ProjectNotesTodoPanel
         projectRef={projectRef}
         projectLabel={projectLabel}
@@ -122,8 +122,8 @@ export const RightSidebarTabs: React.FC = () => {
   ], [t]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-sidebar">
-      <div className="h-9 bg-sidebar pt-1 px-2">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+      <div className="h-9 bg-background pt-1 px-2">
         <SortableTabsStrip
           items={tabItems}
           activeId={rightSidebarTab}
