@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   renderPartForMessenger,
   renderToolPart,
+  renderQuestionForMessenger,
+  renderTodoListForMessenger,
   deriveThreadNameFromSessionTitle,
   extractLastAssistantTokens,
   computeTurnTokens,
@@ -247,5 +249,87 @@ describe('extractLastAssistantTokens', () => {
     expect(extractLastAssistantTokens([])).toBeNull();
     expect(extractLastAssistantTokens(null)).toBeNull();
     expect(extractLastAssistantTokens([{ info: { role: 'user' } }])).toBeNull();
+  });
+});
+
+describe('renderQuestionForMessenger', () => {
+  it('renders header, question text and numbered options', () => {
+    const out = renderQuestionForMessenger(
+      {
+        question: 'Which database should the service use?',
+        header: 'Database',
+        options: [
+          { label: 'Postgres', description: 'relational, battle-tested' },
+          { label: 'SQLite', description: '' },
+        ],
+      },
+      { index: 0, total: 1 },
+    );
+    expect(out).toContain('❓ **Database**');
+    expect(out).toContain('Which database should the service use?');
+    expect(out).toContain('`1.` Postgres — relational, battle-tested');
+    expect(out).toContain('`2.` SQLite');
+    expect(out).toContain('reply with your own answer');
+  });
+
+  it('adds a counter for multi-question requests and survives missing fields', () => {
+    const out = renderQuestionForMessenger(
+      { question: 'Second question?', header: '', options: [] },
+      { index: 1, total: 2 },
+    );
+    expect(out).toContain('(2/2)');
+    expect(out).toContain('Second question?');
+    expect(renderQuestionForMessenger(null)).toBeNull();
+    expect(renderQuestionForMessenger({ question: '', header: '', options: [] })).toBeNull();
+  });
+});
+
+describe('renderTodoListForMessenger', () => {
+  it('renders a checklist with status icons and a done counter', () => {
+    const out = renderTodoListForMessenger([
+      { content: 'Set up scaffolding', status: 'completed', priority: 'high' },
+      { content: 'Implement API client', status: 'in_progress', priority: 'high' },
+      { content: 'Write tests', status: 'pending', priority: 'medium' },
+      { content: 'Old approach', status: 'cancelled', priority: 'low' },
+    ]);
+    expect(out).toContain('📋 **Plan** — 1/4 done');
+    expect(out).toContain('✅ ~~Set up scaffolding~~');
+    expect(out).toContain('🔄 Implement API client');
+    expect(out).toContain('⬜ Write tests');
+    expect(out).toContain('🚫 ~~Old approach~~');
+  });
+
+  it('returns null for empty or content-less lists', () => {
+    expect(renderTodoListForMessenger([])).toBeNull();
+    expect(renderTodoListForMessenger(null)).toBeNull();
+    expect(renderTodoListForMessenger([{ content: '   ', status: 'pending' }])).toBeNull();
+  });
+
+  it('caps very long lists', () => {
+    const todos = Array.from({ length: 40 }, (_, i) => ({
+      content: `Task ${i + 1}`,
+      status: 'pending',
+      priority: 'low',
+    }));
+    const out = renderTodoListForMessenger(todos);
+    expect(out).toContain('… 10 more');
+    expect(out.length).toBeLessThanOrEqual(1900);
+  });
+});
+
+describe('renderToolPart — question tool one-liner', () => {
+  it('shows the first question text in the summary', () => {
+    const line = renderToolPart(
+      toolPart({
+        tool: 'question',
+        state: {
+          status: 'completed',
+          input: { questions: [{ question: 'Which approach should I take?', header: 'Approach', options: [] }] },
+        },
+      }),
+      'normal',
+    );
+    expect(line).toContain('**question**');
+    expect(line).toContain('Which approach should I take?');
   });
 });

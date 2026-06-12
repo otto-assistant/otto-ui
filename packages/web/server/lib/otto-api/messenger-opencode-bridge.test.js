@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
+import { createMessengerOpencodeBridge, questionContexts } from './messenger-opencode-bridge.js';
 import { createMessengerSyncRouter } from './messenger-sync.js';
 
 /**
@@ -969,5 +969,292 @@ describe('/schedule — project scheduler integration', () => {
     expect(del.reply).toContain('Deleted');
     expect(deleted).toEqual([{ projectId: 'proj-alpha', taskId: 'task-1' }]);
     expect(synced).toEqual(['proj-alpha']);
+  });
+});
+
+describe('question flow — interactive questions in Discord', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    questionContexts.clear();
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ?? null });
+      return { ok: true, status: 200, json: async () => ({ id: 'discord-msg-q' }), text: async () => '' };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    questionContexts.clear();
+    vi.restoreAllMocks();
+  });
+
+  const flushAll = async () => {
+    await flush();
+    await flush();
+  };
+
+  async function askQuestion(bridge, questions, { requestId = 'req-q1', sessionId = 'ses-q1' } = {}) {
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: {
+        type: 'question.asked',
+        properties: { id: requestId, sessionID: sessionId, questions },
+      },
+    });
+    await flushAll();
+    const ids = [...questionContexts.keys()];
+    expect(ids.length).toBe(1);
+    return ids[0];
+  }
+
+  it('posts a question with option buttons regardless of verbosity', async () => {
+    const bridge = makeBridge({
+      store: { ...makeFakeStore(), getVerbosityDefault: () => 'quiet' },
+    });
+    await askQuestion(bridge, [
+      {
+        question: 'Which approach should I take?',
+        header: 'Approach',
+        options: [
+          { label: 'Option A', description: 'fast' },
+          { label: 'Option B', description: 'thorough' },
+        ],
+      },
+    ]);
+
+    const post = calls.find((c) => c.url.includes('/channels/chan-123/messages') && c.method === 'POST');
+    expect(post).toBeTruthy();
+    const body = JSON.parse(post.body);
+    expect(body.content).toContain('Approach');
+    expect(body.content).toContain('Which approach should I take?');
+    expect(body.content).toContain('Option A');
+    const buttons = body.components[0].components;
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].custom_id).toMatch(/^otto-question:[0-9a-f]+:0:0$/);
+    expect(buttons[1].custom_id).toMatch(/^otto-question:[0-9a-f]+:0:1$/);
+  });
+
+  it('uses a select menu for multi-select questions', async () => {
+    const bridge = makeBridge();
+    await askQuestion(bridge, [
+      {
+        question: 'Pick the files to include',
+        header: 'Files',
+        multiple: true,
+        options: [
+          { label: 'a.ts' },
+          { label: 'b.ts' },
+          { label: 'c.ts' },
+        ],
+      },
+    ]);
+
+    const post = calls.find((c) => c.url.includes('/channels/chan-123/messages') && c.method === 'POST');
+    const select = JSON.parse(post.body).components[0].components[0];
+    expect(select.type).toBe(3);
+    expect(select.custom_id).toMatch(/^otto-question-select:[0-9a-f]+:0$/);
+    expect(select.options.map((o) => o.label)).toEqual(['a.ts', 'b.ts', 'c.ts']);
+    expect(select.max_values).toBe(3);
+  });
+
+  it('replies to OpenCode with the picked option label', async () => {
+    const bridge = makeBridge();
+    const questionId = await askQuestion(bridge, [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        options: [{ label: 'Option A' }, { label: 'Option B' }],
+      },
+    ]);
+
+    const result = bridge.handleQuestionDecision(questionId, 0, ['1']);
+    await flushAll();
+
+    expect(result).toEqual({ ok: true, labels: ['Option B'], complete: true });
+    const reply = calls.find((c) => c.url.includes('/question/req-q1/reply'));
+    expect(reply).toBeTruthy();
+    expect(reply.url).toContain('directory=%2Fproj');
+    expect(JSON.parse(reply.body)).toEqual({ answers: [['Option B']] });
+    expect(questionContexts.size).toBe(0);
+  });
+
+  it('collects answers across a multi-question request before replying', async () => {
+    const bridge = makeBridge();
+    const questionId = await askQuestion(bridge, [
+      { question: 'First?', header: 'One', options: [{ label: 'A' }, { label: 'B' }] },
+      { question: 'Second?', header: 'Two', options: [{ label: 'C' }, { label: 'D' }] },
+    ]);
+
+    const first = bridge.handleQuestionDecision(questionId, 0, ['0']);
+    expect(first).toEqual({ ok: true, labels: ['A'], complete: false });
+    await flushAll();
+    expect(calls.some((c) => c.url.includes('/question/req-q1/reply'))).toBe(false);
+
+    const second = bridge.handleQuestionDecision(questionId, 1, ['1']);
+    expect(second).toEqual({ ok: true, labels: ['D'], complete: true });
+    await flushAll();
+    const reply = calls.find((c) => c.url.includes('/question/req-q1/reply'));
+    expect(JSON.parse(reply.body)).toEqual({ answers: [['A'], ['D']] });
+  });
+
+  it('is idempotent for expired/unknown question contexts', async () => {
+    const bridge = makeBridge();
+    const result = bridge.handleQuestionDecision('nope', 0, ['0']);
+    expect(result.ok).toBe(false);
+  });
+
+  it('strips stale components when the question is answered in the web UI', async () => {
+    const bridge = makeBridge();
+    await askQuestion(bridge, [
+      { question: 'Which?', header: 'Pick', options: [{ label: 'A' }] },
+    ]);
+
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: {
+        type: 'question.replied',
+        properties: { sessionID: 'ses-q1', requestID: 'req-q1', answers: [['A']] },
+      },
+    });
+    await flushAll();
+
+    expect(questionContexts.size).toBe(0);
+    const patch = calls.find(
+      (c) => c.method === 'PATCH' && c.url.includes('/messages/discord-msg-q'),
+    );
+    expect(patch).toBeTruthy();
+    expect(JSON.parse(patch.body)).toEqual({ components: [] });
+  });
+
+  it('treats a typed Discord reply as the custom answer instead of a new prompt', async () => {
+    const bound = { sessionId: 'ses-q1', projectPath: '/proj', projectLabel: 'Proj' };
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) => (targetKey === 'chan-123' ? bound : null),
+      },
+    });
+    await askQuestion(bridge, [
+      { question: 'Which migration name?', header: 'Name', options: [{ label: 'auto' }] },
+    ]);
+
+    const routed = await bridge.routeInbound({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'chan-123',
+      threadId: null,
+      sourceMessageId: null,
+      text: 'call it add-user-table',
+      from: { id: 'user-1', username: 'alice' },
+    });
+
+    expect(routed.ok).toBe(true);
+    expect(routed.answeredQuestion).toBe(true);
+    const reply = calls.find((c) => c.url.includes('/question/req-q1/reply'));
+    expect(reply).toBeTruthy();
+    expect(JSON.parse(reply.body)).toEqual({ answers: [['call it add-user-table']] });
+    // The typed answer resumes the blocked turn — it must NOT also be sent
+    // as a brand-new prompt.
+    expect(calls.some((c) => c.url.includes('/prompt_async'))).toBe(false);
+    expect(questionContexts.size).toBe(0);
+  });
+});
+
+describe('todo/plan mirroring', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ?? null });
+      const u = String(url);
+      if (u.includes('/session/') && !u.includes('/message')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'ses-todo' }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({ id: 'todo-msg-1' }), text: async () => '' };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  async function makeBridgeWithSession() {
+    const bound = { sessionId: 'ses-todo', projectPath: '/proj', projectLabel: 'Proj' };
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) => (targetKey === 'chan-todo' ? bound : null),
+      },
+    });
+    // Bind a live Discord context for the session via an inbound prompt.
+    const routed = await bridge.routeInbound({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'chan-todo',
+      threadId: null,
+      sourceMessageId: null,
+      text: 'do the work',
+      from: { id: 'user-1', username: 'alice' },
+    });
+    expect(routed.ok).toBe(true);
+    return bridge;
+  }
+
+  it('posts the agent plan even at quiet verbosity (flushed on idle)', async () => {
+    const bridge = await makeBridgeWithSession();
+    calls.length = 0;
+
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: {
+        type: 'todo.updated',
+        properties: {
+          sessionID: 'ses-todo',
+          todos: [
+            { content: 'Set up scaffolding', status: 'completed', priority: 'high' },
+            { content: 'Implement API client', status: 'in_progress', priority: 'high' },
+            { content: 'Write tests', status: 'pending', priority: 'medium' },
+          ],
+        },
+      },
+    });
+    // session.idle flushes the pending (debounced) todo render immediately.
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: { type: 'session.idle', properties: { sessionID: 'ses-todo' } },
+    });
+    await flush();
+    await flush();
+
+    const post = calls.find(
+      (c) => c.method === 'POST' && c.url.includes('/channels/chan-todo/messages') && c.body?.includes('Plan'),
+    );
+    expect(post).toBeTruthy();
+    const content = JSON.parse(post.body).content;
+    expect(content).toContain('📋 **Plan** — 1/3 done');
+    expect(content).toContain('✅ ~~Set up scaffolding~~');
+    expect(content).toContain('🔄 Implement API client');
+    expect(content).toContain('⬜ Write tests');
+  });
+
+  it('ignores todo updates for sessions with no bound surface', async () => {
+    const bridge = makeBridge();
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: {
+        type: 'todo.updated',
+        properties: { sessionID: 'unknown-ses', todos: [{ content: 'x', status: 'pending', priority: 'low' }] },
+      },
+    });
+    await flush();
+    expect(calls.length).toBe(0);
   });
 });
