@@ -50,6 +50,11 @@ export function createMessengerSyncRouter({
   // with the web UI's Scheduled-tasks dialog.
   projectConfigRuntime = null,
   scheduledTasksRuntime = null,
+  // Optional async hook that starts the shared global event stream (the
+  // OpenCode watcher + hub). The bridge depends on hub events for mirroring,
+  // questions, todos and permissions — without this, a headless server that
+  // never had a browser client connected would silently mirror nothing.
+  ensureEventStream = null,
 }) {
   const router = Router();
 
@@ -1139,6 +1144,15 @@ export function createMessengerSyncRouter({
       bridgeEnabled: bridgeEnabled !== false && Boolean(bridge),
       resolveProject,
     });
+
+    // The bridge mirrors OpenCode output via the shared global event hub —
+    // make sure that upstream stream is running even when no browser client
+    // ever connected to this server.
+    if (typeof ensureEventStream === 'function') {
+      Promise.resolve()
+        .then(() => ensureEventStream())
+        .catch((err) => console.warn('[MESSENGER] Failed to start global event stream:', err?.message ?? err));
+    }
 
     // Persist the listener config (including the bot token) to settings.json so
     // the server auto-starts the listener on the next boot. We do this here —

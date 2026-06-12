@@ -40,6 +40,7 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/proxy.js`: OpenCode API/SSE forwarding and readiness-gate route registration.
 - `packages/web/server/lib/opencode/session-runtime.js`: session status/attention/activity runtime for OpenCode SSE events.
 - `packages/web/server/lib/opencode/watcher.js`: global SSE watcher runtime for push/session event fanout.
+- `packages/web/server/lib/opencode/session-title-fallback.js`: server-side session-title fallback that replaces lingering "New session - <ISO>" placeholders after idle.
 - `packages/web/server/lib/opencode/shared.js`: shared utilities for config, markdown, skills, and git helpers.
 - `packages/web/server/lib/ui-auth/ui-auth.js`: UI session authentication runtime (outside OpenCode module).
 - `packages/web/server/lib/ui-auth/ui-passkeys.js`: UI passkey storage and WebAuthn registration/authentication helpers (outside OpenCode module).
@@ -338,6 +339,12 @@ This module provides OpenCode server integration utilities for the web server ru
   - Generic `/api/*` forwarding with hop-by-hop header filtering
   - Windows `/session` merge fallback path behavior
   - OpenCode readiness gate for proxied `/api` requests
+
+## Public exports (session-title-fallback.js)
+- `createSessionTitleFallback({ globalEventHub, buildOpenCodeUrl, getOpenCodeAuthHeaders, fetchImpl?, graceMs?, logger? })`: subscribes to the shared global hub; on `session.idle`, waits a grace period for OpenCode's own title agent, then derives a title from the first user message and writes it via `PATCH /session/{id}` when the placeholder is still in place. Skips child sessions; attempts once per session.
+- `isPlaceholderSessionTitle(title)`: matches OpenCode's `New session - <ISO>` parent placeholder.
+- `deriveTitleFromUserText(text)`: collapses whitespace, strips leading file mentions and bridge `<project-memory>`/`<scheduling>` context blocks, clips at a word boundary.
+- `extractFirstUserText(messages)`: first non-synthetic user text part from `GET /session/{id}/message`.
 
 ## Public exports (watcher.js)
 - `createOpenCodeWatcherRuntime(dependencies)`: creates global event watcher runtime backed by the shared upstream SSE reader.

@@ -65,6 +65,7 @@ import { createOpenCodeResolutionRuntime } from './lib/opencode/opencode-resolut
 import { createBootstrapRuntime } from './lib/opencode/bootstrap-runtime.js';
 import { createSessionRuntime } from './lib/opencode/session-runtime.js';
 import { createOpenCodeWatcherRuntime } from './lib/opencode/watcher.js';
+import { createSessionTitleFallback } from './lib/opencode/session-title-fallback.js';
 import { createScheduledTasksRuntime } from './lib/scheduled-tasks/runtime.js';
 import { createServerStartupRuntime } from './lib/opencode/server-startup-runtime.js';
 import { createTunnelWiringRuntime } from './lib/opencode/tunnel-wiring-runtime.js';
@@ -684,6 +685,16 @@ const globalMessageStreamHub = createGlobalMessageStreamHub({
   upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
 });
 
+// Guarantee every session ends up with a real title even when OpenCode's
+// title agent silently fails (rate limits, missing small model). Watches
+// session.idle on the shared hub and writes a first-user-message-derived
+// title if the "New session - <ISO>" placeholder is still in place.
+createSessionTitleFallback({
+  globalEventHub: globalMessageStreamHub,
+  buildOpenCodeUrl,
+  getOpenCodeAuthHeaders,
+});
+
 const openCodeWatcherRuntime = createOpenCodeWatcherRuntime({
   waitForOpenCodePort: (...args) => waitForOpenCodePort(...args),
   buildOpenCodeUrl,
@@ -1250,6 +1261,10 @@ async function main(options = {}) {
     // UI's Scheduled-tasks dialog manages, so both stay in sync.
     projectConfigRuntime,
     scheduledTasksRuntime,
+    // Mirroring (parts, permissions, questions, todos, title fallback) rides
+    // on the shared global event hub — start it when a listener starts so a
+    // headless server doesn't depend on a browser client connecting first.
+    ensureEventStream: () => ensureGlobalWatcherStarted(),
   });
   app.use('/api/otto/messenger', messengerRouter);
 
@@ -1372,6 +1387,11 @@ async function main(options = {}) {
             result?.alreadyRunning ? 'already running' : 'started',
             '(connected=' + result?.connected + ')'
           );
+          // The bridge needs the shared global event hub running to mirror
+          // OpenCode output into Discord — don't wait for a browser client.
+          void ensureGlobalWatcherStarted().catch((error) => {
+            console.warn('[Discord] Global event watcher startup failed:', error?.message ?? error);
+          });
           break; // Success — exit retry loop
         } else {
           console.log('[Discord] No bot token in saved config — skipping auto-start');
