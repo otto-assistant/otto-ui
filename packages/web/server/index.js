@@ -990,11 +990,14 @@ const bootstrapOpenCodeAtStartup = async (...args) => {
   if (openCodeLifecycleState.openCodeProcess && !openCodeLifecycleState.isExternalOpenCode) {
     startHealthMonitoring();
   }
-  if (ENV_DESKTOP_NOTIFY) {
-    void ensureGlobalWatcherStarted().catch((error) => {
-      console.warn(`Global event watcher startup failed: ${error?.message || error}`);
-    });
-  }
+  // Server-side event consumers (session-status runtime, notification
+  // triggers, the messenger bridge, the session-title fallback) all ride on
+  // the shared global watcher/hub. Start it unconditionally — waiting for a
+  // browser client to connect first made those features non-deterministic
+  // on headless servers.
+  void ensureGlobalWatcherStarted().catch((error) => {
+    console.warn(`Global event watcher startup failed: ${error?.message || error}`);
+  });
 };
 const killProcessOnPort = (...args) => openCodeLifecycleRuntime.killProcessOnPort(...args);
 const waitForPortRelease = (...args) => openCodeLifecycleRuntime.waitForPortRelease(...args);
