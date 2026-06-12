@@ -12,6 +12,7 @@ import {
 import { formatDirectoryName, formatPathForDisplay } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
 import { resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
+import { getSessionDisplayTitle } from '@/lib/session/displayTitle';
 
 type Args = {
   homeDirectory: string | null;
@@ -31,7 +32,7 @@ export const useSessionGrouping = (args: Args) => {
 
   const buildSessionSearchText = React.useCallback((session: Session): string => {
     const sessionDirectory = normalizePath((session as Session & { directory?: string | null }).directory ?? null) ?? '';
-    const sessionTitle = (session.title || t('sessions.sidebar.session.untitled')).trim();
+    const sessionTitle = getSessionDisplayTitle(session.title, t('sessions.sidebar.session.untitled'));
     return `${sessionTitle} ${sessionDirectory}`.toLowerCase();
   }, [t]);
 

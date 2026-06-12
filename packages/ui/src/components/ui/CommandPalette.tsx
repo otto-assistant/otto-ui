@@ -18,6 +18,7 @@ import {
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
+import { getSessionDisplayTitle } from '@/lib/session/displayTitle';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGitAllBranches, useGitStore } from '@/stores/useGitStore';
 import { useFileSearchStore } from '@/stores/useFileSearchStore';
@@ -487,7 +488,7 @@ export const CommandPalette: React.FC = () => {
                 return (
                   <CommandGroup key="sessions">
                     {visibleSessions.map((session) => {
-                      const title = session.title || t('commandPalette.session.untitled');
+                      const title = getSessionDisplayTitle(session.title, t('commandPalette.session.untitled'));
                       const dir = resolveGlobalSessionDirectory(session);
                       const branch = branchForSession(session.id, dir);
                       return (
