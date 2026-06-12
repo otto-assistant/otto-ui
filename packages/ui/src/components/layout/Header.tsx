@@ -36,7 +36,6 @@ import { WindowsWindowControls } from '@/components/desktop/WindowsWindowControl
 import { UpdateDialog } from '@/components/ui/UpdateDialog';
 import { useDeviceInfo, useTabletStandalonePwaRuntime } from '@/lib/device';
 import { cn, hasModifier } from '@/lib/utils';
-import { getSessionDisplayTitle } from '@/lib/session/displayTitle';
 import { McpDropdownContent } from '@/components/mcp/McpDropdown';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { formatQuotaValueLabel, formatQuotaResetLabel, formatWindowLabel, QUOTA_PROVIDERS, calculatePace, calculateExpectedUsagePercent } from '@/lib/quota';
@@ -1279,7 +1278,8 @@ export const Header: React.FC<HeaderProps> = ({
     if (!currentSessionId) {
       return activeProjectLabel ?? 'OpenChamber';
     }
-    return getSessionDisplayTitle(currentSession?.title, 'Untitled Session');
+    const trimmedTitle = currentSession?.title?.trim();
+    return trimmedTitle && trimmedTitle.length > 0 ? trimmedTitle : 'Untitled Session';
   }, [activeProjectLabel, currentSession?.title, currentSessionId]);
 
   const currentSessionDiffStats = React.useMemo(() => {
