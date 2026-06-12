@@ -284,6 +284,25 @@ async function startStandaloneDiscordThread({ token, channelId, name, userIds })
   return { ok: true, threadId, threadName: data.name ?? safeName };
 }
 
+/**
+ * Delete a Discord thread (DELETE /channels/:id). Best-effort: a 404 (already
+ * gone) is treated as success. Used when an OpenCode session is deleted in the
+ * web UI so the bound thread disappears from Discord too.
+ */
+async function deleteDiscordThread({ token, threadId }) {
+  if (!threadId) return { ok: false, error: 'no thread id' };
+  try {
+    const r = await fetch(
+      `https://discord.com/api/v10/channels/${encodeURIComponent(threadId)}`,
+      { method: 'DELETE', headers: { Authorization: `Bot ${token}` }, signal: AbortSignal.timeout(5000) },
+    );
+    if (r.ok || r.status === 404) return { ok: true };
+    return { ok: false, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+  } catch (err) {
+    return { ok: false, error: err?.message ?? 'thread delete failed' };
+  }
+}
+
 async function discordTyping({ token, channelId }) {
   try {
     await fetch(`https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/typing`, {
@@ -854,6 +873,18 @@ export function createMessengerOpencodeBridge({
         return await r.json().catch(() => null);
       } catch {
         return null;
+      }
+    },
+    async deleteSession(sessionId, directory) {
+      try {
+        const params = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}${params}`, {
+          method: 'DELETE',
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'delete failed' };
       }
     },
   };
@@ -1629,6 +1660,12 @@ export function createMessengerOpencodeBridge({
       if (sessionId && typeof info?.title === 'string') {
         void maybeRenameThreadFromSessionTitle(sessionId, info.title);
       }
+      return;
+    }
+    if (type === 'session.deleted' || type === 'session.removed') {
+      const sessionId =
+        props?.sessionID ?? props?.sessionId ?? props?.info?.id ?? props?.id ?? null;
+      if (sessionId) void handleSessionDeleted(sessionId);
       return;
     }
     if (type === 'session.idle') {
@@ -2789,14 +2826,24 @@ export function createMessengerOpencodeBridge({
     if (unsub) approvalContexts._cleanup = unsub;
   }
 
+  // Sessions whose deletion this bridge initiated (Discord thread delete →
+  // OpenCode session delete). The resulting `session.deleted` event must not
+  // try to re-delete the Discord thread that triggered it.
+  const sessionsBeingDeleted = new Set();
+
   /**
-   * Clean up bridge state when a Discord thread is deleted (or archived).
-   * Removes the in-memory session context, deletes the store binding, and
-   * optionally aborts the OpenCode session so it doesn't stay alive on the
-   * server. Called from the Discord listener on THREAD_DELETE / THREAD_UPDATE
-   * (archived) gateway events.
+   * Clean up bridge state when a Discord thread is deleted or archived.
+   * Always removes the in-memory context and the store binding. When the
+   * thread was explicitly DELETED (`reason: 'deleted'`, the default), the
+   * bound OpenCode session is deleted too so it disappears from the web UI —
+   * mirroring deletes both ways. Archival (`reason: 'archived'`) only cleans
+   * up bridge state; it must never destroy the session (a thread can
+   * auto-archive after inactivity and be reopened later).
+   *
+   * Called from the Discord listener on THREAD_DELETE (deleted) and
+   * THREAD_UPDATE-archived (archived) gateway events.
    */
-  function handleThreadDeleted({ type, threadId, token }) {
+  function handleThreadDeleted({ type, threadId, token, reason = 'deleted' }) {
     const bindings = bridgeStore.findByTargetKey({ type, targetKey: threadId });
 
     for (const b of bindings) {
@@ -2812,10 +2859,75 @@ export function createMessengerOpencodeBridge({
         });
       }
 
-      // Remove the store binding using the original binding's hash.
-      // This is correct even when multiple bot tokens share the same
-      // targetKey — each binding is removed independently.
+      // Remove the store binding FIRST (before deleting the session) so the
+      // session.deleted event we trigger below finds no binding and doesn't
+      // loop back to delete the already-gone thread.
       bridgeStore.unbind({ type, botTokenHash: b.botTokenHash, targetKey: threadId });
+
+      // Explicit deletion → delete the OpenCode session so it leaves the UI.
+      if (reason === 'deleted' && b.sessionId) {
+        sessionsBeingDeleted.add(b.sessionId);
+        void opencodeAdapter
+          .deleteSession(b.sessionId, b.projectPath ?? undefined)
+          .catch(() => ({ ok: false }))
+          .then((res) => {
+            if (!res?.ok) {
+              console.warn(`[BRIDGE] Could not delete OpenCode session ${b.sessionId} after thread delete`);
+            }
+            setTimeout(() => sessionsBeingDeleted.delete(b.sessionId), 30_000);
+          });
+      }
+    }
+  }
+
+  /**
+   * A session was deleted in the web UI (OpenCode `session.deleted` event) →
+   * delete the bound Discord thread so the two stay in sync. Loop-safe: skips
+   * sessions whose deletion the bridge itself initiated from a thread delete.
+   */
+  async function handleSessionDeleted(sessionId) {
+    if (!sessionId || sessionsBeingDeleted.has(sessionId)) return;
+
+    // Resolve the Discord surface: live context first, then the persistent
+    // binding (survives restarts), then the reverse-lookup helper for token.
+    const bindings = bridgeStore.lookupBySessionId(sessionId).filter((b) => b.type === 'discord' && b.targetKey);
+    const ctx = sessionContexts.get(sessionId);
+    if (ctx) {
+      stopTypingPulse(ctx);
+      sessionContexts.delete(sessionId);
+    }
+    if (bindings.length === 0) return;
+
+    let token = ctx?.token ?? null;
+    if (!token && typeof lookupMessengerTarget === 'function') {
+      try {
+        const target = await lookupMessengerTarget(sessionId);
+        if (target?.token) token = target.token;
+      } catch {
+        // best-effort
+      }
+    }
+
+    for (const b of bindings) {
+      const threadId = String(b.targetKey);
+      // Drop the binding first so the resulting THREAD_DELETE is a no-op.
+      // findByTargetKey gives us the bot token hash each binding was stored
+      // under (lookupBySessionId doesn't include it).
+      try {
+        for (const row of bridgeStore.findByTargetKey({ type: 'discord', targetKey: threadId })) {
+          bridgeStore.unbind({ type: 'discord', botTokenHash: row.botTokenHash, targetKey: threadId });
+        }
+      } catch {
+        // best-effort
+      }
+      if (token) {
+        const res = await deleteDiscordThread({ token, threadId }).catch(() => ({ ok: false }));
+        if (!res.ok) {
+          console.warn(`[BRIDGE] Could not delete Discord thread ${threadId} after session delete`);
+        } else {
+          broadcastEvent?.('messenger.bridge.thread_deleted_from_session', { type: 'discord', threadId, sessionId });
+        }
+      }
     }
   }
 
@@ -2832,6 +2944,7 @@ export function createMessengerOpencodeBridge({
     initApprovalListener,
     handleApprovalDecision,
     handleThreadDeleted,
+    handleSessionDeleted,
     /** Scheduled prompts — used by the HTTP routes. */
     scheduler,
     /** Mention-only mode — checked by the Discord listener. */
