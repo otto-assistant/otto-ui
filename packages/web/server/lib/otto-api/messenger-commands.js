@@ -136,7 +136,7 @@ const COMMAND_HELP = [
     name: 'schedule',
     usage: '/schedule <when> [model=p/m] [agent=name] <prompt> | list | delete <id>',
     summary:
-      'Schedule a prompt — `when` is a UTC ISO date (2026-03-01T09:00:00Z) or cron (`0 9 * * 1`, UTC). In a thread it continues that conversation; in a channel it starts a new chat.',
+      'Schedule a prompt in the project scheduler (synced with the web UI) — `when` is a UTC ISO date (2026-03-01T09:00) or cron (`0 9 * * 1`, UTC). Each run starts a fresh session in the project.',
   },
 ];
 
@@ -771,22 +771,23 @@ export async function executeMessengerCommand({
         if (!tasks || tasks.length === 0) {
           return {
             reply: [
-              '_(no scheduled tasks)_',
+              '_(no scheduled tasks in this project)_',
               '',
               'Create one with `/schedule <when> [model=provider/model] [agent=name] <prompt>`:',
-              '• one-time (UTC ISO): `/schedule 2026-03-01T09:00:00Z Review open PRs`',
+              '• one-time (UTC): `/schedule 2026-03-01T09:00 Review open PRs`',
               '• recurring (cron, UTC): `/schedule 0 9 * * 1 Run the weekly test suite`',
-              'In a thread the prompt continues that conversation; in a channel it starts a new chat.',
+              'Tasks live in the project scheduler — view and edit them in the web UI (sidebar → Scheduled tasks) too.',
             ].join('\n'),
           };
         }
-        const lines = ['**Scheduled tasks**', ''];
+        const lines = ['**Scheduled tasks** (project scheduler — also editable in the web UI)', ''];
         for (const t of tasks) {
+          const nextRunAt = t.state?.nextRunAt;
           const status = t.enabled
-            ? (t.nextRunAt ? `next ${new Date(t.nextRunAt).toISOString()}` : 'pending')
-            : `done${t.lastStatus ? ` (${t.lastStatus})` : ''}`;
-          lines.push(`\`${t.id}\` — ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : t.scheduleSpec} — _${status}_`);
-          lines.push(`> ${t.prompt.split('\n')[0].slice(0, 120)}`);
+            ? (nextRunAt ? `next ${new Date(nextRunAt).toISOString()}` : 'pending')
+            : `disabled${t.state?.lastStatus ? ` (last: ${t.state.lastStatus})` : ''}`;
+          lines.push(`\`${t.id}\` — **${t.name}** — ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : ''} — _${status}_`);
+          lines.push(`> ${(t.execution?.prompt ?? '').split('\n')[0].slice(0, 120)}`);
         }
         lines.push('', 'Remove with `/schedule delete <id>`.');
         return { reply: lines.join('\n') };
@@ -828,12 +829,13 @@ export async function executeMessengerCommand({
       const r = await bridgeOps.scheduleTask({ when, prompt, model, agent });
       if (!r.ok) return { reply: `✗ Could not schedule: ${r.error ?? 'unknown error'}` };
       const t = r.task;
+      const nextRunAt = t.state?.nextRunAt;
       return {
         reply: [
-          `⏰ Scheduled \`${t.id}\` — ${t.scheduleKind === 'once' ? `once at ${t.scheduleSpec}` : `cron \`${t.scheduleSpec}\` (UTC)`}`,
-          t.threadId ? 'Target: this thread (continues the current conversation).' : 'Target: a new chat in this channel.',
-          model || agent ? `Pinned: ${[model && `model \`${model}\``, agent && `agent \`${agent}\``].filter(Boolean).join(', ')}` : '',
-          `Next run: ${t.nextRunAt ? new Date(t.nextRunAt).toISOString() : 'n/a'} · manage with \`/schedule list\` / \`/schedule delete ${t.id}\``,
+          `⏰ Scheduled \`${t.id}\` — ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : ''}`,
+          `Model: \`${t.execution.providerID}/${t.execution.modelID}\`${t.execution.agent ? ` · agent \`${t.execution.agent}\`` : ''}`,
+          'Each run starts a fresh session in the project; results stream into Discord and the web UI.',
+          `Next run: ${nextRunAt ? new Date(nextRunAt).toISOString() : 'n/a'} · manage with \`/schedule list\` / \`/schedule delete ${t.id}\` or the web UI's Scheduled tasks dialog.`,
         ].filter(Boolean).join('\n'),
       };
     }

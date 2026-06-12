@@ -29,16 +29,6 @@ import { Database } from 'bun:sqlite';
  *   )
  */
 
-const SCHEDULED_TASK_SELECT = `
-  SELECT id, type, bot_token_hash AS botTokenHash, channel_id AS channelId,
-         thread_id AS threadId, project_path AS projectPath, prompt,
-         schedule_kind AS scheduleKind, schedule_spec AS scheduleSpec,
-         model_override AS modelOverride, agent_override AS agentOverride,
-         next_run_at AS nextRunAt, last_run_at AS lastRunAt,
-         last_status AS lastStatus, enabled, created_by AS createdBy,
-         created_at AS createdAt
-    FROM messenger_scheduled_tasks`;
-
 function resolveDefaultDbPath() {
   const root =
     typeof process.env.OPENCHAMBER_DATA_DIR === 'string' &&
@@ -109,98 +99,6 @@ export class MessengerBridgeStore {
         updated_at TEXT NOT NULL
       );
     `);
-    // Scheduled prompts. Each row is a
-    // one-time (ISO UTC) or recurring (cron, UTC) prompt delivered either into
-    // an existing Discord thread/channel surface or as a fresh session in a
-    // project, optionally pinning the model/agent that must answer.
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS messenger_scheduled_tasks (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL DEFAULT 'discord',
-        bot_token_hash TEXT NOT NULL DEFAULT '',
-        channel_id TEXT,
-        thread_id TEXT,
-        project_path TEXT,
-        prompt TEXT NOT NULL,
-        schedule_kind TEXT NOT NULL,      -- 'once' | 'cron'
-        schedule_spec TEXT NOT NULL,      -- ISO UTC timestamp or cron expression
-        model_override TEXT,
-        agent_override TEXT,
-        next_run_at INTEGER,
-        last_run_at INTEGER,
-        last_status TEXT,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        created_by TEXT,
-        created_at TEXT NOT NULL
-      );
-    `);
-  }
-
-  // ── Scheduled prompts ─────────────────────────────────────────────────
-
-  addScheduledTask({
-    id,
-    type = 'discord',
-    botTokenHash = '',
-    channelId = null,
-    threadId = null,
-    projectPath = null,
-    prompt,
-    scheduleKind,
-    scheduleSpec,
-    modelOverride = null,
-    agentOverride = null,
-    nextRunAt = null,
-    createdBy = null,
-  }) {
-    const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO messenger_scheduled_tasks
-           (id, type, bot_token_hash, channel_id, thread_id, project_path, prompt,
-            schedule_kind, schedule_spec, model_override, agent_override,
-            next_run_at, enabled, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-      )
-      .run(
-        id, type, botTokenHash, channelId, threadId, projectPath, prompt,
-        scheduleKind, scheduleSpec, modelOverride, agentOverride,
-        nextRunAt, createdBy, now,
-      );
-    return this.getScheduledTask(id);
-  }
-
-  getScheduledTask(id) {
-    if (!id) return null;
-    return this.db
-      .prepare(`${SCHEDULED_TASK_SELECT} WHERE id = ?`)
-      .get(id) ?? null;
-  }
-
-  listScheduledTasks({ enabledOnly = false } = {}) {
-    const sql = enabledOnly
-      ? `${SCHEDULED_TASK_SELECT} WHERE enabled = 1 ORDER BY next_run_at ASC`
-      : `${SCHEDULED_TASK_SELECT} ORDER BY next_run_at ASC`;
-    return this.db.prepare(sql).all();
-  }
-
-  deleteScheduledTask(id) {
-    if (!id) return false;
-    const result = this.db.prepare(`DELETE FROM messenger_scheduled_tasks WHERE id = ?`).run(id);
-    return (result?.changes ?? 0) > 0;
-  }
-
-  updateScheduledTaskState(id, { nextRunAt, lastRunAt, lastStatus, enabled }) {
-    if (!id) return;
-    const sets = [];
-    const params = [];
-    if (nextRunAt !== undefined) { sets.push('next_run_at = ?'); params.push(nextRunAt); }
-    if (lastRunAt !== undefined) { sets.push('last_run_at = ?'); params.push(lastRunAt); }
-    if (lastStatus !== undefined) { sets.push('last_status = ?'); params.push(lastStatus); }
-    if (enabled !== undefined) { sets.push('enabled = ?'); params.push(enabled ? 1 : 0); }
-    if (sets.length === 0) return;
-    params.push(id);
-    this.db.prepare(`UPDATE messenger_scheduled_tasks SET ${sets.join(', ')} WHERE id = ?`).run(...params);
   }
 
   /** Raw key/value read from the global bridge settings table. */
