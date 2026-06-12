@@ -137,6 +137,28 @@ export function createMessengerSyncRouter({
     return null;
   }
 
+  /**
+   * Build the channel→project resolver the Discord listener uses to route an
+   * inbound message to the right OpenChamber project. Keyed by the persisted
+   * `projectBindings` (channel id → project). Shared by the manual
+   * `/discord/listener/start` path and the boot-time `/discord/auto-start`
+   * path so they can never drift — auto-start previously passed NO bindings,
+   * which made every channel fall back to the first project on the server.
+   */
+  function buildResolveProject(projectBindings) {
+    const bindingMap = new Map(
+      Array.isArray(projectBindings)
+        ? projectBindings
+            .filter((b) => b && b.channelId)
+            .map((b) => [
+              String(b.channelId),
+              { path: b.projectPath ?? null, label: b.projectLabel ?? null },
+            ])
+        : [],
+    );
+    return ({ channelId }) => bindingMap.get(String(channelId)) ?? null;
+  }
+
   async function resolveDefaultDiscordTarget({ projectPath } = {}) {
     if (!readSettings) return null;
     let settings;
@@ -1109,17 +1131,7 @@ export function createMessengerSyncRouter({
     const { token, guildId, autoReply, scopeToGuild, bridgeEnabled, projectBindings, defaultChannelId, defaultUserId } =
       req.body ?? {};
     if (!token) return res.status(400).json({ error: 'token required' });
-    const bindingMap = new Map(
-      Array.isArray(projectBindings)
-        ? projectBindings
-            .filter((b) => b && b.channelId)
-            .map((b) => [
-              String(b.channelId),
-              { path: b.projectPath ?? null, label: b.projectLabel ?? null },
-            ])
-        : [],
-    );
-    const resolveProject = ({ channelId }) => bindingMap.get(String(channelId)) ?? null;
+    const resolveProject = buildResolveProject(projectBindings);
     const result = discordListener.start(token, {
       guildId,
       autoReply: autoReply !== false,
@@ -1272,8 +1284,11 @@ export function createMessengerSyncRouter({
         autoReply: discord.autoReply !== false,
         scopeToGuild: Boolean(discord.scopeToGuild),
         bridgeEnabled: discord.bridgeEnabled !== false && Boolean(bridge),
-        // No project bindings on auto-start — they'll be set when the frontend
-        // sends a proper start request with the current project mappings.
+        // Restore the persisted project→channel bindings so each Discord
+        // channel keeps routing to its own project after a server restart.
+        // Without this, every channel fell back to the first project until
+        // the user re-opened Settings and re-sent a manual start.
+        resolveProject: buildResolveProject(discord.projectBindings),
       });
       res.json({ ok: true, ...result });
     } catch (err) {

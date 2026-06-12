@@ -624,7 +624,11 @@ export function createMessengerOpencodeBridge({
       return null;
     }
     if (!Array.isArray(projects) || projects.length === 0) return null;
-    const name = await lookupTargetName({ type, token, channelId, threadId });
+    // Slug-match on the parent CHANNEL name, never the per-conversation thread.
+    // The project↔channel mapping is keyed by channel; a freshly spawned
+    // thread is named after the user's first message, which would never
+    // slug-match a project and collapsed every channel onto the first project.
+    const name = await lookupTargetName({ type, token, channelId, threadId: null });
     const matched = pickProjectForName(projects, name);
     const project = matched ?? projects[0];
     if (!project?.path) return null;
