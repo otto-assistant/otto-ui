@@ -236,7 +236,11 @@ export function applyDirectoryEvent(
       }
 
       if (result.found) {
-        sessions[result.index] = info
+        // Merge instead of replace: the server may send a partial
+        // info object (e.g. only title + time.updated). Spreading
+        // the incoming info over the existing session preserves
+        // fields that were omitted in the event payload.
+        sessions[result.index] = { ...sessions[result.index], ...info }
       } else {
         sessions.splice(result.index, 0, info)
         trimSessions(draft)

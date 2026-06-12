@@ -226,6 +226,13 @@ export const UsagePage: React.FC = () => {
           </div>
         )}
 
+        {selectedResult && selectedResult.configured && !selectedResult.ok && selectedResult.error && (
+          <div className="mb-8 rounded-lg border border-[var(--status-warning-border)] bg-[var(--status-warning-background)] px-4 py-3">
+            <p className="typography-ui-label font-medium text-[var(--status-warning)]">{t('settings.usage.page.state.refreshFailedTitle')}</p>
+            <p className="typography-meta text-[var(--status-warning)]/80 mt-1">{selectedResult.error}</p>
+          </div>
+        )}
+
         {/* Overall Usage Windows */}
         {usage?.windows && Object.keys(usage.windows).length > 0 && (
           <div className="mb-8">

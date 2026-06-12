@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { OpencodeClient, Session } from '@opencode-ai/sdk/v2';
 import { opencodeClient } from '@/lib/opencode/client';
+import { isPlaceholderSessionTitle } from '@/lib/session/displayTitle';
 import { listGlobalSessionPages, type GlobalSessionRecord, type InitialSessionPage } from '@/stores/globalSessions';
 
 type GlobalSessionsStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -123,6 +124,21 @@ export const mergeSessionDirectoryMetadata = (incoming: Session, existing?: Sess
     changed = true;
   } else if (!incomingRecord.project && existingRecord.project) {
     next.project = existingRecord.project;
+    changed = true;
+  }
+
+  // Preserve the real title when the incoming data only carries the
+  // auto-assigned placeholder — the listing endpoints may return the
+  // initial title while the title agent has already updated it on the
+  // server. Keep the existing real title until a title-carrying event
+  // arrives.
+  if (
+    typeof incomingRecord.title === 'string'
+    && isPlaceholderSessionTitle(incomingRecord.title)
+    && typeof existingRecord.title === 'string'
+    && !isPlaceholderSessionTitle(existingRecord.title)
+  ) {
+    next.title = existingRecord.title;
     changed = true;
   }
 
@@ -438,7 +454,17 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
           initialPage,
           onPage: (page) => accumulateInto('activeSessions', page),
         });
-        set((state) => applySnapshot(state, nextActiveSessions, state.archivedSessions, 'ready'));
+        // Merge bootstrap data into the store's current sessions
+        // instead of replacing outright. SSE events may have updated
+        // individual sessions (e.g. title, status) during pagination
+        // — we must not overwrite those updates with stale bootstrap
+        // page data.
+        set((state) => applySnapshot(
+          state,
+          mergeSessionLists(state.activeSessions, nextActiveSessions),
+          state.archivedSessions,
+          'ready',
+        ));
       } catch (error) {
         console.warn('[GlobalSessions] Failed to load active sessions, preserving existing snapshot with fallback merge:', error);
         nextActiveSessions = mergeSessionLists(current.activeSessions, fallbackActive);

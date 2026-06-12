@@ -28,6 +28,7 @@ import { stripMessageDiffSnapshots, stripSessionDiffSnapshots } from "./sanitize
 import { syncDebug } from "./debug"
 import { getReconnectCandidateSessionIds } from "./reconnect-recovery"
 import { opencodeClient } from "@/lib/opencode/client"
+import { isPlaceholderSessionTitle } from "@/lib/session/displayTitle"
 import { usePermissionStore } from "@/stores/permissionStore"
 import { useConfigStore } from "@/stores/useConfigStore"
 import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
@@ -341,6 +342,7 @@ function pruneExternallyViewedSessions(now = Date.now()) {
 }
 const pendingQuestionToastIds = new Set<string>()
 const pendingPermissionToastIds = new Set<string>()
+const autoTitleGeneratedSessions = new Set<string>()
 
 const getQuestionToastKey = (sessionID?: string, requestID?: string) => {
   if (!sessionID || !requestID) return null
@@ -1281,6 +1283,81 @@ async function resyncDirectoryAfterReconnect(
   ingestDirectoryStateIntoRoutingIndex(routingIndex, directory, store.getState())
 }
 
+/**
+ * When the server's title agent silently fails (common with rate limits or
+ * unavailable small models), the session keeps its placeholder title
+ * ("New session - …") forever. This fallback extracts the first user message
+ * text and sends it as a session title so the sidebar never shows "Untitled
+ * Session" for a conversation that actually has content.
+ */
+const MAX_TITLE_LENGTH = 50
+
+function generateFallbackTitle(firstUserMessage: string): string {
+  let title = firstUserMessage
+    .replace(/\s+/g, " ")       // collapse whitespace
+    .replace(/^@\S+\s*/, "")    // strip leading file mentions like @src/foo.ts
+    .trim()
+  if (title.length > MAX_TITLE_LENGTH) {
+    title = title.slice(0, title.lastIndexOf(" ", MAX_TITLE_LENGTH)) || title.slice(0, MAX_TITLE_LENGTH)
+  }
+  return title || "Untitled Session"
+}
+
+function maybeAutoGenerateTitle(sessionID: string, session: Session, directory: string, childStores: ChildStoreManager) {
+  if (!isPlaceholderSessionTitle(session.title)) return
+  // Deduplicate: only attempt once per session, even if many events touch it.
+  if (autoTitleGeneratedSessions.has(sessionID)) return
+  // Check if the session already has a real title in the store — an SSE
+  // event might have arrived between the bootstrap and now.
+  const live = findLiveSession(getLiveStates(childStores), sessionID)
+  if (live?.title && !isPlaceholderSessionTitle(live.title)) return
+
+  // Read messages from the child store, if bootstrapped.
+  const store = childStores.getChild(directory)
+  if (!store) return
+  const state = store.getState()
+  const messages = state.message
+  if (!messages) return
+
+  // Only auto-generate after the assistant has responded — a lone user message
+  // might be abandoned or still pending, not worth a title.
+  const hasAssistantResponse = Object.values(messages).some(
+    (msgs) => msgs.some((m) => typeof m === "object" && "role" in m && (m as Record<string, unknown>).role === "assistant"),
+  )
+  if (!hasAssistantResponse) return
+
+  // Find user messages sorted by ID (creation order).
+  const userMessages = Object.entries(messages)
+    .filter(([, msgs]) => msgs.length > 0)
+    .map(([id, msgs]) => {
+      const msg = msgs[0]
+      if (!msg || typeof msg !== "object") return null
+      const text = "text" in msg && typeof (msg as Record<string, unknown>).text === "string"
+        ? (msg as Record<string, unknown>).text as string
+        : ""
+      return { id, text }
+    })
+    .filter((m): m is { id: string; text: string } => m !== null && m.text.length > 0)
+    .sort((a, b) => (a.id < b.id ? -1 : 1))
+
+  if (userMessages.length === 0) return
+
+  const title = generateFallbackTitle(userMessages[0].text)
+  if (!title) return
+
+  // Fire-and-forget: send the title to the server and update the local stores.
+  opencodeClient.updateSession(sessionID, { title }).catch(() => {
+    // Server-side title generation failure is expected — this is the fallback.
+  })
+
+  // Optimistically update the local stores so the sidebar reflects the title
+  // immediately without waiting for the SSE round-trip.
+  useGlobalSessionsStore.getState().upsertSession({ ...session, title })
+
+  // Mark generated so we don't retry on subsequent events.
+  autoTitleGeneratedSessions.add(sessionID)
+}
+
 function handleEvent(
   rawDirectory: string,
   payload: Event,
@@ -1547,6 +1624,18 @@ function handleEvent(
       const info = (payload.properties as { info: Message }).info
       if (info.role === "assistant" && (!after.part[messageID] || after.part[messageID].length === 0)) {
         enqueueSessionMaterialization(resolvedDirectory, sessionID, childStores)
+      }
+    }
+
+    // Auto-generate a fallback title when the server's title agent failed
+    // and the session still shows a placeholder. We check on every event
+    // that touched a relevant session — the dedup Set prevents redundant
+    // server calls once we've already tried.
+    if (sessionID && directory && directory !== "global") {
+      const after = store.getState()
+      const session = after.session.find((s) => s.id === sessionID)
+      if (session) {
+        maybeAutoGenerateTitle(sessionID, session, directory, childStores)
       }
     }
   } else {

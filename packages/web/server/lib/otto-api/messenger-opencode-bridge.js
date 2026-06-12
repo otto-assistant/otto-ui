@@ -3114,8 +3114,6 @@ export function createMessengerOpencodeBridge({
     handleApprovalDecision,
     handleThreadDeleted,
     handleSessionDeleted,
-    /** Scheduled prompts — used by the HTTP routes. */
-    scheduler,
     /** Mention-only mode — checked by the Discord listener. */
     getMentionMode,
     /** Whether a surface already has a session binding (mention mode skips bound threads). */

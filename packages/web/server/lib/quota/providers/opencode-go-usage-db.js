@@ -7,73 +7,6 @@ import { toUsageWindow, toNumber } from '../utils/index.js';
 const OPENCODE_DB_PATH = path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db');
 
 /**
- * Documented OpenCode Go usage limits in USD. Source: https://opencode.ai/docs/zen
- * - 5-hour: rolling window (spend ages out 5h after it happened).
- * - weekly: calendar week, resets Monday 00:00 UTC.
- * - monthly: subscription-anchored cycle, resets on the day-of-month the
- *   subscription started (detected from cost data).
- */
-export const WINDOW_LIMITS_USD = {
-  '5h': 12,
-  weekly: 30,
-  monthly: 60
-};
-
-const WINDOW_ORDER = ['5h', 'weekly', 'monthly'];
-const ROLLING_5H_SECONDS = 5 * 3600;
-const DAY_MS = 86400000;
-
-/**
- * Calendar-week bounds anchored to Monday 00:00 UTC (matches OpenCode's weekly
- * reset, e.g. "resets in 6 days 17 hours" on a Monday morning).
- *
- * @param {number} now Current time in ms.
- * @returns {{ start: number, end: number }}
- */
-const utcWeekBounds = (now) => {
-  const d = new Date(now);
-  const daysSinceMonday = (d.getUTCDay() + 6) % 7;
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - daysSinceMonday);
-  return { start, end: start + 7 * DAY_MS };
-};
-
-/**
- * Detect the subscription anchor timestamp by scanning cost-bearing messages
- * from earliest to latest. When cumulative spend passes the monthly limit we
- * assume a billing-cycle rollover; the timestamp of the message that pushes
- * over the limit becomes the anchor for the new period.
- *
- * If no rollover is found (spend never exceeds the limit), the anchor defaults
- * to the earliest message timestamp in the database or, if none exist, `null`.
- *
- * @param {Array<{ created: number, cost: number }>} sortedCosts
- *   Messages with cost > 0, sorted by `created` ascending.
- * @param {number} monthlyLimitUsd
- * @returns {number | null} Timestamp (ms) of the last detected rollover, or
- *   the earliest message if no rollover, or `null` if no data.
- */
-export const detectMonthlyAnchor = (sortedCosts, monthlyLimitUsd) => {
-  if (!Array.isArray(sortedCosts) || sortedCosts.length === 0) {
-    return null;
-  }
-
-  let cumulative = 0;
-  let anchor = sortedCosts[0].created;
-
-  for (const entry of sortedCosts) {
-    cumulative += entry.cost;
-    if (cumulative > monthlyLimitUsd) {
-      // Billing-cycle rollover detected — the new period starts at the
-      // message that pushed us over the limit.
-      anchor = entry.created;
-      cumulative = entry.cost; // Start counting fresh for the new period.
-    }
-  }
-
-  return anchor;
-};
-
-/**
  * Open the OpenCode SQLite database read-only. The web server runs under Bun
  * (which ships `bun:sqlite` and does not support `better-sqlite3`), while the
  * desktop/VS Code hosts run under Node (which uses `better-sqlite3`). Pick the
@@ -200,26 +133,62 @@ export const buildModelUsageWindows = (aggregated) => {
   return models;
 };
 
+// ── Window computation helpers (used as local DB fallback) ──
+
+export const WINDOW_LIMITS_USD = {
+  '5h': 12,
+  weekly: 30,
+  monthly: 60
+};
+
+const WINDOW_ORDER = ['5h', 'weekly', 'monthly'];
+const ROLLING_5H_SECONDS = 5 * 3600;
+const DAY_MS = 86400000;
+
 /**
- * Aggregate OpenCode Go spend into the three usage windows, matching how
- * OpenCode anchors each one:
- * - `5h`: rolling window — spend in the trailing 5 hours; reset is when the
- *   oldest contributing spend ages out (oldest + 5h).
- * - `weekly`: calendar week since Monday 00:00 UTC; reset is next Monday 00:00 UTC.
- * - `monthly`: subscription-anchored cycle; the period start is detected from
- *   the cost data via {@link detectMonthlyAnchor}.
- *
- * @param {Array<Record<string, unknown>>} messages Parsed message `data` objects.
- * @param {string[]} providerAliases Provider IDs that map to OpenCode Go.
- * @param {number} [now] Current time in ms (injectable for tests).
- * @returns {Record<'5h'|'weekly'|'monthly', { spend: number, resetAt: number | null, windowSeconds: number }>}
+ * Calendar-week bounds anchored to Monday 00:00 UTC (matches OpenCode's weekly
+ * reset, e.g. "resets in 6 days 17 hours" on a Monday morning).
  */
-export const aggregateWindowSpend = (messages, providerAliases, now = Date.now()) => {
+const utcWeekBounds = (now) => {
+  const d = new Date(now);
+  const daysSinceMonday = (d.getUTCDay() + 6) % 7;
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - daysSinceMonday);
+  return { start, end: start + 7 * DAY_MS };
+};
+
+/**
+ * Detect the subscription anchor timestamp by scanning cost-bearing messages
+ * from earliest to latest. When cumulative spend passes the monthly limit we
+ * assume a billing-cycle rollover; the timestamp of the message that pushes
+ * over the limit becomes the anchor for the new period.
+ */
+const detectMonthlyAnchor = (sortedCosts, monthlyLimitUsd) => {
+  if (!Array.isArray(sortedCosts) || sortedCosts.length === 0) {
+    return null;
+  }
+  let cumulative = 0;
+  let anchor = sortedCosts[0].created;
+  for (const entry of sortedCosts) {
+    cumulative += entry.cost;
+    if (cumulative > monthlyLimitUsd) {
+      anchor = entry.created;
+      cumulative = entry.cost;
+    }
+  }
+  return anchor;
+};
+
+/**
+ * Aggregate OpenCode Go spend into the three usage windows from local DB data.
+ *
+ * Note: this only counts messages on the local machine, so the numbers will be
+ * lower than account-wide usage. Treat as an approximation.
+ */
+const aggregateWindowSpend = (messages, providerAliases, now = Date.now()) => {
   const aliases = new Set(providerAliases);
   const week = utcWeekBounds(now);
   const rollingCutoff = now - ROLLING_5H_SECONDS * 1000;
 
-  // Collect cost-bearing entries for monthly-anchor detection.
   const costEntries = [];
   let rollingOldest = null;
   let weeklySpend = 0;
@@ -227,22 +196,15 @@ export const aggregateWindowSpend = (messages, providerAliases, now = Date.now()
   let rollingSpend = 0;
 
   for (const message of Array.isArray(messages) ? messages : []) {
-    if (!message || message.role !== 'assistant') {
-      continue;
-    }
-    if (!aliases.has(message.providerID)) {
-      continue;
-    }
+    if (!message || message.role !== 'assistant') continue;
+    if (!aliases.has(message.providerID)) continue;
     const created = toNumber(message.time?.created);
-    if (created === null) {
-      continue;
-    }
+    if (created === null) continue;
     const cost = toNumber(message.cost) ?? 0;
 
     if (cost > 0) {
       costEntries.push({ created, cost });
     }
-
     if (created >= rollingCutoff) {
       rollingSpend += cost;
       rollingOldest = rollingOldest === null ? created : Math.min(rollingOldest, created);
@@ -252,12 +214,11 @@ export const aggregateWindowSpend = (messages, providerAliases, now = Date.now()
     }
   }
 
-  // Detect monthly anchor from cost entries (sorted ascending).
   costEntries.sort((a, b) => a.created - b.created);
   const monthlyAnchor = detectMonthlyAnchor(costEntries, WINDOW_LIMITS_USD.monthly);
 
-  // Compute monthly spend from the detected anchor.
   if (monthlyAnchor !== null) {
+    monthlySpend = 0;
     for (const entry of costEntries) {
       if (entry.created >= monthlyAnchor) {
         monthlySpend += entry.cost;
@@ -265,7 +226,7 @@ export const aggregateWindowSpend = (messages, providerAliases, now = Date.now()
     }
   }
 
-  const windows = {
+  return {
     '5h': {
       spend: rollingSpend,
       resetAt: rollingOldest === null ? null : rollingOldest + ROLLING_5H_SECONDS * 1000,
@@ -305,31 +266,20 @@ export const aggregateWindowSpend = (messages, providerAliases, now = Date.now()
       )
     }
   };
-
-  return windows;
 };
 
 /**
- * Convert windowed spend into the `usage.windows` map consumed by the UI. Each
- * window carries the spent/limit dollar label plus a usage percentage that
- * drives the progress bar fill and tone color. The reset timestamp comes from
- * the window itself (rolling age-out for 5h, Monday boundary for weekly,
- * subscription-anchor for monthly).
- *
- * @param {ReturnType<typeof aggregateWindowSpend>} windowSpend
- * @returns {Record<string, ReturnType<typeof toUsageWindow>>}
+ * Build `usage.windows` from DB-derived windowed spend. Each window carries
+ * a dollar label and percentage derived from the local spend vs documented limits.
  */
-export const buildLimitWindows = (windowSpend) => {
+const buildLimitWindows = (windowSpend) => {
   const windows = {};
   for (const key of WINDOW_ORDER) {
     const bucket = windowSpend?.[key];
-    if (!bucket) {
-      continue;
-    }
+    if (!bucket) continue;
     const limitUsd = WINDOW_LIMITS_USD[key];
     const spend = toNumber(bucket.spend) ?? 0;
     const usedPercent = limitUsd > 0 ? (spend / limitUsd) * 100 : null;
-
     windows[key] = toUsageWindow({
       usedPercent,
       windowSeconds: bucket.windowSeconds ?? null,
@@ -340,13 +290,51 @@ export const buildLimitWindows = (windowSpend) => {
   return windows;
 };
 
+const readMessages = async () => {
+  let db = null;
+  try {
+    db = await openOpenCodeDatabase();
+    if (!db) return null;
+    const rows = db.all();
+    const messages = [];
+    for (const row of rows) {
+      try { messages.push(JSON.parse(row.data)); } catch { /* skip */ }
+    }
+    return messages;
+  } catch {
+    return null;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+};
+
 /**
- * Read all messages from the local OpenCode SQLite database and parse the JSON
- * `data` column. Returns `null` when the database is unavailable.
+ * Read usage windows derived from the local OpenCode SQLite database.
+ * Returns `{ windows }` or null when the DB is unavailable.
  *
- * @returns {Promise<Array<Record<string, unknown>> | null>}
+ * IMPORTANT: local DB only knows about messages sent from this machine, so
+ * the spend/percentages may undercount account-wide usage.
  */
-const readOpenCodeMessages = async () => {
+export const readOpenCodeWindows = async (providerAliases) => {
+  const messages = await readMessages();
+  if (!messages) return null;
+  const windowSpend = aggregateWindowSpend(messages, providerAliases);
+  const windows = buildLimitWindows(windowSpend);
+  return Object.keys(windows).length > 0 ? { windows } : null;
+};
+
+/**
+ * Read per-model OpenCode Go usage from the local OpenCode SQLite database.
+ *
+ * Display-only enrichment for the usage windows: the OpenCode Go API/dashboard
+ * does not expose per-model spend, so this is sourced locally. Returns null
+ * when the database is unavailable or unreadable so the caller can still report
+ * the usage windows without per-model rows.
+ *
+ * @param {string[]} providerAliases Provider IDs that map to OpenCode Go.
+ * @returns {Promise<Record<string, { windows: Record<string, ReturnType<typeof toUsageWindow>> }> | null>}
+ */
+export const readOpenCodeModelUsage = async (providerAliases) => {
   let db = null;
   try {
     db = await openOpenCodeDatabase();
@@ -362,7 +350,11 @@ const readOpenCodeMessages = async () => {
         // Skip malformed rows.
       }
     }
-    return messages;
+    const aggregated = aggregateModelUsage(messages, providerAliases);
+    if (aggregated.length === 0) {
+      return null;
+    }
+    return buildModelUsageWindows(aggregated);
   } catch {
     return null;
   } finally {
@@ -372,26 +364,4 @@ const readOpenCodeMessages = async () => {
       // Ignore close errors.
     }
   }
-};
-
-/**
- * Read OpenCode Go usage windows and per-model spend from the local database.
- * Returns `{ windows, models }` or `null` when the DB cannot be read.
- *
- * @param {string[]} providerAliases
- * @returns {Promise<{ windows: Record<string, ReturnType<typeof toUsageWindow>>, models: Record<string, { windows: Record<string, ReturnType<typeof toUsageWindow>> }> } | null>}
- */
-export const readOpenCodeUsage = async (providerAliases) => {
-  const messages = await readOpenCodeMessages();
-  if (!messages) {
-    return null;
-  }
-
-  const windowSpend = aggregateWindowSpend(messages, providerAliases);
-  const windows = buildLimitWindows(windowSpend);
-
-  const aggregated = aggregateModelUsage(messages, providerAliases);
-  const models = aggregated.length > 0 ? buildModelUsageWindows(aggregated) : {};
-
-  return { windows, models };
 };
