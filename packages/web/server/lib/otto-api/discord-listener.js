@@ -326,7 +326,7 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
  * is deleted or archived in Discord, so the OpenCode session doesn't stay
  * alive on the server for a thread that no longer exists.
  */
-function dispatchThreadDelete(state, data, bridge) {
+function dispatchThreadDelete(state, data, bridge, reason = 'deleted') {
   const threadId = data?.id;
   if (!threadId) return;
 
@@ -337,6 +337,10 @@ function dispatchThreadDelete(state, data, bridge) {
       type: 'discord',
       threadId,
       token: state.token,
+      // 'deleted' → also delete the OpenCode session (it leaves the UI);
+      // 'archived' → only clean up bridge state (auto-archive must not destroy
+      // the session).
+      reason,
     });
   } catch (err) {
     state.lastError = err?.message ?? 'thread cleanup failed';
@@ -692,16 +696,16 @@ function startSession(state, broadcastEvent, bridge) {
           return;
         }
         if (t === 'THREAD_DELETE') {
-          void dispatchThreadDelete(state, payload.d, bridge);
+          void dispatchThreadDelete(state, payload.d, bridge, 'deleted');
           return;
         }
         if (t === 'THREAD_UPDATE') {
-          // When a thread is archived (not just edited), treat it as deleted.
-          // This catches manual archival by users and auto-archival after
-          // auto_archive_duration expires.
+          // When a thread is archived (not just edited), clean up bridge state
+          // but DON'T delete the session — a thread can auto-archive after
+          // inactivity and be reopened later.
           const meta = payload.d?.thread_metadata;
           if (meta?.archived === true) {
-            void dispatchThreadDelete(state, payload.d, bridge);
+            void dispatchThreadDelete(state, payload.d, bridge, 'archived');
           }
           return;
         }
