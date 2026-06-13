@@ -34,6 +34,7 @@ import { useConfigStore } from "@/stores/useConfigStore"
 import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
+import { applyGlobalSessionStatusEvent } from "./global-session-status"
 import type { State } from "./types"
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
 import type { PermissionRequest } from "@/types/permission"
@@ -421,9 +422,21 @@ export function setExternallyViewedSession(directory: string, sessionId: string,
   externallyViewedSessions.set(key, Date.now() + EXTERNAL_VIEW_TTL_MS)
 }
 
+// The window must actually be focused for the active session to count as
+// "seen": if the app is minimized or in the background, a turn finishing in the
+// currently-selected session should still raise an unseen marker (in the tray
+// and in-app), since the user isn't looking at it.
+function isWindowFocused(): boolean {
+  return typeof document !== "undefined" && document.hasFocus()
+}
+
 function isViewedInCurrentSession(directory: string, sessionId?: string): boolean {
   if (!sessionId) return false
-  if (_activeDirectory && _activeSession && directory === _activeDirectory && sessionId === _activeSession) return true
+  if (
+    _activeDirectory && _activeSession
+    && directory === _activeDirectory && sessionId === _activeSession
+    && isWindowFocused()
+  ) return true
   pruneExternallyViewedSessions()
   return externallyViewedSessions.has(viewedSessionKey(directory, sessionId))
 }
@@ -1371,6 +1384,11 @@ function handleEvent(
   }
 
   applySessionEventToGlobalSessions(payload)
+  // Keep the cross-project status map current for ALL directories (mirrors the
+  // global-session handling above). Child stores remain the primary source for
+  // synced directories; this map covers sessions a child store doesn't list
+  // (unopened directories, or list/status races for just-created sessions).
+  applyGlobalSessionStatusEvent(directory, payload)
 
   // Global events
   if (directory === "global" || !directory) {

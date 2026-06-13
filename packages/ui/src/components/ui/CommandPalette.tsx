@@ -18,7 +18,6 @@ import {
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
-import { getSessionDisplayTitle } from '@/lib/session/displayTitle';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGitAllBranches, useGitStore } from '@/stores/useGitStore';
 import { useFileSearchStore } from '@/stores/useFileSearchStore';
@@ -36,6 +35,7 @@ import { canUseElectronDesktopIPC, invokeDesktop, isDesktopShell, isVSCodeRuntim
 import { SETTINGS_PAGE_METADATA, type SettingsRuntimeContext } from '@/lib/settings/metadata';
 import { getSettingsNavIcon } from '@/lib/settings/navIcons';
 import { Icon } from "@/components/icon/Icon";
+import { McpIcon } from '@/components/icons/McpIcon';
 import { scoreByFuzzyQuery } from '@/lib/search/fuzzySearch';
 import { truncatePathMiddle } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
@@ -278,7 +278,9 @@ export const CommandPalette: React.FC = () => {
         return {
           id: `settings:${page.slug}`,
           title: page.title,
-          icon: <Icon name={iconName} className="mr-2 h-4 w-4" />,
+          icon: page.slug === 'mcp'
+            ? <McpIcon className="mr-2 h-4 w-4" />
+            : <Icon name={iconName} className="mr-2 h-4 w-4" />,
           searchText: `${page.title} ${page.group} ${keywords}`,
           onSelect: run(() => {
             setSettingsPage(page.slug);
@@ -488,7 +490,7 @@ export const CommandPalette: React.FC = () => {
                 return (
                   <CommandGroup key="sessions">
                     {visibleSessions.map((session) => {
-                      const title = getSessionDisplayTitle(session.title, t('commandPalette.session.untitled'));
+                      const title = session.title || t('commandPalette.session.untitled');
                       const dir = resolveGlobalSessionDirectory(session);
                       const branch = branchForSession(session.id, dir);
                       return (

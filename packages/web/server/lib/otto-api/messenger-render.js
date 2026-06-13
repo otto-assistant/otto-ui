@@ -154,6 +154,69 @@ export function renderPermissionContext(permission) {
   }
 }
 
+/**
+ * Render one question of a question request ("ask" tool) into a Discord
+ * message body. The interactive option components (buttons / select menu)
+ * are attached by the bridge; this renders the text part: header, question,
+ * numbered options. Questions are interactive session state, so — like
+ * permission prompts — they are rendered at every verbosity level.
+ */
+export function renderQuestionForMessenger(question, { index = 0, total = 1 } = {}) {
+  if (!question || typeof question !== 'object') return null;
+  const header = typeof question.header === 'string' ? question.header.trim() : '';
+  const text = typeof question.question === 'string' ? question.question.trim() : '';
+  if (!header && !text) return null;
+  const counter = total > 1 ? ` (${index + 1}/${total})` : '';
+  const lines = [`❓ **${escapeMd(header || 'Question')}**${counter}`];
+  if (text) lines.push(clipBlock(text, 900));
+  const options = Array.isArray(question.options) ? question.options : [];
+  options.slice(0, 25).forEach((opt, i) => {
+    const label = typeof opt?.label === 'string' && opt.label.trim() ? opt.label.trim() : `Option ${i + 1}`;
+    const description = typeof opt?.description === 'string' ? opt.description.trim() : '';
+    lines.push(
+      `\`${i + 1}.\` ${escapeMd(clipBlock(label, 120))}${description ? ` — ${escapeMd(clipBlock(description, 150))}` : ''}`,
+    );
+  });
+  if (options.length > 25) lines.push(`… ${options.length - 25} more`);
+  lines.push('', '_Pick an option below or reply with your own answer._');
+  return clipBlock(lines.join('\n'), 1900);
+}
+
+// ── Todo list rendering (todo.updated events) ──────────────────────────────
+
+const TODO_STATUS_ICONS = {
+  completed: '✅',
+  in_progress: '🔄',
+  pending: '⬜',
+  cancelled: '🚫',
+};
+
+const TODO_LIST_MAX_ITEMS = 30;
+
+/**
+ * Render the agent's todo/plan list (from `todo.updated` events) as a
+ * Discord checklist. Returns null when there is nothing to show. Like
+ * questions and permissions, the plan is session state the user should
+ * always see — it is rendered at every verbosity level.
+ */
+export function renderTodoListForMessenger(todos) {
+  const list = Array.isArray(todos)
+    ? todos.filter((t) => t && typeof t.content === 'string' && t.content.trim())
+    : [];
+  if (list.length === 0) return null;
+  const done = list.filter((t) => t.status === 'completed').length;
+  const lines = [`📋 **Plan** — ${done}/${list.length} done`];
+  for (const todo of list.slice(0, TODO_LIST_MAX_ITEMS)) {
+    const icon = TODO_STATUS_ICONS[todo.status] ?? TODO_STATUS_ICONS.pending;
+    const label = escapeMd(clipBlock(todo.content.trim().replace(/\s+/g, ' '), 150));
+    lines.push(`${icon} ${todo.status === 'completed' || todo.status === 'cancelled' ? `~~${label}~~` : label}`);
+  }
+  if (list.length > TODO_LIST_MAX_ITEMS) {
+    lines.push(`… ${list.length - TODO_LIST_MAX_ITEMS} more`);
+  }
+  return clipBlock(lines.join('\n'), 1900);
+}
+
 /** The compact "the model is thinking" process marker used at `normal`. */
 export const THINKING_MARKER = '┣ _thinking…_';
 
@@ -267,6 +330,11 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
       case 'todoread': {
         const count = Array.isArray(input.todos) ? input.todos.length : null;
         return count != null ? `(${count} todo${count === 1 ? '' : 's'})` : '';
+      }
+      case 'question': {
+        const questions = Array.isArray(input.questions) ? input.questions : [];
+        const first = typeof questions[0]?.question === 'string' ? questions[0].question.trim() : '';
+        return first ? `_${escapeMd(clipBlock(first, 120))}_` : '';
       }
       default: {
         // Unknown tool — show the first useful input string field.

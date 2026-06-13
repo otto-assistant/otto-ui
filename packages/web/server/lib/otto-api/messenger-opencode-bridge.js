@@ -7,6 +7,8 @@ import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js'
 import {
   renderPartForMessenger,
   renderPermissionContext,
+  renderQuestionForMessenger,
+  renderTodoListForMessenger,
   escapeMd,
   clipBlock,
   deriveThreadNameFromSessionTitle,
@@ -200,6 +202,83 @@ async function sendApprovalToSurface({ type, token, channelId, threadId, permiss
   }
 
   return { ok: false, error: `Unsupported messenger type: ${type}` };
+}
+
+// ── Question flow helpers ─────────────────────────────────────────────
+// Maps questionId → { sessionID, requestID, directory, questions, answers,
+// surface } so option clicks (and typed replies) can be routed back to
+// OpenCode's question.reply API. Mirrors the permission approvalContexts.
+export const questionContexts = new Map();
+
+const QUESTION_CONTEXT_TTL_MS = 30 * 60 * 1000;
+
+/** Build the interactive Discord components for one question. */
+function buildQuestionComponents({ questionId, questionIndex, question }) {
+  const options = Array.isArray(question?.options) ? question.options : [];
+  if (options.length === 0) return [];
+  const multiple = Boolean(question?.multiple);
+
+  // Up to 5 single-select options fit as one row of buttons; anything
+  // bigger (or multi-select) becomes a select menu (max 25 options).
+  if (!multiple && options.length <= 5) {
+    return [
+      {
+        type: 1,
+        components: options.map((opt, i) => ({
+          type: 2,
+          style: 2,
+          label: clipBlock(`${i + 1}. ${typeof opt?.label === 'string' && opt.label.trim() ? opt.label.trim() : `Option ${i + 1}`}`, 80),
+          custom_id: `otto-question:${questionId}:${questionIndex}:${i}`,
+        })),
+      },
+    ];
+  }
+
+  const selectOptions = options.slice(0, 25).map((opt, i) => {
+    const label = typeof opt?.label === 'string' && opt.label.trim() ? opt.label.trim() : `Option ${i + 1}`;
+    const description = typeof opt?.description === 'string' ? opt.description.trim() : '';
+    return {
+      label: clipBlock(label, 100),
+      value: String(i),
+      ...(description ? { description: clipBlock(description, 100) } : {}),
+    };
+  });
+  return [
+    {
+      type: 1,
+      components: [
+        {
+          type: 3,
+          custom_id: `otto-question-select:${questionId}:${questionIndex}`,
+          options: selectOptions,
+          min_values: 1,
+          max_values: multiple ? selectOptions.length : 1,
+          placeholder: multiple ? 'Select one or more options' : 'Select an option',
+        },
+      ],
+    },
+  ];
+}
+
+/** PATCH a Discord message (used to edit todo lists / strip stale components). */
+async function editDiscordMessage({ token, channelId, messageId, content, components }) {
+  const body = {};
+  if (typeof content === 'string') body.content = content.slice(0, DISCORD_LIMIT);
+  if (components !== undefined) body.components = components;
+  try {
+    const r = await fetch(
+      `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!r.ok) return { ok: false, status: r.status, error: `Discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, status: 0, error: err?.message ?? 'Discord PATCH failed' };
+  }
 }
 
 /**
@@ -1114,6 +1193,245 @@ export function createMessengerOpencodeBridge({
     return rejected;
   }
 
+  // --- Question flow (the "ask" tool) ----------------------------------------
+  // Questions block the agent until answered — like permissions, they are
+  // first-class interactive events (question.asked on the SSE hub), rendered
+  // with option buttons / select menus at EVERY verbosity level. Option
+  // clicks come back through the Discord listener; a typed reply in the
+  // thread answers the question as a custom answer (same as the web UI's
+  // free-text answer field).
+
+  /** POST the collected answers back to OpenCode's question.reply API. */
+  async function replyQuestionToOpenCode({ requestID, answers, directory }) {
+    const dirParam = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+    const r = await opencodeFetch(`/question/${encodeURIComponent(requestID)}/reply${dirParam}`, {
+      method: 'POST',
+      body: JSON.stringify({ answers }),
+    });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '');
+      throw new Error(`OpenCode question reply ${r.status}: ${errText.slice(0, 200)}`);
+    }
+    return true;
+  }
+
+  /**
+   * Post the question message(s) — one per question in the request — with
+   * interactive option components, and register the question context so
+   * interactions and typed replies can complete the request.
+   */
+  async function sendQuestionToSurface({ type, token, channelId, threadId, request, directory }) {
+    if (type !== 'discord') return { ok: false, error: `Unsupported messenger type: ${type}` };
+    const questions = Array.isArray(request?.questions) ? request.questions : [];
+    if (!request?.id || questions.length === 0) return { ok: false, error: 'empty question request' };
+
+    const questionId = generateApprovalId();
+    const ch = threadId ?? channelId;
+    const messages = [];
+    for (let qIdx = 0; qIdx < questions.length; qIdx += 1) {
+      const content = renderQuestionForMessenger(questions[qIdx], { index: qIdx, total: questions.length });
+      if (!content) continue;
+      const components = buildQuestionComponents({ questionId, questionIndex: qIdx, question: questions[qIdx] });
+      const r = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(ch)}/messages`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: content.slice(0, DISCORD_LIMIT),
+            ...(components.length > 0 ? { components } : {}),
+          }),
+        },
+      );
+      if (!r.ok) {
+        console.error('[BRIDGE] Failed to send question to Discord:', r.status, (await r.text()).slice(0, 200));
+        continue;
+      }
+      const data = await r.json().catch(() => null);
+      messages.push({ channelId: ch, messageId: data?.id ?? null, questionIndex: qIdx });
+    }
+    if (messages.length === 0) return { ok: false, error: 'question post failed' };
+
+    questionContexts.set(questionId, {
+      sessionID: request.sessionID ?? null,
+      requestID: request.id,
+      directory: directory ?? null,
+      questions,
+      answers: questions.map(() => null),
+      surface: { type, token, messages },
+      createdAt: Date.now(),
+    });
+    setTimeout(() => questionContexts.delete(questionId), QUESTION_CONTEXT_TTL_MS).unref();
+    return { ok: true, questionId };
+  }
+
+  /** Strip the interactive components from a question's Discord messages. */
+  function stripQuestionComponents(qctx) {
+    const surface = qctx?.surface;
+    if (surface?.type !== 'discord' || !surface.token) return;
+    for (const msg of surface.messages ?? []) {
+      if (!msg?.channelId || !msg?.messageId) continue;
+      void editDiscordMessage({
+        token: surface.token,
+        channelId: msg.channelId,
+        messageId: msg.messageId,
+        components: [],
+      }).catch(() => {});
+    }
+  }
+
+  /**
+   * Record an option pick for one question of a request. When every question
+   * has an answer, the collected answers are sent to OpenCode. Returns
+   * `{ ok, labels, complete }` for the listener to update the message, or
+   * `{ ok: false, error }` when the context is unknown/expired.
+   */
+  function handleQuestionDecision(questionId, questionIndex, optionValues) {
+    const qctx = questionContexts.get(questionId);
+    if (!qctx) {
+      console.log('[BRIDGE] No question context for', questionId, '(expired or already answered)');
+      return { ok: false, error: 'expired' };
+    }
+    const index = Number(questionIndex);
+    const question = qctx.questions[index];
+    if (!question) return { ok: false, error: 'unknown question' };
+    const options = Array.isArray(question.options) ? question.options : [];
+    const labels = (Array.isArray(optionValues) ? optionValues : [optionValues])
+      .map((v) => options[Number(v)]?.label)
+      .filter((label) => typeof label === 'string' && label.length > 0);
+    if (labels.length === 0) return { ok: false, error: 'unknown option' };
+
+    qctx.answers[index] = labels;
+    const complete = qctx.answers.every((a) => Array.isArray(a) && a.length > 0);
+    if (complete) {
+      questionContexts.delete(questionId);
+      console.log('[BRIDGE] Question answered:', { questionId, requestID: qctx.requestID, answers: qctx.answers });
+      replyQuestionToOpenCode({
+        requestID: qctx.requestID,
+        answers: qctx.answers,
+        directory: qctx.directory,
+      }).catch((err) => {
+        console.error('[BRIDGE] Failed to reply to question:', err?.message ?? err);
+      });
+    }
+    return { ok: true, labels, complete };
+  }
+
+  /** First pending question context bound to a session, or null. */
+  function findPendingQuestionForSession(sessionId) {
+    if (!sessionId) return null;
+    for (const [questionId, qctx] of questionContexts) {
+      if (questionId === '_cleanup' || !qctx) continue;
+      if (qctx.sessionID === sessionId) return [questionId, qctx];
+    }
+    return null;
+  }
+
+  /**
+   * Treat a typed Discord reply as the (custom) answer to the session's
+   * pending question — exactly what the web UI's free-text answer does.
+   * Already-picked options on a multi-question request are kept; the text
+   * fills every still-unanswered question. Returns true when the reply was
+   * consumed as an answer (the caller must NOT also send it as a prompt).
+   */
+  async function answerPendingQuestionWithText(sessionId, text) {
+    const found = findPendingQuestionForSession(sessionId);
+    if (!found) return false;
+    const [questionId, qctx] = found;
+    const answers = qctx.questions.map((_, i) =>
+      Array.isArray(qctx.answers[i]) && qctx.answers[i].length > 0 ? qctx.answers[i] : [text],
+    );
+    questionContexts.delete(questionId);
+    stripQuestionComponents(qctx);
+    try {
+      await replyQuestionToOpenCode({
+        requestID: qctx.requestID,
+        answers,
+        directory: qctx.directory,
+      });
+      return true;
+    } catch (err) {
+      // The request may have been answered/dismissed elsewhere — fall back
+      // to sending the text as a normal prompt instead of swallowing it.
+      console.warn('[BRIDGE] Typed question answer failed, sending as prompt:', err?.message ?? err);
+      return false;
+    }
+  }
+
+  // --- Todo/plan mirroring (todo.updated) -------------------------------------
+  // The agent's task plan is session state the user should always see —
+  // it is mirrored at EVERY verbosity level. One Discord message per turn
+  // holds the current list; successive todo.updated events PATCH it in
+  // place (debounced) instead of spamming the thread.
+  /** @type {Map<string, { channelId: string|null, messageId: string|null, lastContent: string|null, timer: NodeJS.Timeout|null, pendingTodos: Array<object>|null }>} */
+  const todoMessages = new Map();
+  const TODO_DEBOUNCE_MS = 1_200;
+
+  function scheduleTodoUpdate(ctx, sessionId, todos) {
+    let entry = todoMessages.get(sessionId);
+    if (!entry) {
+      entry = { channelId: null, messageId: null, lastContent: null, timer: null, pendingTodos: null };
+      todoMessages.set(sessionId, entry);
+    }
+    entry.pendingTodos = todos;
+    if (entry.timer) return; // trailing-edge coalescing — latest todos win
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      void flushTodoUpdate(ctx, sessionId).catch(() => {});
+    }, TODO_DEBOUNCE_MS);
+    entry.timer.unref?.();
+  }
+
+  async function flushTodoUpdate(ctx, sessionId) {
+    const entry = todoMessages.get(sessionId);
+    if (!entry || !entry.pendingTodos) return;
+    const todos = entry.pendingTodos;
+    entry.pendingTodos = null;
+    const content = renderTodoListForMessenger(todos);
+    if (!content || content === entry.lastContent) return;
+    if (ctx.type !== 'discord' || !ctx.token) return;
+    const ch = ctx.threadId ?? ctx.channelId;
+
+    if (entry.messageId && entry.channelId === ch) {
+      const edited = await editDiscordMessage({
+        token: ctx.token,
+        channelId: ch,
+        messageId: entry.messageId,
+        content,
+      });
+      if (edited.ok) {
+        entry.lastContent = content;
+        return;
+      }
+      // The message may have been deleted — fall through and repost.
+    }
+
+    const sent = await sendDiscord({ token: ctx.token, channelId: ch, content });
+    if (sent.ok) {
+      entry.channelId = ch;
+      entry.messageId = sent.id ?? null;
+      entry.lastContent = content;
+    }
+  }
+
+  /** Flush any pending todo render, then forget the message so the next turn posts fresh. */
+  function finishTodoMessageForSession(ctx, sessionId) {
+    const entry = todoMessages.get(sessionId);
+    if (!entry) return;
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    void (async () => {
+      try {
+        if (entry.pendingTodos && ctx) await flushTodoUpdate(ctx, sessionId);
+      } catch {
+        // best-effort
+      }
+      todoMessages.delete(sessionId);
+    })();
+  }
+
   // --- Last active Discord user --------------------------------------------------
   // Web-created mirror threads have no Discord message author to add as a
   // member, so without a configured owner they stay invisible in the channel
@@ -1853,6 +2171,10 @@ export function createMessengerOpencodeBridge({
         void postToSurface(ctx, footer);
       })();
 
+      // Flush the turn's final todo state and detach the live checklist
+      // message — the next turn posts a fresh one near its own activity.
+      finishTodoMessageForSession(ctx, sessionId);
+
       // Keep ctx around — follow-up messages in the same thread will reuse
       // the session id; but reset sentPartIds and startedAt for the next turn.
       ctx.sentPartIds.clear();
@@ -1976,6 +2298,95 @@ export function createMessengerOpencodeBridge({
       }).catch((err) => {
         console.error('[PERMISSION] sendApprovalToSurface threw:', err?.message ?? err);
       });
+      return;
+    }
+
+    // ── Question asked (the "ask" tool) — send options as components ───
+    // Interactive session state: rendered at every verbosity level, exactly
+    // like permission prompts.
+    if (type === 'question.asked') {
+      const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      let ctx = sessionId ? sessionContexts.get(sessionId) : null;
+
+      if (!ctx && sessionId && lookupMessengerTarget) {
+        try {
+          const binding = lookupMessengerTarget(sessionId);
+          if (binding) {
+            ctx = {
+              type: binding.type,
+              token: binding.token,
+              channelId: binding.targetKey,
+              threadId: binding.threadId ?? null,
+              projectPath: binding.projectPath ?? null,
+            };
+          }
+        } catch {
+          // lookup failed — fall through
+        }
+      }
+
+      if (!ctx) {
+        ctx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
+      }
+
+      if (!ctx) {
+        console.log('[QUESTION]', `No surface for session=${sessionId} — cannot forward to messenger`);
+        return;
+      }
+
+      // A question is blocking interactive UI — stop the typing indicator.
+      stopTypingPulse(ctx);
+
+      const request = {
+        id: props?.id ?? props?.requestID ?? props?.requestId ?? null,
+        sessionID: sessionId,
+        questions: Array.isArray(props?.questions) ? props.questions : [],
+      };
+      if (!request.id || request.questions.length === 0) return;
+
+      const replyDirectory = envelopeDirectory || ctx.projectPath || null;
+      console.log('[QUESTION]', `session=${sessionId} request=${request.id} questions=${request.questions.length} dir=${replyDirectory ?? 'none'}`);
+
+      sendQuestionToSurface({
+        type: ctx.type,
+        token: ctx.token,
+        channelId: ctx.channelId,
+        threadId: ctx.threadId,
+        request,
+        directory: replyDirectory,
+      }).then((result) => {
+        if (result && !result.ok) {
+          console.error('[QUESTION] Failed to send question to surface:', result.error);
+        }
+      }).catch((err) => {
+        console.error('[QUESTION] sendQuestionToSurface threw:', err?.message ?? err);
+      });
+      return;
+    }
+
+    // ── Question answered/dismissed elsewhere (e.g. web UI) — strip the
+    // stale components so the Discord buttons can't be clicked anymore.
+    if (type === 'question.replied' || type === 'question.rejected') {
+      const requestID = props?.requestID ?? props?.requestId ?? null;
+      if (!requestID) return;
+      for (const [questionId, qctx] of [...questionContexts.entries()]) {
+        if (questionId === '_cleanup' || !qctx || qctx.requestID !== requestID) continue;
+        questionContexts.delete(questionId);
+        stripQuestionComponents(qctx);
+      }
+      return;
+    }
+
+    // ── Todo/plan updates — keep one live checklist message per turn ───
+    if (type === 'todo.updated') {
+      const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      if (!sessionId) return;
+      // Narrow: only mirror plans for sessions already bound to a surface;
+      // a todo list alone should never spawn a mirror thread.
+      const ctx = sessionContexts.get(sessionId);
+      if (!ctx) return;
+      const todos = Array.isArray(props?.todos) ? props.todos : [];
+      scheduleTodoUpdate(ctx, sessionId, todos);
       return;
     }
   }
@@ -2723,10 +3134,6 @@ export function createMessengerOpencodeBridge({
     // session — reject them and strip stale buttons.
     await rejectPendingApprovalsForSession(sessionId).catch(() => {});
 
-    // Remember this prompt so OpenCode's `user` part echo isn't mirrored back
-    // into the originating messenger surface (see consumeMessengerInbound).
-    rememberMessengerInbound(sessionId, text);
-
     // Bind context so the SSE handler routes outbound parts here.
     const existingCtx = sessionContexts.get(sessionId);
     if (existingCtx) {
@@ -2762,6 +3169,24 @@ export function createMessengerOpencodeBridge({
     // UI default change) takes effect on the next prompt.
     ctx.verbosity = resolveVerbosity({ type, token, channelId, threadId: effectiveThreadId });
     startTypingPulse(ctx);
+
+    // The agent asked a question and the user typed a reply instead of
+    // clicking an option → the text IS the (custom) answer. Send it through
+    // question.reply so the blocked turn resumes; never as a second prompt.
+    if (await answerPendingQuestionWithText(sessionId, text)) {
+      void postToSurface(ctx, '✅ _Reply sent as the answer to the question above._');
+      broadcastEvent?.('messenger.bridge.question_answered', {
+        type,
+        channelId,
+        threadId: effectiveThreadId,
+        sessionId,
+      });
+      return { ok: true, sessionId, threadId: effectiveThreadId, answeredQuestion: true };
+    }
+
+    // Remember this prompt so OpenCode's `user` part echo isn't mirrored back
+    // into the originating messenger surface (see consumeMessengerInbound).
+    rememberMessengerInbound(sessionId, text);
 
     // Pull per-surface model/agent overrides (set via /model and /agent).
     //
@@ -3027,6 +3452,11 @@ export function createMessengerOpencodeBridge({
           sessionId: b.sessionId,
         });
       }
+      if (b.sessionId) {
+        const todoEntry = todoMessages.get(b.sessionId);
+        if (todoEntry?.timer) clearTimeout(todoEntry.timer);
+        todoMessages.delete(b.sessionId);
+      }
 
       // Remove the store binding FIRST (before deleting the session) so the
       // session.deleted event we trigger below finds no binding and doesn't
@@ -3065,6 +3495,9 @@ export function createMessengerOpencodeBridge({
       stopTypingPulse(ctx);
       sessionContexts.delete(sessionId);
     }
+    const todoEntry = todoMessages.get(sessionId);
+    if (todoEntry?.timer) clearTimeout(todoEntry.timer);
+    todoMessages.delete(sessionId);
     if (bindings.length === 0) return;
 
     let token = ctx?.token ?? null;
@@ -3112,6 +3545,7 @@ export function createMessengerOpencodeBridge({
     ensureSubscribed,
     initApprovalListener,
     handleApprovalDecision,
+    handleQuestionDecision,
     handleThreadDeleted,
     handleSessionDeleted,
     /** Mention-only mode — checked by the Discord listener. */
@@ -3125,5 +3559,7 @@ export function createMessengerOpencodeBridge({
     store: bridgeStore,
     /** Shared approval context map — exposed so listeners can inspect it */
     approvalContexts,
+    /** Shared question context map — exposed so listeners can inspect it */
+    questionContexts,
   };
 }

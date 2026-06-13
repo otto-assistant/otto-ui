@@ -446,6 +446,83 @@ async function handleApplicationCommand(state, interaction, broadcastEvent, brid
   }).catch(() => {});
 }
 
+/**
+ * Handle a question option pick (button or select menu). Acks the
+ * interaction, records the decision via the bridge (which replies to
+ * OpenCode once every question of the request is answered), and updates
+ * the message to show the chosen answer with the components removed.
+ */
+async function handleQuestionComponent(state, interaction, customId, broadcastEvent, bridge) {
+  const isSelect = customId.startsWith('otto-question-select:');
+  const segments = customId.split(':');
+  const questionId = segments[1] ?? '';
+  const questionIndex = Number(segments[2] ?? '0');
+  const optionValues = isSelect
+    ? (Array.isArray(interaction.data?.values) ? interaction.data.values : [])
+    : [segments[3]];
+
+  // Ack within Discord's 3-second window (type 6 = DEFERRED_UPDATE_MESSAGE).
+  try {
+    const ackResult = await restCall(
+      state.token,
+      'POST',
+      `/interactions/${interaction.id}/${interaction.token}/callback`,
+      { type: 6 },
+    );
+    if (!ackResult.ok) {
+      console.error('[DISCORD] Question ack failed:', ackResult.status, typeof ackResult.body === 'string' ? ackResult.body.slice(0, 200) : '');
+    }
+  } catch (e) {
+    console.error('[DISCORD] Question ack threw:', e?.message ?? e);
+  }
+
+  let result = { ok: false, error: 'bridge unavailable' };
+  try {
+    result = bridge?.handleQuestionDecision?.(questionId, questionIndex, optionValues) ?? result;
+  } catch (e) {
+    console.error('[DISCORD] handleQuestionDecision threw:', e?.message ?? e);
+    result = { ok: false, error: e?.message ?? 'question decision failed' };
+  }
+
+  const user = interaction.member?.user ?? interaction.user;
+  const userName = user?.global_name || user?.username || 'user';
+  const note = result.ok
+    ? `_✅ ${result.labels.join(', ')} — by ${userName}_`
+    : '_⚠ This question expired — reply with a text message instead._';
+  const origContent = interaction.message?.content ?? '';
+  const updatedContent = origContent ? `${origContent}\n\n${note}` : note;
+
+  try {
+    const patchResult = await restCall(
+      state.token,
+      'PATCH',
+      `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`,
+      { content: updatedContent.slice(0, 2000), components: [] },
+    );
+    if (!patchResult.ok) {
+      await restCall(state.token, 'PATCH', `/channels/${interaction.channel_id}/messages/${interaction.message?.id}`, {
+        content: updatedContent.slice(0, 2000),
+        components: [],
+      }).catch((e2) => console.error('[DISCORD] Question direct PATCH also failed:', e2?.message ?? e2));
+    }
+  } catch (e) {
+    console.error('[DISCORD] Question webhook PATCH threw:', e?.message ?? e);
+  }
+
+  broadcastEvent?.('messenger.discord.question', {
+    questionId,
+    questionIndex,
+    answered: Boolean(result.ok),
+    complete: Boolean(result.complete),
+    labels: result.ok ? result.labels : [],
+    by: { id: user?.id, username: user?.username, displayName: user?.global_name ?? null },
+    messageId: interaction.message?.id ?? null,
+    channelId: interaction.channel_id ?? null,
+    guildId: interaction.guild_id ?? null,
+    decidedAt: new Date().toISOString(),
+  });
+}
+
 async function dispatchInteractionCreate(state, interaction, broadcastEvent, bridge) {
   // Type 1 = PING (auto-acked by Discord), 2 = APPLICATION_COMMAND (slash),
   // 3 = MESSAGE_COMPONENT (button/select), 5 = MODAL_SUBMIT.
@@ -470,6 +547,14 @@ async function dispatchInteractionCreate(state, interaction, broadcastEvent, bri
   // ── Verbosity / agent / skill wizard select menus ──────────────────
   if (state.commandWizards?.ownsComponent(customId)) {
     await state.commandWizards.handleComponent(state, interaction, customId);
+    return;
+  }
+
+  // ── Question option buttons / select menus ─────────────────────────
+  // Parse: otto-question:{questionId}:{questionIndex}:{optionIndex} (button)
+  //        otto-question-select:{questionId}:{questionIndex} (select menu)
+  if (customId.startsWith('otto-question:') || customId.startsWith('otto-question-select:')) {
+    await handleQuestionComponent(state, interaction, customId, broadcastEvent, bridge);
     return;
   }
 

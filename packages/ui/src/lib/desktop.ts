@@ -59,7 +59,6 @@ export type DesktopSettings = {
   desktopUiPassword?: string;
   projects?: ProjectEntry[];
   activeProjectId?: string;
-  approvedDirectories?: string[];
   securityScopedBookmarks?: string[];
   pinnedDirectories?: string[];
   showReasoningTraces?: boolean;
@@ -144,6 +143,7 @@ export type DesktopSettings = {
   activityRenderMode?: 'collapsed' | 'summary';
   mermaidRenderingMode?: 'svg' | 'ascii';
   userMessageRenderingMode?: 'markdown' | 'plain';
+  collapsibleUserMessages?: boolean;
   stickyUserHeader?: boolean;
   wideChatLayoutEnabled?: boolean;
   showSplitAssistantMessageActions?: boolean;
@@ -201,6 +201,8 @@ type DesktopBridgeGlobal = {
 
 type ElectronRuntimeGlobal = {
   runtime?: string;
+  macVibrancy?: boolean;
+  macVibrancySupported?: boolean;
 };
 
 const getElectronRuntime = (): ElectronRuntimeGlobal | null => {
