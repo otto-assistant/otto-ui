@@ -17,6 +17,33 @@
 
 import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
 
+/**
+ * Strip ANSI escape sequences from terminal output.
+ *
+ * Tools like `eza`, `ls --color`, `git`, and test runners emit SGR colour
+ * codes (e.g. `\u001b[1;33m`), cursor moves, and OSC hyperlinks. Discord's
+ * plain code fences render none of these, so the raw `[1;33m` / `[0m` noise
+ * leaks into the message and makes tool results unreadable. We remove the
+ * sequences instead of trying to translate them — the bridge mirrors a clean,
+ * plain-text view of the output.
+ *
+ * Handles CSI sequences (`ESC[…`), OSC sequences (`ESC]…BEL`/`ESC]…ST`),
+ * single-character escapes, and orphaned SGR codes whose `ESC` byte was already
+ * dropped upstream (the exact `[…m` garbage seen in copied terminal output).
+ */
+const ANSI_OSC = /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
+const ANSI_CSI = /[\u001B\u009B][@-Z\\-_]|[\u001B\u009B]\[[0-?]*[ -/]*[@-~]/g;
+// Orphaned SGR codes (ESC already stripped) — only the colour/style form `[…m`.
+const ANSI_ORPHAN_SGR = /\[[0-9;:]*m/g;
+
+export function stripAnsi(input) {
+  if (input == null) return '';
+  return String(input)
+    .replace(ANSI_OSC, '')
+    .replace(ANSI_CSI, '')
+    .replace(ANSI_ORPHAN_SGR, '');
+}
+
 /** Light markdown escaping — keep code-fence + backticks usable. */
 export function escapeMd(s) {
   return String(s ?? '').replace(/[*_]/g, (c) => `\\${c}`);
@@ -65,7 +92,7 @@ export function renderPermissionContext(permission) {
       if (!cmd && !desc) return '';
       const parts = [];
       if (desc) parts.push(`> *${clip(desc, 200)}*`);
-      if (cmd) parts.push('```bash\n' + clip(cmd, 800) + '\n```');
+      if (cmd) parts.push('```bash\n' + clip(stripAnsi(cmd), 800) + '\n```');
       return parts.join('\n');
     }
     case 'edit':
@@ -146,7 +173,7 @@ export function renderPermissionContext(permission) {
       if (desc) return `> *${clip(desc, 300)}*`;
       const keys = Object.keys(meta).filter((k) => !['sessionID', 'id', 'type'].includes(k));
       if (keys.length > 0) {
-        const preview = keys.slice(0, 3).map((k) => `${k}: ${String(meta[k]).slice(0, 60)}`).join('\n');
+        const preview = keys.slice(0, 3).map((k) => `${k}: ${stripAnsi(meta[k]).slice(0, 60)}`).join('\n');
         return '```\n' + clip(preview, 400) + '\n```';
       }
       return '';
@@ -299,7 +326,7 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
       }
       case 'bash':
       case 'shell': {
-        const cmd = (input.command ?? '').toString().split('\n')[0];
+        const cmd = stripAnsi(input.command).split('\n')[0];
         return cmd ? `\`${clipBlock(cmd, 150)}\`` : '';
       }
       case 'glob': {
@@ -375,9 +402,21 @@ export function renderToolPart(part, verbosity = DEFAULT_VERBOSITY) {
   return line;
 }
 
-/** Neutralise embedded code fences + clip — for safe ```fenced``` embedding. */
+/**
+ * Prepare arbitrary tool text for a ```fenced``` block:
+ *   - strip ANSI colour/escape noise (Discord renders none of it)
+ *   - neutralise embedded code fences so the block can't close early
+ *   - drop trailing whitespace and collapse long blank-line runs that
+ *     terminal output leaves behind, so results don't waste vertical space
+ *   - clip to the per-block limit
+ */
 function fenceSafe(raw, limit) {
-  return clipBlock(String(raw ?? '').trim().replace(/```/g, "'''"), limit);
+  const cleaned = stripAnsi(raw)
+    .replace(/```/g, "'''")
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return clipBlock(cleaned, limit);
 }
 
 function fence(raw, { lang = '', limit = 700 } = {}) {
@@ -392,7 +431,7 @@ function renderEditDiff(input, { maxLinesPerSide = 12, lineLimit = 120 } = {}) {
   const newStr = typeof input.newString === 'string' ? input.newString : '';
   if (!oldStr && !newStr) return '';
   const sideLines = (s, prefix) => {
-    const lines = s ? s.replace(/```/g, "'''").split('\n') : [];
+    const lines = s ? stripAnsi(s).replace(/```/g, "'''").split('\n') : [];
     const shown = lines.slice(0, maxLinesPerSide).map((l) => `${prefix} ${clipBlock(l, lineLimit)}`);
     if (lines.length > maxLinesPerSide) shown.push(`${prefix} … (${lines.length - maxLinesPerSide} more lines)`);
     return shown;
@@ -415,7 +454,7 @@ export function renderToolDetailVerbose(part) {
   const tool = String(part.tool ?? 'tool');
   const state = part.state ?? {};
   const input = state.input ?? {};
-  const output = typeof state.output === 'string' ? state.output.trim() : '';
+  const output = typeof state.output === 'string' ? stripAnsi(state.output).trim() : '';
   const blocks = [];
 
   switch (tool) {
@@ -423,7 +462,7 @@ export function renderToolDetailVerbose(part) {
     case 'shell': {
       // The one-liner summary already shows single-line commands; only
       // fence the command when it spans multiple lines.
-      const cmd = (input.command ?? '').toString();
+      const cmd = stripAnsi(input.command);
       if (cmd.includes('\n')) blocks.push(fence(cmd, { lang: 'bash', limit: 600 }));
       if (output) blocks.push(fence(output, { limit: 700 }));
       break;
