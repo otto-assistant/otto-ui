@@ -5,7 +5,7 @@ import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
 import { PatchDiff } from '@pierre/diffs/react';
 import { cn } from '@/lib/utils';
 import { SimpleMarkdownRenderer } from '../../MarkdownRenderer';
-import { getToolMetadata } from '@/lib/toolHelpers';
+import { getToolMetadata, stripAnsi } from '@/lib/toolHelpers';
 import type { ToolPart as ToolPartType, ToolState as ToolStateUnion } from '@opencode-ai/sdk/v2';
 import { toolDisplayStyles } from '@/lib/typography';
 import SyntaxHighlighter from '@/components/chat/syntaxHighlighterAsync';
@@ -1591,7 +1591,10 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
     const input = stateWithData.input;
     const rawOutput = stateWithData.output;
     const hasStringOutput = typeof rawOutput === 'string' && rawOutput.length > 0;
-    const outputString = typeof rawOutput === 'string' ? rawOutput : '';
+    const outputString = React.useMemo(
+        () => (typeof rawOutput === 'string' ? stripAnsi(rawOutput) : ''),
+        [rawOutput],
+    );
 
     const fileDiff = isRecord(metadata?.filediff) ? metadata.filediff : undefined;
     const diffContent = getPatchText((metadata as { patch?: unknown } | undefined)?.patch)
@@ -2081,7 +2084,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
     }, [localStartAt, pinnedTime.start, time?.start]);
 
     const taskOutputString = React.useMemo(() => {
-        return typeof stateWithData.output === 'string' ? stateWithData.output : undefined;
+        return typeof stateWithData.output === 'string' ? stripAnsi(stateWithData.output) : undefined;
     }, [stateWithData.output]);
 
     const parsedTaskMetadata = React.useMemo(() => {

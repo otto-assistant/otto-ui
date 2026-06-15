@@ -7,7 +7,7 @@ import { createPortal } from 'react-dom';
 import { cn } from '@/lib/utils';
 import { SimpleMarkdownRenderer } from '../MarkdownRenderer';
 import { toolDisplayStyles } from '@/lib/typography';
-import { getLanguageFromExtension } from '@/lib/toolHelpers';
+import { getLanguageFromExtension, stripAnsi } from '@/lib/toolHelpers';
 import { useOptionalThemeSystem } from '@/contexts/useThemeSystem';
 import { ensurePierreThemeRegistered } from '@/lib/shiki/appThemeRegistry';
 import { getDefaultTheme } from '@/lib/theme/themes';
@@ -985,10 +985,19 @@ const MermaidPreviewDialog: React.FC<{
     return createPortal(content, document.body);
 };
 
-const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup, onOpenChange, syntaxTheme, isMobile }) => {
+const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, onOpenChange, syntaxTheme, isMobile }) => {
     const { t } = useI18n();
     const [diffViewMode, setDiffViewMode] = React.useState<DiffViewMode>('unified');
     const pierreThemeConfig = usePierreThemeConfig();
+
+    // Strip ANSI colour/escape noise from terminal-style output so it renders
+    // as clean plain text instead of leaking `[1;33m`/`[0m` sequences.
+    const popup = React.useMemo<ToolPopupContent>(
+        () => (typeof rawPopup.content === 'string'
+            ? { ...rawPopup, content: stripAnsi(rawPopup.content) }
+            : rawPopup),
+        [rawPopup],
+    );
 
     React.useEffect(() => {
         if (!popup.open) return;
