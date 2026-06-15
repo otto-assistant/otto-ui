@@ -4,9 +4,11 @@ import {
   renderToolPart,
   renderQuestionForMessenger,
   renderTodoListForMessenger,
+  renderPermissionContext,
   deriveThreadNameFromSessionTitle,
   extractLastAssistantTokens,
   computeTurnTokens,
+  stripAnsi,
 } from './messenger-render.js';
 
 const toolPart = (overrides = {}) => ({
@@ -125,6 +127,68 @@ describe('renderPartForMessenger — verbosity gating', () => {
   it('defaults to normal when verbosity is omitted or invalid', () => {
     const line = renderPartForMessenger(toolPart(), 'bogus');
     expect(line).not.toContain('```'); // normal semantics: no detail blocks
+  });
+});
+
+describe('stripAnsi', () => {
+  it('removes SGR colour codes (the eza/ls --color noise)', () => {
+    const colored = '\u001B[1;33mrz.exe\u001B[0m \u001B[34m 8 вер  2017\u001B[0m';
+    expect(stripAnsi(colored)).toBe('rz.exe  8 вер  2017');
+  });
+
+  it('removes orphaned SGR codes whose ESC byte was already dropped', () => {
+    // The exact garbage shape from the reported issue, ESC already stripped.
+    const orphaned = '.[1;33mr[31mw[90m-[0m[33mr[1;90m--[0m  [1;32m189k[0m';
+    expect(stripAnsi(orphaned)).toBe('.rw-r--  189k');
+  });
+
+  it('removes OSC hyperlinks and cursor-control sequences', () => {
+    const osc = '\u001B]8;;https://x\u0007link\u001B]8;;\u0007\u001B[2K done';
+    expect(stripAnsi(osc)).toBe('link done');
+  });
+
+  it('leaves plain text and lone brackets untouched', () => {
+    expect(stripAnsi('arr[1,2,3] = foo[bar]')).toBe('arr[1,2,3] = foo[bar]');
+    expect(stripAnsi('')).toBe('');
+    expect(stripAnsi(null)).toBe('');
+  });
+});
+
+describe('renderToolPart — ANSI stripping in tool results', () => {
+  it('verbose: strips ANSI colour codes from bash output before fencing', () => {
+    const line = renderToolPart(
+      toolPart({
+        state: {
+          status: 'completed',
+          input: { command: 'eza -l' },
+          output: '\u001B[1;33mrz.exe\u001B[0m\n\u001B[34m358k\u001B[0m unarc.dll',
+        },
+      }),
+      'verbose',
+    );
+    expect(line).toContain('rz.exe');
+    expect(line).toContain('unarc.dll');
+    expect(line).not.toContain('[1;33m');
+    expect(line).not.toContain('[0m');
+    expect(line).not.toContain('\u001B');
+  });
+
+  it('normal: strips ANSI from the bash command summary one-liner', () => {
+    const line = renderToolPart(
+      toolPart({ state: { status: 'completed', input: { command: '\u001B[32meza\u001B[0m -l' }, output: 'x' } }),
+      'normal',
+    );
+    expect(line).toContain('`eza -l`');
+    expect(line).not.toContain('[32m');
+  });
+
+  it('renderPermissionContext strips ANSI from the previewed command', () => {
+    const out = renderPermissionContext({
+      permission: 'bash',
+      metadata: { command: '\u001B[1mrm -rf build\u001B[0m' },
+    });
+    expect(out).toContain('rm -rf build');
+    expect(out).not.toContain('[1m');
   });
 });
 
