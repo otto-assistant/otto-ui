@@ -219,12 +219,30 @@ const TODO_STATUS_ICONS = {
 };
 
 const TODO_LIST_MAX_ITEMS = 30;
+const TODO_PROGRESS_SEGMENTS = 5;
+
+/**
+ * Build a compact monospace progress bar (e.g. `▰▰▱▱▱` 40%). Wrapped in a
+ * code span so Discord renders it at a fixed width — the surrounding emoji
+ * checklist has variable glyph widths, so a plain-text bar would look ragged.
+ */
+function renderTodoProgressBar(done, total) {
+  if (total <= 0) return '';
+  const ratio = Math.max(0, Math.min(1, done / total));
+  const filled = Math.round(ratio * TODO_PROGRESS_SEGMENTS);
+  const bar = '▰'.repeat(filled) + '▱'.repeat(TODO_PROGRESS_SEGMENTS - filled);
+  return `\`${bar}\` ${Math.round(ratio * 100)}%`;
+}
 
 /**
  * Render the agent's todo/plan list (from `todo.updated` events) as a
  * Discord checklist. Returns null when there is nothing to show. Like
  * questions and permissions, the plan is session state the user should
  * always see — it is rendered at every verbosity level.
+ *
+ * Layout: a header line with a progress bar, a blank separator, then the
+ * checklist. Completed/cancelled items are struck through; the single
+ * in-progress item is bolded so the current focus stands out at a glance.
  */
 export function renderTodoListForMessenger(todos) {
   const list = Array.isArray(todos)
@@ -232,11 +250,23 @@ export function renderTodoListForMessenger(todos) {
     : [];
   if (list.length === 0) return null;
   const done = list.filter((t) => t.status === 'completed').length;
-  const lines = [`📋 **Plan** — ${done}/${list.length} done`];
+  const progress = renderTodoProgressBar(done, list.length);
+  const lines = [
+    `📋 **Plan** — ${done}/${list.length} done${progress ? `  ${progress}` : ''}`,
+    '',
+  ];
   for (const todo of list.slice(0, TODO_LIST_MAX_ITEMS)) {
     const icon = TODO_STATUS_ICONS[todo.status] ?? TODO_STATUS_ICONS.pending;
     const label = escapeMd(clipBlock(todo.content.trim().replace(/\s+/g, ' '), 150));
-    lines.push(`${icon} ${todo.status === 'completed' || todo.status === 'cancelled' ? `~~${label}~~` : label}`);
+    let formatted;
+    if (todo.status === 'completed' || todo.status === 'cancelled') {
+      formatted = `~~${label}~~`;
+    } else if (todo.status === 'in_progress') {
+      formatted = `**${label}**`;
+    } else {
+      formatted = label;
+    }
+    lines.push(`${icon} ${formatted}`);
   }
   if (list.length > TODO_LIST_MAX_ITEMS) {
     lines.push(`… ${list.length - TODO_LIST_MAX_ITEMS} more`);
