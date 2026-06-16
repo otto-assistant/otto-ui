@@ -472,6 +472,34 @@ export function createMessengerOpencodeBridge({
    * Best-effort: returns `{ model: null, agent: null }` when unavailable so
    * callers can fall through to OpenCode's own default.
    */
+  /**
+   * Resolve a concrete, valid agent name for OpenCode's shell endpoint.
+   *
+   * Unlike `/session/:id/prompt_async` (where omitting the agent lets OpenCode
+   * pick its default), `/session/:id/shell` REQUIRES a real agent — an empty or
+   * unknown agent returns HTTP 500 and the command never runs. So we resolve in
+   * priority order and, when nothing is configured, discover an actual primary
+   * agent from the server instead of guessing. Falls back to `build` (OpenCode's
+   * stock primary agent) only as a last resort.
+   */
+  async function resolveShellAgent({ surfaceAgent = null, projectAgent = null, globalAgent = null } = {}) {
+    const configured = surfaceAgent || projectAgent || globalAgent || null;
+    if (configured) return configured;
+    try {
+      const agents = await opencodeAdapter.listAgents();
+      const visible = (Array.isArray(agents) ? agents : []).filter((a) => a && a.name && !a.hidden);
+      const primaries = visible.filter((a) => a.mode !== 'subagent' && a.mode !== 'sub');
+      const build =
+        primaries.find((a) => a.name === 'build') || visible.find((a) => a.name === 'build');
+      if (build) return build.name;
+      if (primaries.length > 0) return primaries[0].name;
+      if (visible.length > 0) return visible[0].name;
+    } catch {
+      // fall through to the stock default
+    }
+    return 'build';
+  }
+
   async function resolveGlobalDefaults() {
     if (!getGlobalDefaults) return { model: null, agent: null };
     try {
@@ -959,10 +987,15 @@ export function createMessengerOpencodeBridge({
     },
     async runShell(sessionId, projectPath, command, { modelOverride = null, agentOverride = null } = {}) {
       try {
+        // OpenCode's shell endpoint requires a real agent — an empty or unknown
+        // agent returns HTTP 500 and the command silently never runs. Callers
+        // resolve a concrete agent (see resolveShellAgent); guard here too so a
+        // future caller can't reintroduce the 500.
+        if (!agentOverride) {
+          return { ok: false, error: 'no agent resolved for shell command' };
+        }
         const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
-        // `agent` is required by OpenCode's shell endpoint; an empty string
-        // tells it to use the session/project default (matches the web client).
-        const body = { command, agent: agentOverride || '' };
+        const body = { command, agent: agentOverride };
         if (modelOverride && /^[^/]+\/[^/]+$/.test(modelOverride)) {
           const [providerID, ...rest] = modelOverride.split('/');
           body.model = { providerID, modelID: rest.join('/') };
@@ -2822,6 +2855,10 @@ export function createMessengerOpencodeBridge({
       async runShell({ command }) {
         const sessionId = stored?.sessionId ?? null;
         if (!sessionId) return { ok: false, error: 'no active session on this conversation' };
+        // A native slash `/shell` reaches here without going through
+        // routeInbound, so make sure we're subscribed to the event stream —
+        // otherwise the shell result's SSE parts would never be mirrored.
+        ensureSubscribed();
         // Bind a context for this surface so the shell command's result (which
         // streams back over SSE as a bash tool part) is mirrored to the exact
         // channel/thread it was issued from, instead of an auto-resolved
@@ -2842,9 +2879,19 @@ export function createMessengerOpencodeBridge({
             source: type,
           });
         }
+        // The shell endpoint requires a real agent (an empty/unknown one 500s),
+        // so resolve a concrete one: surface override → project default →
+        // global default → a discovered primary agent.
+        const agent = await resolveShellAgent({
+          surfaceAgent: stored?.agentOverride ?? null,
+          projectAgent: projectDefaults?.agentDefault ?? null,
+          globalAgent: globals.agent ?? null,
+        });
+        const model =
+          stored?.modelOverride ?? projectDefaults?.modelDefault ?? globals.model ?? null;
         return opencodeAdapter.runShell(sessionId, stored?.projectPath ?? null, command, {
-          modelOverride: stored?.modelOverride ?? null,
-          agentOverride: stored?.agentOverride ?? null,
+          modelOverride: model,
+          agentOverride: agent,
         });
       },
 
