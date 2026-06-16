@@ -1533,4 +1533,44 @@ describe('/shell command — agent resolution (regression: empty agent 500s)', (
     });
     expect(shellBody().model).toEqual({ providerID: 'anthropic', modelID: 'claude-sonnet-4' });
   });
+
+  // `!cmd` is the natural shell prefix on Discord (matches the web chat). A
+  // bang-prefixed token that isn't a console command must run as a shell
+  // command — this is the exact form the user reported (`!pwd`).
+  it('runs a bare `!pwd` as a shell command', async () => {
+    const bridge = makeShellBridge();
+    const result = await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null, text: '!pwd',
+    });
+    const body = shellBody();
+    expect(body).toBeTruthy();
+    expect(body.command).toBe('pwd');
+    expect(body.agent).toBe('build');
+    expect(result).toMatchObject({ ok: true, handledCommand: 'shell' });
+  });
+
+  it('runs `!git status` (command with args) as a shell command', async () => {
+    const bridge = makeShellBridge();
+    await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null, text: '!git status',
+    });
+    expect(shellBody().command).toBe('git status');
+  });
+
+  it('still treats `!status` as the console command, not a shell command', async () => {
+    const bridge = makeShellBridge();
+    const result = await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null, text: '!status',
+    });
+    expect(result).toMatchObject({ ok: true, handledCommand: 'status' });
+    expect(calls.find((c) => c.method === 'POST' && c.url.includes('/shell'))).toBeUndefined();
+  });
+
+  it('still supports the explicit `!shell <cmd>` form', async () => {
+    const bridge = makeShellBridge();
+    await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null, text: '!shell echo hi',
+    });
+    expect(shellBody().command).toBe('echo hi');
+  });
 });

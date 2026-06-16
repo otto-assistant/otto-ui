@@ -70,7 +70,7 @@ const COMMAND_HELP = [
     name: 'shell',
     usage: '/shell <command>',
     summary:
-      'Run a shell command in the project and show the output here (e.g. `/shell pwd`). On Discord use `!shell pwd` — `/` is reserved for native slash commands.',
+      'Run a shell command in the project and show the output here. On Discord just prefix with `!` — `!pwd`, `!git status`, `!ls -la`; elsewhere use `/shell pwd`.',
   },
   {
     name: 'model',
@@ -147,6 +147,15 @@ const COMMAND_HELP = [
 ];
 
 const KNOWN_TOP_LEVEL = new Set(COMMAND_HELP.map((c) => c.name));
+
+/**
+ * Whether `name` is a recognised console command (`/help`, `/status`, …).
+ * Used by the Discord inbound pipeline to tell a console command apart from a
+ * bare `!shellcommand` (e.g. `!pwd`), which should run as a shell command.
+ */
+export function isKnownMessengerCommand(name) {
+  return typeof name === 'string' && KNOWN_TOP_LEVEL.has(name.toLowerCase());
+}
 
 /**
  * Extract the leading slash command from a user message. Returns `null`
