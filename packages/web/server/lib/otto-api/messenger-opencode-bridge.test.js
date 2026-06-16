@@ -1279,7 +1279,7 @@ describe('todo/plan mirroring', () => {
     const content = JSON.parse(post.body).content;
     expect(content).toContain('📋 **Plan** — 1/3 done');
     expect(content).toContain('✅ ~~Set up scaffolding~~');
-    expect(content).toContain('🔄 Implement API client');
+    expect(content).toContain('🔄 **Implement API client**');
     expect(content).toContain('⬜ Write tests');
   });
 
@@ -1294,5 +1294,94 @@ describe('todo/plan mirroring', () => {
     });
     await flush();
     expect(calls.length).toBe(0);
+  });
+});
+
+describe('pending interaction reconciliation (missed SSE recovery)', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      const u = String(url);
+      calls.push({ url: u, method: init.method ?? 'GET', body: init.body ?? null });
+      // Pending-permissions list endpoint (GET /permission, not the reply path).
+      if (u.includes('/permission') && !u.includes('/reply')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '[]',
+          json: async () => [
+            { id: 'req-missed-1', sessionID: 'ses-1', permission: 'bash', patterns: [], always: [], metadata: {} },
+          ],
+        };
+      }
+      if (u.includes('/question')) {
+        return { ok: true, status: 200, text: async () => '[]', json: async () => [] };
+      }
+      // Discord message POST (and anything else).
+      return { ok: true, status: 200, text: async () => '', json: async () => ({ id: 'discord-msg-1' }) };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function makeHubWithStatus() {
+    let statusCb = null;
+    return {
+      subscribeEvent: () => () => {},
+      subscribeStatus: (cb) => {
+        statusCb = cb;
+        return () => {};
+      },
+      _emitStatus: (status) => statusCb?.(status),
+    };
+  }
+
+  function makeBoundStore() {
+    return {
+      ...makeFakeStore(),
+      list: () => [{ sessionId: 'ses-1', projectPath: '/binding/project' }],
+    };
+  }
+
+  it('forwards a pending permission that was never delivered via SSE', async () => {
+    const bridge = makeBridge({ globalEventHub: makeHubWithStatus(), store: makeBoundStore() });
+
+    // Subscribing kicks an initial reconcile (fire-and-forget); let the async
+    // fetch chain settle.
+    bridge.ensureSubscribed();
+    for (let i = 0; i < 8; i += 1) await flush();
+
+    const post = calls.find((c) => c.method === 'POST' && c.url.includes('/channels/chan-123/messages'));
+    expect(post).toBeTruthy();
+    expect(JSON.parse(post.body).content).toContain('Permission Required');
+    // Recorded for later Approve/Deny button routing.
+    expect([...bridge.approvalContexts.values()].some((v) => v.requestID === 'req-missed-1')).toBe(true);
+  });
+
+  it('does not double-surface a permission already delivered via the live SSE path', async () => {
+    const bridge = makeBridge({ globalEventHub: makeHubWithStatus(), store: makeBoundStore() });
+
+    // Live SSE event arrives first and posts once.
+    bridge._handleGlobalEvent({
+      directory: '/binding/project',
+      payload: {
+        type: 'permission.asked',
+        properties: { id: 'req-missed-1', sessionID: 'ses-1', permission: 'bash', patterns: [], always: [], metadata: {} },
+      },
+    });
+    await flush();
+    expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/messages')).length).toBe(1);
+
+    // Reconcile sees the same still-pending request and must skip it.
+    bridge.ensureSubscribed();
+    for (let i = 0; i < 8; i += 1) await flush();
+    expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/messages')).length).toBe(1);
   });
 });

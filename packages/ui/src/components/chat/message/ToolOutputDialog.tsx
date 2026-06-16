@@ -1,7 +1,7 @@
 import React from 'react';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { File as PierreFile, PatchDiff } from '@pierre/diffs/react';
-import SyntaxHighlighter from '@/components/chat/syntaxHighlighterAsync';
+import { WorkerHighlightedCode } from '@/components/code/WorkerHighlightedCode';
 import { createPortal } from 'react-dom';
 
 import { cn } from '@/lib/utils';
@@ -32,7 +32,6 @@ import { runtimeFetch } from '@/lib/runtime-fetch';
 interface ToolOutputDialogProps {
     popup: ToolPopupContent;
     onOpenChange: (open: boolean) => void;
-    syntaxTheme: { [key: string]: React.CSSProperties };
     isMobile: boolean;
 }
 
@@ -119,7 +118,7 @@ const TOOL_DIFF_METRICS = {
     lineHeight: 24,
     diffHeaderHeight: 44,
     hunkSeparatorHeight: 24,
-    fileGap: 0,
+    spacing: 0,
 };
 
 const usePierreThemeConfig = (): PierreThemeConfig => {
@@ -550,9 +549,8 @@ DialogUnifiedDiff.displayName = 'DialogUnifiedDiff';
 
 const DialogReadContent: React.FC<{
     popup: ToolPopupContent;
-    syntaxTheme: Record<string, React.CSSProperties>;
     pierreThemeConfig: PierreThemeConfig;
-}> = React.memo(({ popup, syntaxTheme, pierreThemeConfig }) => {
+}> = React.memo(({ popup, pierreThemeConfig }) => {
     const parsedReadOutput = React.useMemo(() => parseReadToolOutput(popup.content), [popup.content]);
 
     const inputMeta = popup.metadata?.input;
@@ -627,7 +625,6 @@ const DialogReadContent: React.FC<{
         <VirtualizedCodeBlock
             lines={codeLines}
             language={detectedLanguage}
-            syntaxTheme={syntaxTheme}
             maxHeight="70vh"
         />
     );
@@ -972,6 +969,7 @@ const MermaidPreviewDialog: React.FC<{
                                         allowMermaidWheelZoom
                                         className="markdown-mermaid-fullscreen h-full [&_[data-markdown='mermaid-block']_button]:hidden"
                                         mermaidControls={MERMAID_CONTROLS}
+                                        enableFileReferences={false}
                                     />
                                 </div>
                             )}
@@ -985,7 +983,7 @@ const MermaidPreviewDialog: React.FC<{
     return createPortal(content, document.body);
 };
 
-const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, onOpenChange, syntaxTheme, isMobile }) => {
+const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, onOpenChange, isMobile }) => {
     const { t } = useI18n();
     const [diffViewMode, setDiffViewMode] = React.useState<DiffViewMode>('unified');
     const pierreThemeConfig = usePierreThemeConfig();
@@ -1063,16 +1061,13 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, on
                                     </div>
                                     {meta.tool === 'bash' && getInputValue('command') ? (
                                         <div className="tool-input-surface bg-transparent rounded-xl border border-border/20 mx-3">
-                                            <SyntaxHighlighter
-                                                style={syntaxTheme}
+                                            <WorkerHighlightedCode
                                                 language="bash"
-                                                PreTag="div"
-                                                customStyle={toolDisplayStyles.getPopupStyles()}
-                                                codeTagProps={DIALOG_CODE_TAG_PROPS}
-                                                wrapLongLines
-                                            >
-                                                {getInputValue('command')!}
-                                            </SyntaxHighlighter>
+                                                code={getInputValue('command')!}
+                                                style={toolDisplayStyles.getPopupStyles()}
+                                                codeStyle={DIALOG_CODE_TAG_PROPS.style}
+                                                wrap
+                                            />
                                         </div>
                                     ) : meta.tool === 'task' && getInputValue('prompt') ? (
                                         <div
@@ -1132,16 +1127,13 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, on
                                             completed: t('chat.todo.completed'),
                                             cancelled: t('chat.todo.cancelled'),
                                         }) || (
-                                            <SyntaxHighlighter
-                                                style={syntaxTheme}
+                                            <WorkerHighlightedCode
                                                 language="json"
-                                                PreTag="div"
-                                                wrapLongLines
-                                                customStyle={toolDisplayStyles.getPopupContainerStyles()}
-                                                codeTagProps={DIALOG_CODE_TAG_PROPS}
-                                            >
-                                                {popup.content}
-                                            </SyntaxHighlighter>
+                                                code={popup.content}
+                                                style={toolDisplayStyles.getPopupContainerStyles()}
+                                                codeStyle={DIALOG_CODE_TAG_PROPS.style}
+                                                wrap
+                                            />
                                         )
                                     );
                                 }
@@ -1186,23 +1178,20 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, on
 
                                 if (tool === 'web-search' || tool === 'websearch' || tool === 'search_web') {
                                     return (
-                                        renderWebSearchOutput(popup.content, syntaxTheme) || (
-                                            <SyntaxHighlighter
-                                                style={syntaxTheme}
+                                        renderWebSearchOutput(popup.content) || (
+                                            <WorkerHighlightedCode
                                                 language="text"
-                                                PreTag="div"
-                                                wrapLongLines
-                                                customStyle={toolDisplayStyles.getPopupContainerStyles()}
-                                                codeTagProps={DIALOG_CODE_TAG_PROPS}
-                                            >
-                                                {popup.content}
-                                            </SyntaxHighlighter>
+                                                code={popup.content}
+                                                style={toolDisplayStyles.getPopupContainerStyles()}
+                                                codeStyle={DIALOG_CODE_TAG_PROPS.style}
+                                                wrap
+                                            />
                                         )
                                     );
                                 }
 
                                 if (tool === 'read') {
-                                    return <DialogReadContent popup={popup} syntaxTheme={syntaxTheme} pierreThemeConfig={pierreThemeConfig} />;
+                                    return <DialogReadContent popup={popup} pierreThemeConfig={pierreThemeConfig} />;
                                 }
 
                                 // JSON tree viewer for generic JSON outputs
@@ -1218,16 +1207,13 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup: rawPopup, on
                                 }
 
                                 return (
-                                    <SyntaxHighlighter
-                                        style={syntaxTheme}
+                                    <WorkerHighlightedCode
                                         language={popup.language || 'text'}
-                                        PreTag="div"
-                                        wrapLongLines
-                                        customStyle={toolDisplayStyles.getPopupContainerStyles()}
-                                        codeTagProps={DIALOG_CODE_TAG_PROPS}
-                                    >
-                                        {popup.content}
-                                    </SyntaxHighlighter>
+                                        code={popup.content}
+                                        style={toolDisplayStyles.getPopupContainerStyles()}
+                                        codeStyle={DIALOG_CODE_TAG_PROPS.style}
+                                        wrap
+                                    />
                                 );
                             })()}
                         </div>

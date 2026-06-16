@@ -76,15 +76,7 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },
   optimizeDeps: {
-    include: [
-      '@opencode-ai/sdk/v2',
-      // Pre-bundle the on-demand Prism highlighter so its core + the small set
-      // of languages actually rendered are served as a handful of chunks. The
-      // full `react-syntax-highlighter` Prism build (refractor with ~200
-      // languages) is intentionally NOT pulled in — see
-      // packages/ui/src/components/chat/syntaxHighlighterAsync.ts.
-      'react-syntax-highlighter/dist/esm/prism-async-light',
-    ],
+    include: ['@opencode-ai/sdk/v2'],
   },
   server: {
     port: 5173,
@@ -150,7 +142,7 @@ export default defineConfig({
           if (packageName === '@opencode-ai/sdk') return 'vendor-opencode-sdk';
           if (packageName.includes('remark') || packageName.includes('rehype') || packageName === 'react-markdown' || packageName === 'micromark' || packageName.startsWith('micromark-') || packageName.startsWith('mdast-util-')) return 'vendor-markdown';
           if (packageName === '@base-ui/react' || packageName.startsWith('@base-ui')) return 'vendor-base-ui';
-          if (packageName.includes('react-syntax-highlighter') || packageName.includes('highlight.js') || packageName === 'lowlight') return 'vendor-syntax';
+          if (packageName === 'shiki' || packageName.startsWith('@shikijs') || packageName.includes('highlight.js') || packageName === 'lowlight') return 'vendor-syntax';
           if (packageName.startsWith('@radix-ui')) return 'vendor-radix';
           if (packageName === 'motion' || packageName === 'framer-motion') return 'vendor-motion';
           if (packageName === 'ghostty-web' || packageName.startsWith('xterm') || packageName === '@xterm') return 'vendor-terminal';

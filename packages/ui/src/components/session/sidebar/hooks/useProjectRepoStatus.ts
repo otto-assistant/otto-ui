@@ -11,16 +11,6 @@ type Args = {
   gitRepoStatus: Map<string, { isGitRepo: boolean | null; branch: string | null }>;
   setProjectRepoStatus: React.Dispatch<React.SetStateAction<Map<string, boolean | null>>>;
   setProjectRootBranches: React.Dispatch<React.SetStateAction<Map<string, string>>>;
-  /**
-   * Only projects in this set get an immediate git probe + root-branch
-   * fetch. Other projects fall back to a "null" status until the user
-   * actually expands them. Without this gate the sidebar would fire
-   * 2–4 git exec calls per registered project on every mount — with
-   * 50+ projects that's hundreds of failing /api/fs/exec requests
-   * (and corresponding server-side path resolution work) before the
-   * user has done anything.
-   */
-  visibleProjectIds: Set<string> | null;
 };
 
 export const useProjectRepoStatus = (args: Args): void => {
@@ -29,36 +19,25 @@ export const useProjectRepoStatus = (args: Args): void => {
     gitRepoStatus,
     setProjectRepoStatus,
     setProjectRootBranches,
-    visibleProjectIds,
   } = args;
 
   const { git } = useRuntimeAPIs();
   const ensureStatus = useGitStore((state) => state.ensureStatus);
 
-  const visibleProjects = React.useMemo(() => {
-    if (!visibleProjectIds || visibleProjectIds.size === 0) {
-      return normalizedProjects.slice(0, 0);
-    }
-    return normalizedProjects.filter((project) => visibleProjectIds.has(project.id));
-  }, [normalizedProjects, visibleProjectIds]);
-
   // Derive repo status from centralized Git store
   React.useEffect(() => {
-    if (!git || visibleProjects.length === 0) {
+    if (!git || normalizedProjects.length === 0) {
+      setProjectRepoStatus(new Map());
       return;
     }
 
-    // Trigger ensureStatus only for visible projects (the active one
-    // plus any whose section the user has expanded). The Git store
-    // dedupes inflight + caches per-directory so cheap to re-fire.
-    visibleProjects.forEach((project) => {
+    // Trigger ensureStatus for each project to populate store
+    normalizedProjects.forEach((project) => {
       void ensureStatus(project.normalizedPath, git);
     });
-  }, [visibleProjects, git, ensureStatus]);
+  }, [normalizedProjects, git, ensureStatus, setProjectRepoStatus]);
 
-  // Read isGitRepo from the store-populated state. We surface a status
-  // for *every* project so the icon/UI doesn't flash — projects not
-  // yet probed simply report `null` ("unknown") until the user expands.
+  // Read isGitRepo from the store-populated state
   React.useEffect(() => {
     const next = new Map<string, boolean | null>();
     normalizedProjects.forEach((project) => {
@@ -68,13 +47,13 @@ export const useProjectRepoStatus = (args: Args): void => {
   }, [normalizedProjects, gitRepoStatus, setProjectRepoStatus]);
 
   const projectGitBranchesKey = React.useMemo(() => {
-    return visibleProjects
+    return normalizedProjects
       .map((project) => {
         const branch = gitRepoStatus.get(project.normalizedPath)?.branch ?? '';
         return `${project.id}:${branch}`;
       })
       .join('|');
-  }, [visibleProjects, gitRepoStatus]);
+  }, [normalizedProjects, gitRepoStatus]);
 
   // Tracks the project path + input branch we last resolved against, per project.
   // Used to resolve `getRootBranch` only for projects that are new or whose
@@ -82,10 +61,7 @@ export const useProjectRepoStatus = (args: Args): void => {
   // any single project's branch settles (the old N² cascade).
   const resolvedInputKeyByProjectId = React.useRef<Map<string, string>>(new Map());
 
-  const hasVisibleProjects = visibleProjects.length > 0;
-
   React.useEffect(() => {
-    if (!hasVisibleProjects) return;
     let cancelled = false;
 
     // Debounce so the initial burst of per-project `ensureStatus` updates
@@ -157,5 +133,5 @@ export const useProjectRepoStatus = (args: Args): void => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [hasVisibleProjects, normalizedProjects, projectGitBranchesKey, gitRepoStatus, setProjectRootBranches]);
+  }, [normalizedProjects, projectGitBranchesKey, gitRepoStatus, setProjectRootBranches]);
 };

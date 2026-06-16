@@ -349,7 +349,7 @@ describe('renderQuestionForMessenger', () => {
 });
 
 describe('renderTodoListForMessenger', () => {
-  it('renders a checklist with status icons and a done counter', () => {
+  it('renders a checklist with status icons, a done counter and progress bar', () => {
     const out = renderTodoListForMessenger([
       { content: 'Set up scaffolding', status: 'completed', priority: 'high' },
       { content: 'Implement API client', status: 'in_progress', priority: 'high' },
@@ -357,10 +357,15 @@ describe('renderTodoListForMessenger', () => {
       { content: 'Old approach', status: 'cancelled', priority: 'low' },
     ]);
     expect(out).toContain('📋 **Plan** — 1/4 done');
+    // Progress bar: 1 of 4 done → 25% → one filled segment of five.
+    expect(out).toContain('`▰▱▱▱▱` 25%');
     expect(out).toContain('✅ ~~Set up scaffolding~~');
-    expect(out).toContain('🔄 Implement API client');
+    // The in-progress item is bolded so the current focus stands out.
+    expect(out).toContain('🔄 **Implement API client**');
     expect(out).toContain('⬜ Write tests');
     expect(out).toContain('🚫 ~~Old approach~~');
+    // A blank separator sits between the header and the checklist.
+    expect(out).toMatch(/done.*%\n\n✅/s);
   });
 
   it('returns null for empty or content-less lists', () => {
