@@ -2269,6 +2269,15 @@ export function createMessengerOpencodeBridge({
         always: Array.isArray(props?.always) ? props.always : [],
       };
 
+      // Dedupe against the reconciliation safety net: whichever path (live SSE
+      // or reconcile) reaches a given request id first wins; the other skips.
+      // Recorded synchronously before the async send so a concurrent reconcile
+      // pass can't double-surface the same permission.
+      if (permission.id) {
+        if (forwardedPermissionIds.has(permission.id)) return;
+        forwardedPermissionIds.add(permission.id);
+      }
+
       // Resolve the directory OpenCode needs for the reply. Priority:
       //   1. the event envelope's directory (authoritative)
       //   2. directory already present on the permission metadata
@@ -2293,9 +2302,12 @@ export function createMessengerOpencodeBridge({
         directory: replyDirectory,
       }).then((result) => {
         if (result && !result.ok) {
+          // Release the dedupe slot so a later reconcile pass can retry.
+          if (permission.id) forwardedPermissionIds.delete(permission.id);
           console.error('[PERMISSION] Failed to send approval to surface:', result.error);
         }
       }).catch((err) => {
+        if (permission.id) forwardedPermissionIds.delete(permission.id);
         console.error('[PERMISSION] sendApprovalToSurface threw:', err?.message ?? err);
       });
       return;
@@ -2344,6 +2356,10 @@ export function createMessengerOpencodeBridge({
       };
       if (!request.id || request.questions.length === 0) return;
 
+      // Dedupe against the reconciliation safety net (see permission.asked).
+      if (forwardedQuestionIds.has(request.id)) return;
+      forwardedQuestionIds.add(request.id);
+
       const replyDirectory = envelopeDirectory || ctx.projectPath || null;
       console.log('[QUESTION]', `session=${sessionId} request=${request.id} questions=${request.questions.length} dir=${replyDirectory ?? 'none'}`);
 
@@ -2356,9 +2372,11 @@ export function createMessengerOpencodeBridge({
         directory: replyDirectory,
       }).then((result) => {
         if (result && !result.ok) {
+          if (request.id) forwardedQuestionIds.delete(request.id);
           console.error('[QUESTION] Failed to send question to surface:', result.error);
         }
       }).catch((err) => {
+        if (request.id) forwardedQuestionIds.delete(request.id);
         console.error('[QUESTION] sendQuestionToSurface threw:', err?.message ?? err);
       });
       return;
@@ -2391,11 +2409,164 @@ export function createMessengerOpencodeBridge({
     }
   }
 
+  // ── Pending approval/question reconciliation ──────────────────────────
+  // SSE delivery of `permission.asked` / `question.asked` is best-effort: the
+  // upstream OpenCode `/global/event` stream can drop and reconnect during a
+  // long agent turn, and any interactive event emitted inside that gap is lost
+  // — leaving the agent blocked on a reply the messenger never surfaced (the
+  // request just hangs; switching to the web UI shows it pending). The web UI
+  // recovers because it re-lists pending permissions/questions on resync; the
+  // bridge had no equivalent safety net. We re-list pending items for every
+  // bound directory (periodically and on every stream reconnect) and forward
+  // anything not already sent. `forwarded*Ids` dedupes against the live SSE
+  // path so a permission is never surfaced twice.
+  const RECONCILE_INTERVAL_MS = 15_000;
+  const forwardedPermissionIds = new Set();
+  const forwardedQuestionIds = new Set();
+  let reconcileTimer = null;
+  let reconcileInFlight = false;
+
+  function collectBoundDirectories() {
+    const directories = new Set();
+    try {
+      for (const row of bridgeStore.list()) {
+        if (row?.sessionId && typeof row.projectPath === 'string' && row.projectPath) {
+          directories.add(row.projectPath);
+        }
+      }
+    } catch {
+      // store read failed — fall back to whatever live contexts we have
+    }
+    for (const ctx of sessionContexts.values()) {
+      if (ctx?.projectPath) directories.add(ctx.projectPath);
+    }
+    // Query the unscoped endpoint last so a directory-attributed result wins
+    // over the global one (first-seen wins below); it backstops anything not
+    // tied to a known directory.
+    directories.add('');
+    return directories;
+  }
+
+  // Returns the parsed array, or null when the fetch itself failed — so the
+  // caller can preserve dedupe state instead of pruning on a transient blip
+  // (mirrors the "distinguish fetch failure from empty success" rule).
+  async function listPendingInteractions(kind, directory) {
+    const dirParam = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+    let res;
+    try {
+      res = await opencodeFetch(`/${kind}${dirParam}`, { method: 'GET' });
+    } catch {
+      return null;
+    }
+    if (!res.ok) return null;
+    try {
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
+    } catch {
+      return null;
+    }
+  }
+
+  async function reconcilePendingInteractions() {
+    if (reconcileInFlight || !globalEventHub) return;
+    reconcileInFlight = true;
+    try {
+      const directories = collectBoundDirectories();
+
+      // ── Permissions ──
+      const pendingPermissions = new Map(); // id → { item, directory }
+      let permFetchOk = false;
+      for (const directory of directories) {
+        const list = await listPendingInteractions('permission', directory);
+        if (list === null) continue;
+        permFetchOk = true;
+        for (const item of list) {
+          if (item && typeof item.id === 'string' && item.id && !pendingPermissions.has(item.id)) {
+            pendingPermissions.set(item.id, { item, directory: directory || null });
+          }
+        }
+      }
+      if (permFetchOk) {
+        for (const id of [...forwardedPermissionIds]) {
+          if (!pendingPermissions.has(id)) forwardedPermissionIds.delete(id);
+        }
+        for (const [id, { item, directory }] of pendingPermissions) {
+          if (forwardedPermissionIds.has(id)) continue;
+          const replyDirectory = directory
+            || (typeof item?.metadata?.directory === 'string' ? item.metadata.directory : undefined);
+          try {
+            console.log('[RECONCILE]', `forwarding missed permission ${id} session=${item?.sessionID ?? 'unknown'}`);
+            await handleGlobalEvent({
+              directory: replyDirectory,
+              payload: { type: 'permission.asked', properties: item },
+            });
+          } catch (err) {
+            console.error('[RECONCILE] permission forward failed:', err?.message ?? err);
+          }
+        }
+      }
+
+      // ── Questions ──
+      const pendingQuestions = new Map();
+      let questionFetchOk = false;
+      for (const directory of directories) {
+        const list = await listPendingInteractions('question', directory);
+        if (list === null) continue;
+        questionFetchOk = true;
+        for (const item of list) {
+          if (item && typeof item.id === 'string' && item.id && !pendingQuestions.has(item.id)) {
+            pendingQuestions.set(item.id, { item, directory: directory || null });
+          }
+        }
+      }
+      if (questionFetchOk) {
+        for (const id of [...forwardedQuestionIds]) {
+          if (!pendingQuestions.has(id)) forwardedQuestionIds.delete(id);
+        }
+        for (const [id, { item, directory }] of pendingQuestions) {
+          if (forwardedQuestionIds.has(id)) continue;
+          try {
+            console.log('[RECONCILE]', `forwarding missed question ${id} session=${item?.sessionID ?? 'unknown'}`);
+            await handleGlobalEvent({
+              directory: directory ?? undefined,
+              payload: { type: 'question.asked', properties: item },
+            });
+          } catch (err) {
+            console.error('[RECONCILE] question forward failed:', err?.message ?? err);
+          }
+        }
+      }
+    } finally {
+      reconcileInFlight = false;
+    }
+  }
+
+  let unsubscribeStatus = null;
   let unsubscribe = null;
   function ensureSubscribed() {
     if (unsubscribe) return;
     if (!globalEventHub) return;
     unsubscribe = globalEventHub.subscribeEvent(handleGlobalEvent);
+
+    // Catch up immediately whenever the upstream stream (re)connects — a
+    // reconnect means interactive events may have been missed during the gap.
+    if (typeof globalEventHub.subscribeStatus === 'function' && !unsubscribeStatus) {
+      unsubscribeStatus = globalEventHub.subscribeStatus((status) => {
+        if (status?.type === 'connect') void reconcilePendingInteractions();
+      });
+    }
+
+    // Periodic safety net for events missed without an observable disconnect.
+    if (!reconcileTimer) {
+      reconcileTimer = setInterval(() => {
+        void reconcilePendingInteractions();
+      }, RECONCILE_INTERVAL_MS);
+      if (typeof reconcileTimer.unref === 'function') reconcileTimer.unref();
+    }
+
+    // Surface anything already pending at subscribe time without waiting for
+    // the first interval.
+    void reconcilePendingInteractions();
   }
 
   /**
