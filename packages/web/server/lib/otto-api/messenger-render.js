@@ -61,6 +61,61 @@ export function clipBlock(s, limit) {
 }
 
 /**
+ * OpenCode injects this synthetic USER message whenever a shell command is run
+ * directly by the user (the web chat's `!cmd` mode and the messenger `/shell`
+ * command both route through `POST /session/:id/shell`). The text itself is an
+ * internal marker the agent reads — mirroring it verbatim into Discord just
+ * prints "The following tool was executed by the user" noise, so the bridge
+ * detects it and renders the command + output instead (see
+ * `renderUserShellResult`).
+ */
+export const USER_SHELL_MARKER = 'The following tool was executed by the user';
+
+export function isUserShellMarkerText(text) {
+  return typeof text === 'string' && text.trimStart().startsWith(USER_SHELL_MARKER);
+}
+
+/**
+ * Render a user-initiated shell command (`/shell` in a messenger, or `!cmd` in
+ * the web chat) as a compact Discord block: the command followed by its output.
+ *
+ * Unlike agent tool activity — which `quiet`/`normal` deliberately hide or
+ * compress — a shell command is something the user explicitly asked to run, so
+ * the command AND its result are always shown in full regardless of verbosity.
+ * The output is ANSI-stripped and fence-escaped so terminal colour codes and
+ * stray ``` don't corrupt the Discord code block.
+ */
+export function renderUserShellResult({ command = '', output = '', status = '' } = {}) {
+  const cmd = stripAnsi(command).trim();
+  const out = stripAnsi(output)
+    .replace(/```/g, "'''")
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const isError = String(status).trim().toLowerCase() === 'error';
+  if (!cmd && !out) {
+    // Nothing useful to show — surface at least the status so the run isn't silent.
+    return isError ? '✗ **shell** — command failed' : null;
+  }
+
+  let header = isError ? '✗ **shell**' : '⬦ **shell**';
+  const blocks = [];
+  if (cmd) {
+    if (cmd.includes('\n')) {
+      blocks.push('```bash\n' + clipBlock(cmd, 600) + '\n```');
+    } else {
+      header += ` \`${clipBlock(cmd, 300)}\``;
+    }
+  }
+  if (out) {
+    blocks.push('```\n' + clipBlock(out, 1500) + '\n```');
+  } else if (isError) {
+    blocks.push('_(no output — command failed)_');
+  }
+  return [header, ...blocks].join('\n');
+}
+
+/**
  * Render a PermissionRequest into a rich Discord prompt.
  * Mirrors the same tool-specific context as the web UI's PermissionCard.
  * Returns a plain text + markdown string suitable for an approval message footer.

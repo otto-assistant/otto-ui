@@ -38,6 +38,13 @@ export function buildSlashCommandDefinitions() {
     },
     { name: 'init', description: 'Run OpenCode init (creates/updates AGENTS.md)' },
     { name: 'review', description: 'Run the OpenCode review workflow' },
+    {
+      name: 'shell',
+      description: 'Run a shell command in the project and show its output',
+      options: [
+        { type: STRING_OPTION, name: 'command', description: 'The shell command to run (e.g. pwd)', required: true },
+      ],
+    },
     { name: 'model', description: 'Pick the model for this conversation (or set a project default)' },
     { name: 'agent', description: 'Pick the agent for this conversation (or set a project default)' },
     { name: 'verbosity', description: 'Choose how much Otto streams back (this chat or everywhere)' },

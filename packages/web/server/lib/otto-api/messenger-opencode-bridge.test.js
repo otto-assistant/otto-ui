@@ -322,6 +322,58 @@ describe('web session mirroring', () => {
     expect(JSON.parse(threadMessageCalls[1][1].body).content).toContain('hello from assistant');
   });
 
+  it('renders a user-run shell command as a clean command + output block (no marker noise)', async () => {
+    const bridge = makeWebBridge();
+    const sessionId = 'web-ses-shell';
+
+    // 1. The synthetic shell-marker user message OpenCode injects for a
+    //    user-run shell command (web `!cmd` / messenger `/shell`).
+    await emitUserMessage(bridge, {
+      sessionId,
+      messageId: 'm-shell-user',
+      partId: 'shell-usr',
+      text: 'The following tool was executed by the user\n\n<bash>',
+    });
+
+    // 2. The assistant echo: parentID points back at the marker message and the
+    //    sole part is the bash tool carrying the command + output.
+    await bridge._handleGlobalEvent({
+      directory: '/web/project',
+      payload: {
+        type: 'message.updated',
+        properties: { info: { id: 'm-shell-ast', role: 'assistant', parentID: 'm-shell-user', sessionID: sessionId } },
+      },
+    });
+    await bridge._handleGlobalEvent({
+      directory: '/web/project',
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'shell-bash',
+            type: 'tool',
+            tool: 'bash',
+            messageID: 'm-shell-ast',
+            sessionID: sessionId,
+            state: { status: 'completed', input: { command: 'pwd' }, output: '/web/project' },
+          },
+        },
+      },
+    });
+
+    const messages = globalThis.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/messages'))
+      .map(([, init]) => JSON.parse(init.body).content);
+
+    // The internal marker is never mirrored as a Web prompt block.
+    expect(messages.some((c) => c.includes('The following tool was executed by the user'))).toBe(false);
+    // The command + its output ARE posted, as a single shell block.
+    const shellBlock = messages.find((c) => c.includes('**shell**'));
+    expect(shellBlock).toBeTruthy();
+    expect(shellBlock).toContain('`pwd`');
+    expect(shellBlock).toContain('/web/project');
+  });
+
   it('mirrors a web user message when the part arrives before the role event', async () => {
     const bridge = makeWebBridge();
 
