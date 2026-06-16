@@ -6,6 +6,7 @@ import {
 } from '@/stores/useOttoEventsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { useMessengerStore } from '@/stores/useMessengerStore';
 
 /**
  * Surface incoming bridge events to the OpenChamber user via toasts so a
@@ -69,6 +70,57 @@ export function useMessengerBridgeToasts() {
               }
             : undefined,
           duration: 12000,
+        });
+        return;
+      }
+      if (event.eventType === 'messenger.bridge.project_channel_renamed') {
+        const data = event.data as
+          | {
+              source?: string;
+              projectPath?: string | null;
+              projectLabel?: string | null;
+            }
+          | undefined;
+        // Only react to Discord-originated renames; UI-originated ones already
+        // updated the project locally.
+        if (!data || data.source !== 'discord' || !data.projectPath || !data.projectLabel) return;
+        const project = useProjectsStore
+          .getState()
+          .projects.find((p) => p.path === data.projectPath);
+        if (!project || (project.label ?? '') === data.projectLabel) return;
+        useProjectsStore.getState().updateProjectMeta(project.id, { label: data.projectLabel });
+        useMessengerStore.getState().setProjectMapping({
+          projectId: project.id,
+          projectLabel: data.projectLabel,
+          discord: useMessengerStore.getState().projectMappings.find((m) => m.projectId === project.id)
+            ?.discord,
+        });
+        toast.info(`Discord → ${data.projectLabel}`, {
+          description: 'Project renamed to match its Discord channel.',
+          duration: 8000,
+        });
+        return;
+      }
+      if (event.eventType === 'messenger.bridge.project_channel_removed') {
+        const data = event.data as
+          | {
+              source?: string;
+              projectPath?: string | null;
+              projectLabel?: string | null;
+            }
+          | undefined;
+        // Only react to Discord-originated deletions. We unlink (drop the
+        // channel mapping) but keep the project + its sessions in the workspace.
+        if (!data || data.source !== 'discord' || !data.projectPath) return;
+        const project = useProjectsStore
+          .getState()
+          .projects.find((p) => p.path === data.projectPath);
+        if (!project) return;
+        useMessengerStore.getState().removeProjectMapping(project.id);
+        const projectName = data.projectLabel ?? project.label ?? project.path;
+        toast.warning(`Discord channel for ${projectName} was deleted`, {
+          description: 'The project is no longer linked to a Discord channel.',
+          duration: 10000,
         });
         return;
       }

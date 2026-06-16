@@ -58,6 +58,28 @@ function tokenHash(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 12);
 }
 
+/** Slug a project label into a Discord channel name (matches messenger-sync.js). */
+function slugifyProjectLabel(label) {
+  return (
+    String(label ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 90) || 'project'
+  );
+}
+
+/** Best-effort human label from a Discord channel name (inverse of slug). */
+function labelFromChannelName(name) {
+  return (
+    String(name ?? '')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase()) || 'Project'
+  );
+}
+
 /**
  * Stable key identifying a conversation surface. We want the SAME key
  * whether the gateway delivers a brand-new message in a parent channel
@@ -434,6 +456,12 @@ export function createMessengerOpencodeBridge({
    * and for resolving the bot token when scheduled tasks fire.
    */
   readSettings = null,
+  /**
+   * Optional settings writer (async (partial) => void). Used to keep
+   * settings.discord.projectBindings in sync when a project's Discord channel
+   * is renamed or deleted IN Discord (the two-way half of project↔channel sync).
+   */
+  persistSettings = null,
   /**
    * Optional base URL of this OpenChamber server (e.g. http://127.0.0.1:3001).
    * Injected into new sessions so the agent can self-serve scheduling via the
@@ -3841,6 +3869,107 @@ export function createMessengerOpencodeBridge({
    * Called from the Discord listener on THREAD_DELETE (deleted) and
    * THREAD_UPDATE-archived (archived) gateway events.
    */
+  /**
+   * Read the persisted Discord project→channel bindings. Returns a usable shape
+   * even when settings access is unavailable so callers can no-op safely.
+   */
+  async function readDiscordBindings() {
+    if (typeof readSettings !== 'function') return null;
+    try {
+      const settings = await readSettings();
+      const discord = settings?.discord ?? {};
+      const bindings = Array.isArray(discord.projectBindings) ? discord.projectBindings : [];
+      return { discord, bindings };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Persist an updated bindings list, preserving the rest of the Discord block. */
+  async function persistDiscordBindings(nextBindings, discord) {
+    if (typeof persistSettings !== 'function') return;
+    const normalized = (Array.isArray(nextBindings) ? nextBindings : [])
+      .filter((b) => b && b.channelId && b.projectPath)
+      .map((b) => ({
+        channelId: String(b.channelId),
+        projectPath: String(b.projectPath),
+        projectLabel: b.projectLabel ? String(b.projectLabel) : undefined,
+      }));
+    try {
+      await persistSettings({
+        discord: { ...discord, projectBindings: normalized.length > 0 ? normalized : undefined },
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * A project's Discord channel was DELETED in Discord (gateway CHANNEL_DELETE).
+   * Drop the persisted project→channel binding and the channel-level store
+   * pre-bind, then broadcast so the web UI can unlink the project. We do NOT
+   * delete the OpenChamber project itself — unlinking is the safe, reversible
+   * mirror of a channel deletion (the workspace entry and its sessions stay).
+   */
+  async function handleChannelDeleted({ channelId, token }) {
+    if (!channelId) return { ok: false };
+    // Always clear the channel-level pre-bind for this token.
+    if (token) {
+      try {
+        bridgeStore.unbind({ type: 'discord', botTokenHash: tokenHash(token), targetKey: String(channelId) });
+      } catch {
+        // best-effort
+      }
+    }
+    const snap = await readDiscordBindings();
+    if (!snap) return { ok: false };
+    const match = snap.bindings.find((b) => b && String(b.channelId) === String(channelId));
+    if (!match) return { ok: true, matched: false };
+    await persistDiscordBindings(
+      snap.bindings.filter((b) => String(b?.channelId) !== String(channelId)),
+      snap.discord,
+    );
+    broadcastEvent?.('messenger.bridge.project_channel_removed', {
+      type: 'discord',
+      source: 'discord',
+      channelId: String(channelId),
+      projectPath: match.projectPath ?? null,
+      projectLabel: match.projectLabel ?? null,
+    });
+    return { ok: true, matched: true, projectPath: match.projectPath ?? null };
+  }
+
+  /**
+   * A project's Discord channel was RENAMED in Discord (gateway CHANNEL_UPDATE).
+   * Update the persisted binding's projectLabel and broadcast so the web UI can
+   * relabel the matching project. No-ops (no broadcast) when the new name still
+   * slugs to the current label, which keeps a UI-originated rename from echoing.
+   */
+  async function handleChannelRenamed({ channelId, name }) {
+    if (!channelId || !name) return { ok: false };
+    const snap = await readDiscordBindings();
+    if (!snap) return { ok: false };
+    const idx = snap.bindings.findIndex((b) => b && String(b.channelId) === String(channelId));
+    if (idx === -1) return { ok: true, matched: false };
+    const match = snap.bindings[idx];
+    if (slugifyProjectLabel(match.projectLabel ?? '') === slugifyProjectLabel(name)) {
+      return { ok: true, matched: true, changed: false };
+    }
+    const nextLabel = labelFromChannelName(name);
+    const next = snap.bindings.slice();
+    next[idx] = { ...match, projectLabel: nextLabel };
+    await persistDiscordBindings(next, snap.discord);
+    broadcastEvent?.('messenger.bridge.project_channel_renamed', {
+      type: 'discord',
+      source: 'discord',
+      channelId: String(channelId),
+      channelName: String(name),
+      projectPath: match.projectPath ?? null,
+      projectLabel: nextLabel,
+    });
+    return { ok: true, matched: true, changed: true };
+  }
+
   function handleThreadDeleted({ type, threadId, token, reason = 'deleted' }) {
     const bindings = bridgeStore.findByTargetKey({ type, targetKey: threadId });
 
@@ -3952,6 +4081,8 @@ export function createMessengerOpencodeBridge({
     handleQuestionDecision,
     handleThreadDeleted,
     handleSessionDeleted,
+    handleChannelDeleted,
+    handleChannelRenamed,
     /** Mention-only mode — checked by the Discord listener. */
     getMentionMode,
     /** Whether a surface already has a session binding (mention mode skips bound threads). */

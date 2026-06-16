@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express, { Router } from 'express';
 import {
   createDiscordListenerRegistry,
@@ -24,6 +25,38 @@ function friendlyDiscordError(status, rawText) {
   if (status === 404) return 'Not found. Double-check the ID (right-click → Copy ID in Discord).';
   if (status === 429) return 'Rate-limited by Discord. Wait a few seconds and retry.';
   return trimmed || `HTTP ${status}`;
+}
+
+/**
+ * Slugify a project label into a Discord channel name. Discord lowercases and
+ * hyphenates channel names anyway, so we normalise here for find-by-name and
+ * create parity. Kept identical to the inline slug used by `/discord/sync-projects`
+ * so a project resolves to the same channel regardless of which path created it.
+ */
+function slugifyProjectLabel(label) {
+  return (
+    String(label ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 90) || 'project'
+  );
+}
+
+/** Inverse of `slugifyProjectLabel` — best-effort human label from a channel name. */
+function labelFromChannelName(name) {
+  return (
+    String(name ?? '')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase()) || 'Project'
+  );
+}
+
+/** Short, stable hash of a bot token — matches the bridge store key scheme. */
+function discordTokenHash(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 12);
 }
 
 export function createMessengerSyncRouter({
@@ -253,6 +286,10 @@ export function createMessengerSyncRouter({
           getDefaultMessengerTarget: readSettings ? resolveDefaultDiscordTarget : null,
           // Settings access for voice-message STT (sttServerUrl/sttModel/sttLanguage).
           readSettings,
+          // Lets the bridge keep settings.discord.projectBindings in sync when a
+          // Discord channel that maps to a project is renamed/deleted in Discord
+          // (the two-way half of project↔channel sync).
+          persistSettings,
           getLocalApiBaseUrl,
           projectConfigRuntime,
           scheduledTasksRuntime,
@@ -986,68 +1023,170 @@ export function createMessengerSyncRouter({
   });
 
   /**
-   * Called by the server when a brand-new project is added to settings.
-   * Creates a matching surface in every connected messenger:
-   *   - Discord: a new text channel named after the project's slug, posted
-   *     in the configured guild + parent category.
-   * Best-effort — failures are reported but don't block the project create.
+   * Read the persisted Discord block + its project→channel bindings array.
+   * Always returns a usable shape, even when settings access is unavailable.
+   */
+  async function loadDiscordSettings() {
+    if (!readSettings) return { discord: {}, bindings: [] };
+    try {
+      const settings = await readSettings();
+      const discord = settings?.discord ?? {};
+      const bindings = Array.isArray(discord.projectBindings) ? discord.projectBindings : [];
+      return { discord, bindings };
+    } catch {
+      return { discord: {}, bindings: [] };
+    }
+  }
+
+  /**
+   * Persist a fresh project→channel binding list, preserving the rest of the
+   * Discord block. Filters to valid entries and drops the key entirely when the
+   * list is empty so settings stay clean. Best-effort.
+   */
+  async function saveProjectBindings(nextBindings, discord) {
+    if (!persistSettings) return;
+    const normalized = (Array.isArray(nextBindings) ? nextBindings : [])
+      .filter((b) => b && b.channelId && b.projectPath)
+      .map((b) => ({
+        channelId: String(b.channelId),
+        projectPath: String(b.projectPath),
+        projectLabel: b.projectLabel ? String(b.projectLabel) : undefined,
+      }));
+    try {
+      await persistSettings({
+        discord: {
+          ...discord,
+          projectBindings: normalized.length > 0 ? normalized : undefined,
+        },
+      });
+    } catch {
+      // best-effort — a failed persist must not break the API response
+    }
+  }
+
+  /** Upsert a project→channel binding by project path. */
+  function upsertBinding(bindings, { channelId, projectPath, projectLabel }) {
+    const next = bindings.filter(
+      (b) => b && b.projectPath !== projectPath && String(b.channelId) !== String(channelId),
+    );
+    next.push({ channelId: String(channelId), projectPath, projectLabel });
+    return next;
+  }
+
+  /**
+   * Find-or-create the Discord text channel that mirrors a project, persist the
+   * project→channel binding, and pre-bind it in the bridge store so the first
+   * web/Discord message lands in the project's own channel instead of #general.
+   *
+   * Idempotent: an existing binding or a channel matching the project slug is
+   * reused rather than duplicated. Best-effort — failures are reported but never
+   * throw, so the UI project-add flow is never blocked.
    */
   async function autoCreateMessengerSurfacesForProject(project, opts = {}) {
     const results = [];
     if (!project || !project.path) return results;
     const projectLabel = project.label ?? project.path.split('/').pop() ?? project.path;
-    const slug = (projectLabel || 'project')
-      .toLowerCase()
-      .replace(/[^a-z0-9-]+/g, '-')
-      .replace(/^-+|-+$/g, '');
+    const slug = slugifyProjectLabel(projectLabel);
 
     const discord = opts.discord ?? null;
     if (discord?.token && discord?.guildId) {
+      const headers = {
+        Authorization: `Bot ${discord.token}`,
+        'Content-Type': 'application/json',
+      };
+      const { discord: discordSettings, bindings } = await loadDiscordSettings();
+      const existingBinding = bindings.find(
+        (b) => b && b.channelId && b.projectPath === project.path,
+      );
+
+      let channelId = null;
+      let channelName = null;
+      let created = false;
+      let error = null;
+
+      // 1) Reuse an existing channel: the persisted binding's channel if it
+      //    still exists, otherwise a text channel whose name matches the slug.
       try {
-        const channel = await fetch(
+        const listResp = await fetch(
           `https://discord.com/api/v10/guilds/${encodeURIComponent(discord.guildId)}/channels`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bot ${discord.token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              name: slug,
-              type: 0,
-              parent_id: discord.parentCategoryId ?? null,
-              topic: `Otto sync channel for ${projectLabel}`.slice(0, 1024),
-            }),
-          },
+          { headers: { Authorization: `Bot ${discord.token}` } },
         );
-        if (channel.ok) {
-          const data = await channel.json();
-          results.push({ type: 'discord', ok: true, channelId: data.id, channelName: data.name });
-          // Pre-bind so the bridge skips the "no project" dialogue for first message.
-          if (bridge?.store) {
-            const tokenHash = (await import('node:crypto'))
-              .createHash('sha256')
-              .update(discord.token)
-              .digest('hex')
-              .slice(0, 12);
-            bridge.store.bind({
-              type: 'discord',
-              botTokenHash: tokenHash,
-              targetKey: data.id,
-              sessionId: '', // session is lazily created on first message
-              projectPath: project.path,
-              projectLabel,
-            });
+        if (listResp.ok) {
+          const channels = await listResp.json();
+          const list = Array.isArray(channels) ? channels : [];
+          const byId = existingBinding
+            ? list.find((c) => String(c.id) === String(existingBinding.channelId))
+            : null;
+          const byName = list.find(
+            (c) => (c.type === 0 || c.type === 5) && String(c.name).toLowerCase() === slug,
+          );
+          const match = byId ?? byName ?? null;
+          if (match) {
+            channelId = match.id;
+            channelName = match.name;
           }
-        } else {
-          results.push({
+        }
+      } catch {
+        // best-effort — fall through to create
+      }
+
+      // 2) Create the channel when nothing usable exists yet.
+      if (!channelId) {
+        try {
+          const cResp = await fetch(
+            `https://discord.com/api/v10/guilds/${encodeURIComponent(discord.guildId)}/channels`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                name: slug,
+                type: 0,
+                parent_id: discord.parentCategoryId ?? null,
+                topic: `Otto sync channel for ${projectLabel}`.slice(0, 1024),
+              }),
+            },
+          );
+          if (cResp.ok) {
+            const data = await cResp.json();
+            channelId = data.id;
+            channelName = data.name;
+            created = true;
+          } else {
+            error = `Discord: ${cResp.status} — ${friendlyDiscordError(cResp.status, await cResp.text())}`;
+          }
+        } catch (err) {
+          error = err?.message ?? 'create-channel failed';
+        }
+      }
+
+      if (channelId) {
+        results.push({
+          type: 'discord',
+          ok: true,
+          channelId: String(channelId),
+          channelName: channelName ?? slug,
+          created,
+        });
+        // Pre-bind so the bridge skips the "no project" dialogue for first message.
+        if (bridge?.store) {
+          bridge.store.bind({
             type: 'discord',
-            ok: false,
-            error: `Discord ${channel.status}: ${(await channel.text()).slice(0, 200)}`,
+            botTokenHash: discordTokenHash(discord.token),
+            targetKey: String(channelId),
+            sessionId: '', // session is lazily created on first message
+            projectPath: project.path,
+            projectLabel,
           });
         }
-      } catch (err) {
-        results.push({ type: 'discord', ok: false, error: err?.message ?? 'create-channel failed' });
+        // Persist the project→channel binding so web conversations route into
+        // this channel and the listener routes inbound back to this project —
+        // without needing a manual "Sync now".
+        await saveProjectBindings(
+          upsertBinding(bindings, { channelId, projectPath: project.path, projectLabel }),
+          discordSettings,
+        );
+      } else {
+        results.push({ type: 'discord', ok: false, error: error ?? 'create-channel failed' });
       }
     }
 
@@ -1074,6 +1213,167 @@ export function createMessengerSyncRouter({
     }
     const results = await autoCreateMessengerSurfacesForProject(project, { discord });
     res.json({ ok: results.every((r) => r.ok), results });
+  });
+
+  /**
+   * The UI renamed a project → rename its Discord channel to match and update
+   * the persisted projectLabel on the binding. Creates the channel when the
+   * project has no binding yet (so renaming a project Otto never saw still
+   * produces a channel). Best-effort — Discord errors are reported, not thrown.
+   *
+   * Body: { project: { id?, path, label }, discord: { token, guildId?, parentCategoryId? } }
+   */
+  router.post('/bridge/project-renamed', async (req, res) => {
+    const { project, discord } = req.body ?? {};
+    if (!project || !project.path) {
+      return res.status(400).json({ ok: false, error: 'project { path, label } required' });
+    }
+    const token = discord?.token;
+    if (!token) {
+      return res.json({ ok: false, error: 'discord token required' });
+    }
+    const projectLabel = project.label ?? project.path.split('/').pop() ?? project.path;
+    const slug = slugifyProjectLabel(projectLabel);
+    const { discord: discordSettings, bindings } = await loadDiscordSettings();
+    const binding = bindings.find((b) => b && b.channelId && b.projectPath === project.path);
+
+    // No channel yet → create one (renaming an unmapped project should still
+    // bring it into the per-project channel model).
+    if (!binding) {
+      const results = await autoCreateMessengerSurfacesForProject(project, { discord });
+      const ok = results.find((r) => r.ok && r.channelId);
+      return res.json({
+        ok: Boolean(ok),
+        channelId: ok?.channelId ?? null,
+        channelName: ok?.channelName ?? null,
+        created: true,
+        error: ok ? null : results.find((r) => r.error)?.error ?? 'create failed',
+      });
+    }
+
+    const channelId = String(binding.channelId);
+    const headers = { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' };
+
+    // Skip the Discord PATCH when the channel name already matches the slug —
+    // this keeps a Discord-originated rename (which set the project label) from
+    // bouncing back as a redundant rename request.
+    let currentName = null;
+    try {
+      const gResp = await fetch(
+        `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+        { headers: { Authorization: `Bot ${token}` } },
+      );
+      if (gResp.ok) currentName = (await gResp.json())?.name ?? null;
+    } catch {
+      // best-effort
+    }
+
+    let renamed = false;
+    let error = null;
+    if (currentName !== slug) {
+      try {
+        const pResp = await fetch(
+          `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+          {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({
+              name: slug,
+              topic: `Otto sync channel for ${projectLabel}`.slice(0, 1024),
+            }),
+          },
+        );
+        if (pResp.ok) {
+          renamed = true;
+        } else {
+          error = `Discord: ${pResp.status} — ${friendlyDiscordError(pResp.status, await pResp.text())}`;
+        }
+      } catch (err) {
+        error = err?.message ?? 'rename failed';
+      }
+    }
+
+    // Keep the persisted label current regardless of whether the Discord rename
+    // succeeded — resolveProjectChannel + the listener read projectLabel from here.
+    await saveProjectBindings(
+      bindings.map((b) =>
+        b && b.projectPath === project.path ? { ...b, channelId, projectLabel } : b,
+      ),
+      discordSettings,
+    );
+
+    res.json({ ok: !error, channelId, channelName: slug, renamed, error });
+  });
+
+  /**
+   * The UI removed a project → delete its Discord channel and drop the binding.
+   * Best-effort — a missing channel (already deleted in Discord) still cleans up
+   * the local binding so state can't drift.
+   *
+   * Body: { project: { id?, path, channelId? }, discord: { token } }
+   */
+  router.post('/bridge/project-removed', async (req, res) => {
+    const { project, discord } = req.body ?? {};
+    if (!project || !project.path) {
+      return res.status(400).json({ ok: false, error: 'project { path } required' });
+    }
+    const token = discord?.token;
+    const { discord: discordSettings, bindings } = await loadDiscordSettings();
+    const binding = bindings.find((b) => b && b.channelId && b.projectPath === project.path);
+    const channelId = binding?.channelId
+      ? String(binding.channelId)
+      : project.channelId
+        ? String(project.channelId)
+        : null;
+
+    let deleted = false;
+    let error = null;
+    if (channelId && token && discord?.deleteChannel !== false) {
+      try {
+        const dResp = await fetch(
+          `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}`,
+          { method: 'DELETE', headers: { Authorization: `Bot ${token}` } },
+        );
+        // 404 = channel already gone; treat as success for cleanup purposes.
+        if (dResp.ok || dResp.status === 404) {
+          deleted = true;
+        } else {
+          error = `Discord: ${dResp.status} — ${friendlyDiscordError(dResp.status, await dResp.text())}`;
+        }
+      } catch (err) {
+        error = err?.message ?? 'delete failed';
+      }
+    }
+
+    // Drop the binding from settings and the bridge store regardless of the
+    // Discord delete result so the UI project removal is fully mirrored.
+    if (binding) {
+      await saveProjectBindings(
+        bindings.filter((b) => !(b && b.projectPath === project.path)),
+        discordSettings,
+      );
+    }
+    if (channelId && token && bridge?.store) {
+      try {
+        bridge.store.unbind({
+          type: 'discord',
+          botTokenHash: discordTokenHash(token),
+          targetKey: channelId,
+        });
+      } catch {
+        // best-effort
+      }
+    }
+
+    broadcastEvent?.('messenger.bridge.project_channel_removed', {
+      type: 'discord',
+      source: 'ui',
+      channelId,
+      projectPath: project.path,
+      projectLabel: binding?.projectLabel ?? null,
+    });
+
+    res.json({ ok: !error, channelId, deleted, error });
   });
 
   /**

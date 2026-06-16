@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { getSafeStorage } from './utils/safeStorage';
 import { useProjectsStore } from './useProjectsStore';
+import type { ProjectEntry } from '@/lib/api/types';
 
 export type MessengerType = 'discord';
 export type SyncMode = 'full' | 'notifications' | 'off';
@@ -297,6 +298,16 @@ interface MessengerState {
   clearApprovals: () => void;
   setProjectMapping: (mapping: ProjectMessengerMapping) => void;
   removeProjectMapping: (projectId: string) => void;
+  /**
+   * Project lifecycle → Discord channel sync. Called when a project is
+   * added/renamed/removed in the UI so each project gets its own channel
+   * (instead of web conversations dumping into the default/#general channel).
+   * No-ops unless a Discord connection with a bot token + Server ID is
+   * configured and project sync is enabled.
+   */
+  ensureProjectChannel: (project: ProjectEntry) => Promise<void>;
+  renameProjectChannel: (project: ProjectEntry) => Promise<void>;
+  removeProjectChannel: (projectId: string, projectPath: string) => Promise<void>;
   startOnboarding: (type: MessengerType) => void;
   nextOnboardingStep: () => void;
   finishOnboarding: () => void;
@@ -1146,6 +1157,88 @@ export const useMessengerStore = create<MessengerState>()(
         set({
           projectMappings: get().projectMappings.filter((m) => m.projectId !== projectId),
         });
+      },
+
+      ensureProjectChannel: async (project) => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        // Per-project channels require a server (guild). Without one we can only
+        // post to a single default channel, so leave the legacy behavior alone.
+        if (!conn?.botToken || !conn.discordGuildId || conn.syncProjects === false) return;
+        const projectLabel = project.label ?? project.path;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            results?: { ok: boolean; channelId?: string; channelName?: string }[];
+          }>('/api/otto/messenger/bridge/project-added', {
+            project: { id: project.id, path: project.path, label: projectLabel },
+            discord: {
+              token: conn.botToken,
+              guildId: conn.discordGuildId,
+              parentCategoryId: conn.discordParentCategoryId,
+            },
+          });
+          const created = data.results?.find((r) => r.ok && r.channelId);
+          if (created?.channelId) {
+            get().setProjectMapping({
+              projectId: project.id,
+              projectLabel,
+              discord: { channelId: created.channelId, channelName: created.channelName ?? '' },
+            });
+            get().saveDiscordConfig();
+          }
+        } catch {
+          // best-effort — channel sync must never break project creation
+        }
+      },
+
+      renameProjectChannel: async (project) => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken || !conn.discordGuildId || conn.syncProjects === false) return;
+        const projectLabel = project.label ?? project.path;
+        try {
+          const data = await postJson<{
+            ok: boolean;
+            channelId?: string | null;
+            channelName?: string | null;
+          }>('/api/otto/messenger/bridge/project-renamed', {
+            project: { id: project.id, path: project.path, label: projectLabel },
+            discord: {
+              token: conn.botToken,
+              guildId: conn.discordGuildId,
+              parentCategoryId: conn.discordParentCategoryId,
+            },
+          });
+          if (data.channelId) {
+            get().setProjectMapping({
+              projectId: project.id,
+              projectLabel,
+              discord: { channelId: data.channelId, channelName: data.channelName ?? '' },
+            });
+            get().saveDiscordConfig();
+          }
+        } catch {
+          // best-effort
+        }
+      },
+
+      removeProjectChannel: async (projectId, projectPath) => {
+        const conn = get().connections.find((c) => c.type === 'discord');
+        if (!conn?.botToken) {
+          get().removeProjectMapping(projectId);
+          return;
+        }
+        const channelId = get().projectMappings.find((m) => m.projectId === projectId)?.discord
+          ?.channelId;
+        try {
+          await postJson('/api/otto/messenger/bridge/project-removed', {
+            project: { id: projectId, path: projectPath, channelId },
+            discord: { token: conn.botToken },
+          });
+        } catch {
+          // best-effort — still drop the local mapping below
+        }
+        get().removeProjectMapping(projectId);
+        get().saveDiscordConfig();
       },
 
       startOnboarding: (type) => {
