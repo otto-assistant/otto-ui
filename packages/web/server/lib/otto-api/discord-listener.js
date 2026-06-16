@@ -799,6 +799,30 @@ function startSession(state, broadcastEvent, bridge) {
           void dispatchThreadDelete(state, payload.d, bridge, 'deleted');
           return;
         }
+        if (t === 'CHANNEL_DELETE') {
+          // A guild channel was deleted. If it maps to a project, the bridge
+          // drops the binding and tells the web UI to unlink that project
+          // (the two-way mirror of removing a project in the UI).
+          void bridge?.handleChannelDeleted?.({
+            channelId: payload.d?.id,
+            token: state.token,
+          });
+          return;
+        }
+        if (t === 'CHANNEL_UPDATE') {
+          // A guild text/announcement channel was edited. When the name of a
+          // project-bound channel changes, mirror the rename back into the
+          // project's label. The bridge no-ops for unbound channels.
+          const type = payload.d?.type;
+          if ((type === 0 || type === 5) && payload.d?.id && payload.d?.name) {
+            void bridge?.handleChannelRenamed?.({
+              channelId: payload.d.id,
+              name: payload.d.name,
+              token: state.token,
+            });
+          }
+          return;
+        }
         if (t === 'THREAD_UPDATE') {
           // When a thread is archived (not just edited), clean up bridge state
           // but DON'T delete the session — a thread can auto-archive after

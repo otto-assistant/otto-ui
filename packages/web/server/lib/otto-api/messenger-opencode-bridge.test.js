@@ -1574,3 +1574,294 @@ describe('/shell command — agent resolution (regression: empty agent 500s)', (
     expect(shellBody().command).toBe('echo hi');
   });
 });
+
+describe('project ↔ channel lifecycle endpoints', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function makeApp({ settings, persistSettings }) {
+    const app = express();
+    app.use(
+      '/',
+      createMessengerSyncRouter({
+        broadcastEvent: () => {},
+        readSettings: async () => settings,
+        persistSettings,
+        sanitizeProjects: (projects) => projects,
+      }).router,
+    );
+    return app;
+  }
+
+  it('project-added creates a channel and persists the binding', async () => {
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/guilds/guild-1/channels') && init?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ id: 'chan-new', name: 'my-proj' }), text: async () => '' };
+      }
+      if (u.includes('/guilds/guild-1/channels')) {
+        return { ok: true, status: 200, json: async () => [], text: async () => '' };
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => 'not found' };
+    });
+    const persistSettings = vi.fn(async () => {});
+    const app = makeApp({
+      settings: { discord: { botToken: 'old', guildId: 'guild-1', defaultChannelId: 'general' } },
+      persistSettings,
+    });
+
+    const res = await request(app)
+      .post('/bridge/project-added')
+      .send({ project: { id: 'p1', path: '/p/my-proj', label: 'My Proj' }, discord: { token: 'bot', guildId: 'guild-1' } })
+      .expect(200);
+
+    expect(res.body.ok).toBe(true);
+    expect(res.body.results[0]).toMatchObject({ channelId: 'chan-new', channelName: 'my-proj', created: true });
+    expect(persistSettings).toHaveBeenCalledWith({
+      discord: expect.objectContaining({
+        defaultChannelId: 'general',
+        projectBindings: [{ channelId: 'chan-new', projectPath: '/p/my-proj', projectLabel: 'My Proj' }],
+      }),
+    });
+  });
+
+  it('project-added reuses an existing channel by slug instead of creating one', async () => {
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/guilds/guild-1/channels') && init?.method === 'POST') {
+        throw new Error('should not create when channel exists');
+      }
+      if (u.includes('/guilds/guild-1/channels')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ id: 'chan-x', name: 'my-proj', type: 0 }],
+          text: async () => '',
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => 'not found' };
+    });
+    const persistSettings = vi.fn(async () => {});
+    const app = makeApp({
+      settings: { discord: { botToken: 'old', guildId: 'guild-1' } },
+      persistSettings,
+    });
+
+    const res = await request(app)
+      .post('/bridge/project-added')
+      .send({ project: { id: 'p1', path: '/p/my-proj', label: 'My Proj' }, discord: { token: 'bot', guildId: 'guild-1' } })
+      .expect(200);
+
+    expect(res.body.results[0]).toMatchObject({ channelId: 'chan-x', created: false });
+    const createCalls = globalThis.fetch.mock.calls.filter(
+      ([url, init]) => String(url).includes('/guilds/guild-1/channels') && init?.method === 'POST',
+    );
+    expect(createCalls).toHaveLength(0);
+  });
+
+  it('project-renamed renames the channel and updates the binding label', async () => {
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/channels/chan-x') && init?.method === 'PATCH') {
+        return { ok: true, status: 200, json: async () => ({ id: 'chan-x', name: 'new-name' }), text: async () => '' };
+      }
+      if (u.includes('/channels/chan-x')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'chan-x', name: 'old' }), text: async () => '' };
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => 'not found' };
+    });
+    const persistSettings = vi.fn(async () => {});
+    const app = makeApp({
+      settings: {
+        discord: {
+          botToken: 'old',
+          guildId: 'guild-1',
+          projectBindings: [{ channelId: 'chan-x', projectPath: '/p/old', projectLabel: 'Old' }],
+        },
+      },
+      persistSettings,
+    });
+
+    const res = await request(app)
+      .post('/bridge/project-renamed')
+      .send({ project: { id: 'p1', path: '/p/old', label: 'New Name' }, discord: { token: 'bot', guildId: 'guild-1' } })
+      .expect(200);
+
+    expect(res.body).toMatchObject({ ok: true, channelId: 'chan-x', renamed: true });
+    expect(persistSettings).toHaveBeenCalledWith({
+      discord: expect.objectContaining({
+        projectBindings: [{ channelId: 'chan-x', projectPath: '/p/old', projectLabel: 'New Name' }],
+      }),
+    });
+  });
+
+  it('project-renamed skips the Discord PATCH when the name already matches', async () => {
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/channels/chan-x') && init?.method === 'PATCH') {
+        throw new Error('should not PATCH when name already matches slug');
+      }
+      if (u.includes('/channels/chan-x')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'chan-x', name: 'new-name' }), text: async () => '' };
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => 'not found' };
+    });
+    const persistSettings = vi.fn(async () => {});
+    const app = makeApp({
+      settings: {
+        discord: {
+          botToken: 'old',
+          guildId: 'guild-1',
+          projectBindings: [{ channelId: 'chan-x', projectPath: '/p/old', projectLabel: 'Old' }],
+        },
+      },
+      persistSettings,
+    });
+
+    const res = await request(app)
+      .post('/bridge/project-renamed')
+      .send({ project: { id: 'p1', path: '/p/old', label: 'New Name' }, discord: { token: 'bot', guildId: 'guild-1' } })
+      .expect(200);
+
+    expect(res.body.renamed).toBe(false);
+    const patchCalls = globalThis.fetch.mock.calls.filter(
+      ([url, init]) => String(url).includes('/channels/chan-x') && init?.method === 'PATCH',
+    );
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it('project-removed deletes the channel and drops the binding', async () => {
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/channels/chan-x') && init?.method === 'DELETE') {
+        return { ok: true, status: 200, json: async () => ({ id: 'chan-x' }), text: async () => '' };
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => 'not found' };
+    });
+    const persistSettings = vi.fn(async () => {});
+    const app = makeApp({
+      settings: {
+        discord: {
+          botToken: 'old',
+          guildId: 'guild-1',
+          projectBindings: [{ channelId: 'chan-x', projectPath: '/p/old', projectLabel: 'Old' }],
+        },
+      },
+      persistSettings,
+    });
+
+    const res = await request(app)
+      .post('/bridge/project-removed')
+      .send({ project: { id: 'p1', path: '/p/old' }, discord: { token: 'bot' } })
+      .expect(200);
+
+    expect(res.body).toMatchObject({ ok: true, channelId: 'chan-x', deleted: true });
+    expect(persistSettings).toHaveBeenCalledWith({
+      discord: expect.objectContaining({ projectBindings: undefined }),
+    });
+  });
+});
+
+describe('two-way channel events (Discord → bridge)', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => '' }));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function makeChannelBridge({ settings, persistSettings, broadcastEvent }) {
+    return createMessengerOpencodeBridge({
+      globalEventHub: { subscribeEvent: () => () => {} },
+      buildOpenCodeUrl: (p) => `http://opencode${p}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      broadcastEvent,
+      store: { ...makeFakeStore(), unbind: () => {} },
+      listProjects: async () => [],
+      readSettings: async () => settings,
+      persistSettings,
+    });
+  }
+
+  it('handleChannelDeleted drops the binding and broadcasts an unlink', async () => {
+    const persistSettings = vi.fn(async () => {});
+    const broadcastEvent = vi.fn();
+    const bridge = makeChannelBridge({
+      settings: {
+        discord: {
+          projectBindings: [
+            { channelId: 'c1', projectPath: '/a', projectLabel: 'A' },
+            { channelId: 'c2', projectPath: '/b', projectLabel: 'B' },
+          ],
+        },
+      },
+      persistSettings,
+      broadcastEvent,
+    });
+
+    const result = await bridge.handleChannelDeleted({ channelId: 'c1', token: 'bot' });
+    expect(result).toMatchObject({ ok: true, matched: true, projectPath: '/a' });
+    expect(persistSettings).toHaveBeenCalledWith({
+      discord: expect.objectContaining({
+        projectBindings: [{ channelId: 'c2', projectPath: '/b', projectLabel: 'B' }],
+      }),
+    });
+    expect(broadcastEvent).toHaveBeenCalledWith(
+      'messenger.bridge.project_channel_removed',
+      expect.objectContaining({ source: 'discord', channelId: 'c1', projectPath: '/a' }),
+    );
+  });
+
+  it('handleChannelRenamed updates the label and broadcasts', async () => {
+    const persistSettings = vi.fn(async () => {});
+    const broadcastEvent = vi.fn();
+    const bridge = makeChannelBridge({
+      settings: { discord: { projectBindings: [{ channelId: 'c1', projectPath: '/a', projectLabel: 'A' }] } },
+      persistSettings,
+      broadcastEvent,
+    });
+
+    const result = await bridge.handleChannelRenamed({ channelId: 'c1', name: 'cool-project' });
+    expect(result).toMatchObject({ ok: true, matched: true, changed: true });
+    expect(persistSettings).toHaveBeenCalledWith({
+      discord: expect.objectContaining({
+        projectBindings: [{ channelId: 'c1', projectPath: '/a', projectLabel: 'Cool Project' }],
+      }),
+    });
+    expect(broadcastEvent).toHaveBeenCalledWith(
+      'messenger.bridge.project_channel_renamed',
+      expect.objectContaining({ source: 'discord', channelId: 'c1', projectLabel: 'Cool Project' }),
+    );
+  });
+
+  it('handleChannelRenamed is a no-op when the name still slugs to the current label', async () => {
+    const persistSettings = vi.fn(async () => {});
+    const broadcastEvent = vi.fn();
+    const bridge = makeChannelBridge({
+      settings: { discord: { projectBindings: [{ channelId: 'c1', projectPath: '/a', projectLabel: 'Cool Project' }] } },
+      persistSettings,
+      broadcastEvent,
+    });
+
+    const result = await bridge.handleChannelRenamed({ channelId: 'c1', name: 'cool-project' });
+    expect(result).toMatchObject({ ok: true, matched: true, changed: false });
+    expect(persistSettings).not.toHaveBeenCalled();
+    expect(broadcastEvent).not.toHaveBeenCalledWith(
+      'messenger.bridge.project_channel_renamed',
+      expect.anything(),
+    );
+  });
+});

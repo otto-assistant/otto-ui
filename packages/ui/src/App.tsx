@@ -15,6 +15,7 @@ import { useRouter } from '@/hooks/useRouter';
 import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
 import { useOttoWebSocket } from '@/hooks/useOttoWebSocket';
 import { useMessengerBridgeToasts } from '@/hooks/useMessengerBridgeToasts';
+import { useMessengerProjectChannelSync } from '@/hooks/useMessengerProjectChannelSync';
 import { useWebNotificationStream } from '@/hooks/useWebNotificationStream';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
 import { useWindowTitle } from '@/hooks/useWindowTitle';
@@ -703,6 +704,8 @@ function App({ apis }: AppProps) {
   useOttoWebSocket();
   // Surface bridge events as user-visible toasts.
   useMessengerBridgeToasts();
+  // Mirror UI project add/rename/remove to Discord channels (two-way sync).
+  useMessengerProjectChannelSync();
   useWebNotificationStream({ enabled: embeddedBackgroundWorkEnabled });
   usePwaInstallPrompt();
 
