@@ -1437,3 +1437,100 @@ describe('pending interaction reconciliation (missed SSE recovery)', () => {
     expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/messages')).length).toBe(1);
   });
 });
+
+describe('/shell command — agent resolution (regression: empty agent 500s)', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      const u = String(url);
+      const method = init.method ?? 'GET';
+      calls.push({ url: u, method, body: init.body ?? null });
+      if (u.includes('/agent')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '',
+          json: async () => [
+            { name: 'build', mode: 'primary', hidden: false },
+            { name: 'explore', mode: 'subagent', hidden: false },
+          ],
+        };
+      }
+      if (u.includes('/shell')) {
+        // Mirror OpenCode: 200 only when a real agent is supplied.
+        return { ok: true, status: 200, text: async () => '', json: async () => ({ info: {}, parts: [] }) };
+      }
+      return { ok: true, status: 200, text: async () => '', json: async () => ({ id: 'discord-msg' }) };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function makeShellBridge(bindingOverrides = {}) {
+    const binding = {
+      type: 'discord',
+      token: 'bot-token',
+      targetKey: 'chan-1',
+      sessionId: 'ses-shell',
+      projectPath: '/proj',
+      projectLabel: 'proj',
+      modelOverride: null,
+      agentOverride: null,
+      ...bindingOverrides,
+    };
+    return makeBridge({
+      store: {
+        lookup: () => binding,
+        lookupBySessionId: () => [binding],
+        bind: () => {},
+        touch: () => {},
+        setOverrides: () => {},
+        getVerbosityDefault: () => null,
+        getProjectDefaults: () => null,
+      },
+    });
+  }
+
+  const shellBody = () => {
+    const call = calls.find((c) => c.method === 'POST' && c.url.includes('/shell'));
+    return call ? JSON.parse(call.body) : null;
+  };
+
+  it('resolves a concrete primary agent when none is configured (never empty)', async () => {
+    const bridge = makeShellBridge();
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null,
+      commandName: 'shell', args: 'pwd',
+    });
+    const body = shellBody();
+    expect(body).toBeTruthy();
+    expect(body.command).toBe('pwd');
+    expect(body.agent).toBe('build'); // a real agent, not '' (which 500s)
+    expect(result.reply).toContain('Running');
+  });
+
+  it('honours an explicit surface agent override', async () => {
+    const bridge = makeShellBridge({ agentOverride: 'plan' });
+    await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null,
+      commandName: 'shell', args: 'ls -la',
+    });
+    expect(shellBody().agent).toBe('plan');
+  });
+
+  it('passes a resolved model through when configured', async () => {
+    const bridge = makeShellBridge({ modelOverride: 'anthropic/claude-sonnet-4' });
+    await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null,
+      commandName: 'shell', args: 'pwd',
+    });
+    expect(shellBody().model).toEqual({ providerID: 'anthropic', modelID: 'claude-sonnet-4' });
+  });
+});
