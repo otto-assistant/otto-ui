@@ -1,3 +1,27 @@
+// eslint-disable-next-line no-control-regex
+const ANSI_OSC_PATTERN = /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
+// eslint-disable-next-line no-control-regex
+const ANSI_CSI_PATTERN = /[\u001B\u009B][@-Z\\-_]|[\u001B\u009B]\[[0-?]*[ -/]*[@-~]/g;
+const ANSI_ORPHAN_SGR_PATTERN = /\[[0-9;:]*m/g;
+
+/**
+ * Strip ANSI escape sequences from terminal output before rendering it.
+ *
+ * Tools like `eza`, `ls --color`, `git`, and test runners emit SGR colour
+ * codes (e.g. `\u001b[1;33m`), cursor moves, and OSC hyperlinks. None of these
+ * render in the tool-output code blocks, so the raw `[1;33m` / `[0m` noise
+ * leaks into the message and makes results unreadable. We remove the
+ * sequences (CSI, OSC, single-char escapes, and orphaned `[…m` SGR codes whose
+ * `ESC` byte was already dropped upstream) and show clean plain text.
+ */
+export function stripAnsi(input: unknown): string {
+  if (input == null) return '';
+  return String(input)
+    .replace(ANSI_OSC_PATTERN, '')
+    .replace(ANSI_CSI_PATTERN, '')
+    .replace(ANSI_ORPHAN_SGR_PATTERN, '');
+}
+
 export interface ToolMetadata {
   displayName: string;
   icon?: string;

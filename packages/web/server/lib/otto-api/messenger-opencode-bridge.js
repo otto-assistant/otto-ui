@@ -1670,6 +1670,35 @@ export function createMessengerOpencodeBridge({
     ].join('\n');
   }
 
+  /**
+   * Compact Discord instructions injected into each new session when a Discord
+   * bot is configured. Points the agent at the agent-facing Discord API so it
+   * can post status updates / results into any project channel or session
+   * thread (including a different project's thread) without handling the token.
+   */
+  async function buildDiscordInstructions() {
+    const base = typeof getLocalApiBaseUrl === 'function' ? getLocalApiBaseUrl() : null;
+    if (!base || !readSettings) return null;
+    let settings;
+    try {
+      settings = await readSettings();
+    } catch {
+      return null;
+    }
+    if (!settings?.discord?.botToken) return null;
+    const api = `${base}/api/otto/messenger/agent`;
+    return [
+      '<discord>',
+      'This OpenChamber server is connected to Discord. You can post messages to Discord channels and threads via the local API using bash curl — the bot token is resolved server-side, so never ask for or pass it. Useful for status updates, sharing results, or pinging another project/thread.',
+      `List targets (projects ↔ channels and live sessions ↔ threads, each with a Discord URL): curl -s ${api}/targets`,
+      `Post: curl -s -X POST ${api}/post -H 'Content-Type: application/json' -d '{"project":"<name|path>","text":"<message>"}'`,
+      `  Address by session instead: {"session":"<sessionID>","text":"…"} · or a raw channel/thread id or discord.com/channels URL: {"channel":"<id|url>","text":"…"}`,
+      `Resolve a Discord URL without posting: curl -s -X POST ${api}/resolve -H 'Content-Type: application/json' -d '{"project":"<name>"}'`,
+      'Markdown works; messages over 2000 chars are split automatically; add "silent":true to avoid pinging. Tell the user where you posted (include the returned url).',
+      '</discord>',
+    ].join('\n');
+  }
+
   /** Resolve a thread's parent channel id via the Discord API (for /resume, /fork etc. run inside threads). */
   async function resolveParentChannelId({ token, channelId }) {
     try {
@@ -3109,7 +3138,10 @@ export function createMessengerOpencodeBridge({
     // OpenCode-registered user commands like /changelog still work via
     // the existing session.command machinery).
     // -----------------------------------------------------------------
-    const parsedCmd = parseLeadingCommand(text);
+    // Discord reserves `/` for its native slash-command UI, so accept a
+    // leading `!` there as an alias for `/` — `!status` runs the same console
+    // command as `/status`.
+    const parsedCmd = parseLeadingCommand(text, { allowBang: type === 'discord' });
     if (parsedCmd) {
       const surface = { type, token, channelId, threadId: threadId ?? null };
       const result = await executeSurfaceCommand({
@@ -3296,6 +3328,8 @@ export function createMessengerOpencodeBridge({
         projectPath: effectiveProjectPath,
       }).catch(() => null);
       if (scheduling) contextBlocks.push(scheduling);
+      const discordInstructions = await buildDiscordInstructions().catch(() => null);
+      if (discordInstructions) contextBlocks.push(discordInstructions);
       if (contextBlocks.length > 0) {
         text = `${contextBlocks.join('\n\n')}\n\n${text}`;
       }

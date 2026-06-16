@@ -4,6 +4,7 @@ import {
   generateApprovalId,
 } from './discord-listener.js';
 import { createMessengerOpencodeBridge } from './messenger-opencode-bridge.js';
+import { createDiscordAgentRouter } from './discord-agent-api.js';
 import { parseVerbosityLevel, VERBOSITY_LEVELS } from './messenger-verbosity.js';
 import { bootstrapProject as bootstrapProjectFn } from '../projects/project-bootstrap.js';
 import { renderPermissionContext, escapeMd } from './messenger-render.js';
@@ -332,6 +333,15 @@ export function createMessengerSyncRouter({
   }
 
   const discordListener = createDiscordListenerRegistry({ broadcastEvent, bridge });
+
+  // Agent-facing Discord API — a high-level surface (resolve a project/session
+  // to its Discord URL, post a message there) designed to be delegated to an
+  // AI agent. The bot token is resolved server-side from settings so the agent
+  // never handles the secret.
+  router.use(
+    '/agent',
+    createDiscordAgentRouter({ readSettings, bridge, broadcastEvent, getLocalApiBaseUrl }),
+  );
 
   // Messenger configuration
   router.get('/config', (_req, res) => {

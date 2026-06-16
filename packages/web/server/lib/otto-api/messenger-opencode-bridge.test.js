@@ -535,6 +535,44 @@ describe('discord inbound mirroring', () => {
     expect(threadMessages).toEqual(['assistant reply']);
   });
 
+  it('runs a `!status` console command on Discord without sending it as a prompt', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push([String(url), init]);
+      return { ok: true, status: 200, json: async () => ({ id: 'cmd-reply' }), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'channel-1'
+            ? { sessionId: 'ses-1', projectPath: '/project', projectLabel: 'Project' }
+            : null,
+      },
+    });
+
+    const routed = await bridge.routeInbound({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'channel-1',
+      threadId: null,
+      sourceMessageId: 'source-msg',
+      text: '!status',
+      from: { id: 'user-1', username: 'alice' },
+    });
+
+    expect(routed.ok).toBe(true);
+    expect(routed.handledCommand).toBe('status');
+
+    // The command must not reach OpenCode as a prompt.
+    expect(calls.some(([url]) => url.includes('/prompt_async'))).toBe(false);
+    // The status reply is posted back to the originating channel.
+    const reply = calls.find(([url]) => url.includes('/channels/channel-1/messages'));
+    expect(reply).toBeTruthy();
+    expect(JSON.parse(reply[1].body).content).toContain('Otto status');
+  });
+
   it('does not echo a Discord reply back into a web-created thread (mixed surface)', async () => {
     // Scenario: a thread was created from the web UI (so the session ctx is a
     // web-mirror), but the user then answers FROM Discord inside that thread.
