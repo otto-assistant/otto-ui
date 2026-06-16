@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { MessengerBridgeStore } from './messenger-bridge-store.js';
-import { executeMessengerCommand, parseLeadingCommand } from './messenger-commands.js';
+import { executeMessengerCommand, parseLeadingCommand, isKnownMessengerCommand } from './messenger-commands.js';
 import { DEFAULT_VERBOSITY, normalizeVerbosity } from './messenger-verbosity.js';
 import {
   renderPartForMessenger,
@@ -3325,7 +3325,22 @@ export function createMessengerOpencodeBridge({
     // Discord reserves `/` for its native slash-command UI, so accept a
     // leading `!` there as an alias for `/` — `!status` runs the same console
     // command as `/status`.
-    const parsedCmd = parseLeadingCommand(text, { allowBang: type === 'discord' });
+    let parsedCmd = parseLeadingCommand(text, { allowBang: type === 'discord' });
+    // On Discord, `!` doubles as the shell prefix (matching the web chat where
+    // `!cmd` runs a shell command). A bang-prefixed token that ISN'T a known
+    // console command — e.g. `!pwd`, `!ls -la`, `!git status` — is therefore a
+    // shell command, not a failed console command. We rewrite it into `/shell`
+    // so it runs via the same pipeline as `!shell <cmd>` / native `/shell`.
+    if (
+      type === 'discord' &&
+      text.trim().startsWith('!') &&
+      (!parsedCmd || !isKnownMessengerCommand(parsedCmd.name))
+    ) {
+      const shellCommand = text.trim().slice(1).trim();
+      if (shellCommand) {
+        parsedCmd = { name: 'shell', args: shellCommand, body: '' };
+      }
+    }
     if (parsedCmd) {
       const surface = { type, token, channelId, threadId: threadId ?? null };
       const result = await executeSurfaceCommand({
