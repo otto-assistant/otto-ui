@@ -149,13 +149,20 @@ const KNOWN_TOP_LEVEL = new Set(COMMAND_HELP.map((c) => c.name));
  * Only the FIRST non-empty
  * line matters. Multi-line messages where the first line is a `/cmd` are
  * still treated as commands so users can paste context after a `/init`.
+ *
+ * @param {string} text
+ * @param {{ allowBang?: boolean }} [options] - when `allowBang` is true, a
+ *   leading `!` is accepted as an alias for `/`. Discord reserves `/` for its
+ *   native slash-command UI, so `!cmd` is the natural text-command prefix
+ *   there and must reach the same console command pipeline as `/cmd`.
  */
-export function parseLeadingCommand(text) {
+export function parseLeadingCommand(text, { allowBang = false } = {}) {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim();
-  if (!trimmed.startsWith('/')) return null;
+  const prefix = trimmed[0];
+  if (prefix !== '/' && !(allowBang && prefix === '!')) return null;
   const firstLine = trimmed.split('\n')[0];
-  const m = firstLine.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\b\s*(.*)$/);
+  const m = firstLine.match(/^[/!]([A-Za-z][A-Za-z0-9_-]*)\b\s*(.*)$/);
   if (!m) return null;
   return {
     name: m[1].toLowerCase(),

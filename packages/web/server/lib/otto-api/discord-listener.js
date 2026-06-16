@@ -4,6 +4,13 @@ import { createDiscordModelWizard } from './discord-model-wizard.js';
 import { createDiscordCommandWizards } from './discord-command-wizards.js';
 import { registerApplicationCommands } from './discord-commands.js';
 import { resolveDiscordMentions } from './messenger-attachments.js';
+import { parseLeadingCommand, COMMAND_HELP } from './messenger-commands.js';
+
+// Console commands that can be triggered from chat with a `!` prefix. Discord
+// reserves `/` for its native slash-command UI, so `!cmd` is the natural
+// text-command prefix; these route through the same bridge command pipeline
+// as `/cmd`.
+const MESSENGER_COMMAND_NAMES = new Set(COMMAND_HELP.map((c) => c.name));
 
 /**
  * Discord Gateway listener registry, keyed by bot token.
@@ -232,15 +239,23 @@ async function dispatchMessageCreate(state, message, broadcastEvent, bridge) {
     }
   }
 
-  // OpenCode bridge — every non-empty message that isn't a `!cmd` shortcut
-  // is forwarded to OpenCode and the streaming response is mirrored back
-  // into the same channel/thread. This is what makes Discord a real
+  // A leading `!` that names a known console command (e.g. `!status`,
+  // `!model`) is routed through the bridge so it runs as a real messenger
+  // command — the same pipeline as `/status`. Unknown `!cmd` shortcuts
+  // (e.g. `!ping`) stay on the legacy auto-reply path below.
+  const bangCommand =
+    text.startsWith('!') ? parseLeadingCommand(text, { allowBang: true }) : null;
+  const isKnownBangCommand = Boolean(bangCommand && MESSENGER_COMMAND_NAMES.has(bangCommand.name));
+
+  // OpenCode bridge — every non-empty message that isn't an unknown `!cmd`
+  // shortcut is forwarded to OpenCode and the streaming response is mirrored
+  // back into the same channel/thread. This is what makes Discord a real
   // OpenChamber chat surface. Attachment-only messages (e.g. "send message
   // as file", screenshots, voice messages) are bridged too.
   const isBridgeable =
     bridge && state.bridgeEnabled !== false &&
     (text.length > 0 || attachments.length > 0) &&
-    !text.startsWith('!');
+    (!text.startsWith('!') || isKnownBangCommand);
   if (isBridgeable) {
     try {
       const project = state.resolveProject?.({
