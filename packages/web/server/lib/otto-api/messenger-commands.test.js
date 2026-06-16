@@ -416,9 +416,11 @@ describe('/shell command', () => {
     expect(result.reply).toMatch(/Usage/);
   });
 
-  it('requires an active session', async () => {
-    const { result } = await run('/shell pwd', { binding: { projectPath: '/p' }, bridgeOps: { runShell: vi.fn() } });
-    expect(result.reply).toMatch(/session/i);
+  it('works without an active session (runShell auto-creates one)', async () => {
+    const runShell = vi.fn(async () => ({ ok: true }));
+    const { result } = await run('/shell pwd', { binding: { projectPath: '/p' }, bridgeOps: { runShell } });
+    expect(runShell).toHaveBeenCalledWith({ command: 'pwd' });
+    expect(result.reply).toContain('Running');
   });
 
   it('surfaces shell failures', async () => {

@@ -383,14 +383,11 @@ export async function executeMessengerCommand({
       if (!cmdText) {
         return { reply: '✗ Usage: `/shell <command>` — e.g. `/shell pwd`.' };
       }
-      if (!sessionId) {
-        return {
-          reply: '✗ Send a regular message first so I can spin up a session, then `/shell <command>`.',
-        };
-      }
       if (!bridgeOps?.runShell) {
         return { reply: '✗ `/shell` is not available on this surface.' };
       }
+      // No active session is required — runShell auto-creates one (resolving the
+      // project) so a shell command works without sending a chat message first.
       const r = await bridgeOps.runShell({ command: cmdText });
       if (!r.ok) return { reply: `✗ Shell command failed: ${r.error ?? 'unknown error'}` };
       // The command + output are mirrored back as a dedicated shell block once
