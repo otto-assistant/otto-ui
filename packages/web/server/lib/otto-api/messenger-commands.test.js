@@ -35,6 +35,28 @@ describe('parseLeadingCommand', () => {
   it('returns null for plain prompts', () => {
     expect(parseLeadingCommand('just a message')).toBeNull();
   });
+  it('ignores a leading ! by default', () => {
+    expect(parseLeadingCommand('!status')).toBeNull();
+  });
+  it('accepts a leading ! as a / alias when allowBang is set', () => {
+    expect(parseLeadingCommand('!status', { allowBang: true })).toMatchObject({
+      name: 'status',
+      args: '',
+    });
+  });
+  it('parses ! command args and body when allowBang is set', () => {
+    expect(parseLeadingCommand('!model anthropic/claude\nextra', { allowBang: true })).toMatchObject({
+      name: 'model',
+      args: 'anthropic/claude',
+      body: 'extra',
+    });
+  });
+  it('still parses / commands when allowBang is set', () => {
+    expect(parseLeadingCommand('/verbosity verbose', { allowBang: true })).toMatchObject({
+      name: 'verbosity',
+      args: 'verbose',
+    });
+  });
 });
 
 describe('/verbosity command', () => {

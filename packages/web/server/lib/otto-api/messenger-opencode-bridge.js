@@ -2967,7 +2967,10 @@ export function createMessengerOpencodeBridge({
     // OpenCode-registered user commands like /changelog still work via
     // the existing session.command machinery).
     // -----------------------------------------------------------------
-    const parsedCmd = parseLeadingCommand(text);
+    // Discord reserves `/` for its native slash-command UI, so accept a
+    // leading `!` there as an alias for `/` — `!status` runs the same console
+    // command as `/status`.
+    const parsedCmd = parseLeadingCommand(text, { allowBang: type === 'discord' });
     if (parsedCmd) {
       const surface = { type, token, channelId, threadId: threadId ?? null };
       const result = await executeSurfaceCommand({
