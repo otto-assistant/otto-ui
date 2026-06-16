@@ -67,6 +67,12 @@ const COMMAND_HELP = [
   { name: 'init', usage: '/init', summary: 'Run OpenCode `init` (creates/updates AGENTS.md)' },
   { name: 'review', usage: '/review', summary: 'Run OpenCode `review` workflow' },
   {
+    name: 'shell',
+    usage: '/shell <command>',
+    summary:
+      'Run a shell command in the project and show the output here (e.g. `/shell pwd`). On Discord use `!shell pwd` — `/` is reserved for native slash commands.',
+  },
+  {
     name: 'model',
     usage: '/model [provider/model | default provider/model | reset]',
     summary:
@@ -361,6 +367,27 @@ export async function executeMessengerCommand({
           ? `⏳ Running \`/${cmd}\` against the current session…`
           : `✗ \`/${cmd}\` failed: ${r.error ?? 'unknown error'}`,
       };
+    }
+
+    case 'shell': {
+      const cmdText = [command.args, command.body].filter(Boolean).join('\n').trim();
+      if (!cmdText) {
+        return { reply: '✗ Usage: `/shell <command>` — e.g. `/shell pwd`.' };
+      }
+      if (!sessionId) {
+        return {
+          reply: '✗ Send a regular message first so I can spin up a session, then `/shell <command>`.',
+        };
+      }
+      if (!bridgeOps?.runShell) {
+        return { reply: '✗ `/shell` is not available on this surface.' };
+      }
+      const r = await bridgeOps.runShell({ command: cmdText });
+      if (!r.ok) return { reply: `✗ Shell command failed: ${r.error ?? 'unknown error'}` };
+      // The command + output are mirrored back as a dedicated shell block once
+      // OpenCode finishes running it (see renderUserShellResult in the bridge);
+      // this is just the immediate "it's running" acknowledgement.
+      return { reply: `⬦ Running \`${cmdText.split('\n')[0].replace(/`/g, "'").slice(0, 150)}\`…` };
     }
 
     case 'model': {

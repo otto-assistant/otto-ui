@@ -9,6 +9,8 @@ import {
   renderPermissionContext,
   renderQuestionForMessenger,
   renderTodoListForMessenger,
+  renderUserShellResult,
+  isUserShellMarkerText,
   escapeMd,
   clipBlock,
   deriveThreadNameFromSessionTitle,
@@ -538,6 +540,65 @@ export function createMessengerOpencodeBridge({
     }
     messageRoles.set(messageId, role);
   }
+  // messageID → parentID. OpenCode sets an assistant message's `parentID` to
+  // the user message that triggered it. We use it to recognise the assistant
+  // "echo" of a user-run shell command (`/shell` / web `!cmd`): that echo's
+  // parent is the synthetic user message carrying the shell marker. Bounded.
+  /** @type {Map<string, string>} */
+  const messageParents = new Map();
+  const MESSAGE_PARENT_CACHE_MAX = 2000;
+  function rememberMessageParent(messageId, parentId) {
+    if (!messageId || typeof parentId !== 'string' || !parentId) return;
+    if (messageParents.has(messageId)) {
+      messageParents.set(messageId, parentId);
+      return;
+    }
+    if (messageParents.size >= MESSAGE_PARENT_CACHE_MAX) {
+      const oldest = messageParents.keys().next().value;
+      if (oldest !== undefined) messageParents.delete(oldest);
+    }
+    messageParents.set(messageId, parentId);
+  }
+
+  // User messages whose text is the shell marker ("The following tool was
+  // executed by the user"). Their assistant child carries the bash tool with
+  // the command + output that we render as a clean shell block. Bounded set.
+  /** @type {Set<string>} */
+  const shellMarkerMessageIds = new Set();
+  const SHELL_MARKER_CACHE_MAX = 1000;
+  function rememberShellMarkerMessage(messageId) {
+    if (!messageId) return;
+    if (shellMarkerMessageIds.has(messageId)) return;
+    if (shellMarkerMessageIds.size >= SHELL_MARKER_CACHE_MAX) {
+      const oldest = shellMarkerMessageIds.values().next().value;
+      if (oldest !== undefined) shellMarkerMessageIds.delete(oldest);
+    }
+    shellMarkerMessageIds.add(messageId);
+  }
+
+  /**
+   * Detect the assistant message that OpenCode emits as the result of a
+   * user-run shell command. Such a message's `parentID` is the synthetic user
+   * message that carried the shell marker. Returns the bash command/output/
+   * status when the given tool part is that echo, otherwise null.
+   */
+  function getUserShellEcho(part) {
+    if (!part || part.type !== 'tool') return null;
+    const tool = String(part.tool ?? '').toLowerCase();
+    if (tool !== 'bash' && tool !== 'shell') return null;
+    const messageId = getPartMessageId(part);
+    if (!messageId) return null;
+    const parentId = messageParents.get(messageId);
+    if (!parentId || !shellMarkerMessageIds.has(parentId)) return null;
+    const state = part.state ?? {};
+    const command = typeof state.input?.command === 'string' ? state.input.command : '';
+    const output =
+      (typeof state.output === 'string' ? state.output : '') ||
+      (typeof state.metadata?.output === 'string' ? state.metadata.output : '');
+    const status = typeof state.status === 'string' ? state.status : '';
+    return { command, output, status };
+  }
+
   function getMessageId(value) {
     return value?.id ?? value?.messageID ?? value?.messageId ?? value?.message?.id ?? value?.message?.messageID ?? value?.message?.messageId ?? null;
   }
@@ -894,6 +955,29 @@ export function createMessengerOpencodeBridge({
         return { ok: true };
       } catch (e) {
         return { ok: false, error: e?.message ?? 'prompt failed' };
+      }
+    },
+    async runShell(sessionId, projectPath, command, { modelOverride = null, agentOverride = null } = {}) {
+      try {
+        const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
+        // `agent` is required by OpenCode's shell endpoint; an empty string
+        // tells it to use the session/project default (matches the web client).
+        const body = { command, agent: agentOverride || '' };
+        if (modelOverride && /^[^/]+\/[^/]+$/.test(modelOverride)) {
+          const [providerID, ...rest] = modelOverride.split('/');
+          body.model = { providerID, modelID: rest.join('/') };
+        }
+        const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/shell${params}`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) return { ok: false, error: `OpenCode ${r.status}: ${(await r.text()).slice(0, 200)}` };
+        // The command runs server-side; its command + output stream back as a
+        // bash tool part on the returned assistant message and are mirrored to
+        // the surface by emitPart (rendered via renderUserShellResult).
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? 'shell command failed' };
       }
     },
     async listSkills(projectPath) {
@@ -1937,6 +2021,10 @@ export function createMessengerOpencodeBridge({
 
   async function emitWebUserPart(sessionId, part, { projectPath = null } = {}) {
     const text = typeof part?.text === 'string' ? part.text.trim() : '';
+    // Never mirror the synthetic shell marker as a **Web** prompt block — it is
+    // internal noise ("The following tool was executed by the user"). The
+    // command + output are mirrored separately as a shell block (emitPart).
+    if (isUserShellMarkerText(text)) return;
     // Never mirror a prompt that originated from a messenger surface back to the
     // same surface. This stops the "I reply from Discord and my own message
     // bounces straight back to me" duplication on web-created threads that are
@@ -1982,9 +2070,12 @@ export function createMessengerOpencodeBridge({
     if (partType === 'text') {
       if (!part?.time?.end) return; // wait until streaming finishes
     }
+    // A user-run shell command (`/shell` or web `!cmd`) surfaces as an
+    // assistant bash echo whose parent is the synthetic shell-marker message.
+    // Its command + output are always shown — the user explicitly asked to run
+    // it, so unlike agent tool activity it is not gated by verbosity.
+    const shellEcho = partType === 'tool' ? getUserShellEcho(part) : null;
     if (partType === 'tool') {
-      // `quiet` suppresses tool activity entirely.
-      if (verbosity === 'quiet') return;
       const status = part.state?.status ?? 'running';
       // One message per tool, at the terminal state. Posting a separate
       // "running" line and then a "completed" line doubled every tool into
@@ -1992,6 +2083,9 @@ export function createMessengerOpencodeBridge({
       // state also lets the one-liner include result metadata (match counts,
       // error text) and, at `verbose`, the real input + output blocks.
       if (status !== 'completed' && status !== 'error') return;
+      // `quiet` suppresses agent tool activity entirely — but never a shell
+      // command the user themselves invoked.
+      if (!shellEcho && verbosity === 'quiet') return;
     }
     if (partType === 'reasoning') {
       if (verbosity === 'quiet') return;
@@ -2004,7 +2098,9 @@ export function createMessengerOpencodeBridge({
     const dedupKey = partId ? `${partId}:${partType}:${part?.state?.status ?? ''}` : null;
     if (dedupKey && ctx.sentPartIds.has(dedupKey)) return;
 
-    const rendered = renderPartForMessenger(part, verbosity);
+    const rendered = shellEcho
+      ? renderUserShellResult(shellEcho)
+      : renderPartForMessenger(part, verbosity);
     if (!rendered) return;
 
     // At `normal`, reasoning renders as a bare process marker. Consecutive
@@ -2054,6 +2150,14 @@ export function createMessengerOpencodeBridge({
         return;
       }
       if (role === 'user') {
+        // Remember the synthetic shell-marker message so the assistant echo of
+        // a user-run shell command (`/shell` / web `!cmd`) can be recognised
+        // and rendered as a clean command + output block. Done for every
+        // surface (Discord-bound too), before the web-mirror gate below skips
+        // non-web sessions.
+        if (part?.type === 'text' && isUserShellMarkerText(part.text) && partMessageId) {
+          rememberShellMarkerMessage(partMessageId);
+        }
         // Mirror the user's own prompt into the messenger as a **Web** block.
         // Only for web-originated sessions: a session already bound to a
         // Discord surface had its prompt typed there already, so
@@ -2090,6 +2194,10 @@ export function createMessengerOpencodeBridge({
       const info = props?.info ?? props?.message ?? null;
       const messageId = getMessageId(info);
       const role = info?.role ?? info?.message?.role ?? props?.role ?? props?.message?.role ?? null;
+      // Record parentID so a user-run shell command's assistant echo can be
+      // linked back to its synthetic shell-marker parent (see getUserShellEcho).
+      const parentId = info?.parentID ?? info?.message?.parentID ?? null;
+      if (messageId && parentId) rememberMessageParent(messageId, parentId);
       if (messageId && role) {
         rememberMessageRole(messageId, role);
         const pending = pendingPartsByMessageId.get(messageId);
@@ -2709,6 +2817,35 @@ export function createMessengerOpencodeBridge({
         return result.ok
           ? { ok: true, threadId: result.threadId ?? null }
           : { ok: false, error: result.error ?? 'session start failed' };
+      },
+
+      async runShell({ command }) {
+        const sessionId = stored?.sessionId ?? null;
+        if (!sessionId) return { ok: false, error: 'no active session on this conversation' };
+        // Bind a context for this surface so the shell command's result (which
+        // streams back over SSE as a bash tool part) is mirrored to the exact
+        // channel/thread it was issued from, instead of an auto-resolved
+        // default. Reuse an existing context (active conversation) untouched.
+        if (!sessionContexts.has(sessionId)) {
+          sessionContexts.set(sessionId, {
+            sessionId,
+            type,
+            token,
+            channelId,
+            threadId: threadId ?? null,
+            projectPath: stored?.projectPath ?? null,
+            sentPartIds: new Set(),
+            startedAt: Date.now(),
+            lastError: null,
+            verbosity: resolveVerbosity({ type, token, channelId, threadId: threadId ?? null }),
+            from,
+            source: type,
+          });
+        }
+        return opencodeAdapter.runShell(sessionId, stored?.projectPath ?? null, command, {
+          modelOverride: stored?.modelOverride ?? null,
+          agentOverride: stored?.agentOverride ?? null,
+        });
       },
 
       async listResumeCandidates() {

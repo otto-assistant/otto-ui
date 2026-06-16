@@ -394,10 +394,62 @@ describe('worktree commands', () => {
   });
 });
 
+describe('/shell command', () => {
+  const binding = { sessionId: 'ses-1', projectPath: '/p' };
+
+  it('runs the command through bridgeOps.runShell and acks immediately', async () => {
+    const runShell = vi.fn(async () => ({ ok: true }));
+    const { result } = await run('/shell pwd', { binding, bridgeOps: { runShell } });
+    expect(runShell).toHaveBeenCalledWith({ command: 'pwd' });
+    expect(result.reply).toContain('Running');
+    expect(result.reply).toContain('pwd');
+  });
+
+  it('passes multi-line bodies through to the shell', async () => {
+    const runShell = vi.fn(async () => ({ ok: true }));
+    await run('/shell cd /tmp\nls -la', { binding, bridgeOps: { runShell } });
+    expect(runShell).toHaveBeenCalledWith({ command: 'cd /tmp\nls -la' });
+  });
+
+  it('requires an argument', async () => {
+    const { result } = await run('/shell', { binding, bridgeOps: { runShell: vi.fn() } });
+    expect(result.reply).toMatch(/Usage/);
+  });
+
+  it('requires an active session', async () => {
+    const { result } = await run('/shell pwd', { binding: { projectPath: '/p' }, bridgeOps: { runShell: vi.fn() } });
+    expect(result.reply).toMatch(/session/i);
+  });
+
+  it('surfaces shell failures', async () => {
+    const { result } = await run('/shell pwd', {
+      binding,
+      bridgeOps: { runShell: async () => ({ ok: false, error: 'OpenCode 404: not found' }) },
+    });
+    expect(result.reply).toContain('Shell command failed');
+    expect(result.reply).toContain('404');
+  });
+
+  it('is reachable via the ! alias on Discord', async () => {
+    const runShell = vi.fn(async () => ({ ok: true }));
+    const command = parseLeadingCommand('!shell pwd', { allowBang: true });
+    const result = await executeMessengerCommand({
+      command,
+      ctx,
+      opencode: {},
+      binding,
+      surfaceMutators: makeMutators(),
+      bridgeOps: { runShell },
+    });
+    expect(runShell).toHaveBeenCalledWith({ command: 'pwd' });
+    expect(result.reply).toContain('Running');
+  });
+});
+
 describe('/help lists the extended command set', () => {
   it('mentions queue, fork, share, resume, worktrees and mention-mode', async () => {
     const { result } = await run('/help');
-    for (const cmd of ['/queue', '/fork', '/share', '/resume', '/new-worktree', '/merge-worktree', '/mention-mode', '/clear-queue', '/session']) {
+    for (const cmd of ['/queue', '/fork', '/share', '/resume', '/new-worktree', '/merge-worktree', '/mention-mode', '/clear-queue', '/session', '/shell']) {
       expect(result.reply).toContain(cmd);
     }
   });

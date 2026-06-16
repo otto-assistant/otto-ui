@@ -5,6 +5,9 @@ import {
   renderQuestionForMessenger,
   renderTodoListForMessenger,
   renderPermissionContext,
+  renderUserShellResult,
+  isUserShellMarkerText,
+  USER_SHELL_MARKER,
   deriveThreadNameFromSessionTitle,
   extractLastAssistantTokens,
   computeTurnTokens,
@@ -400,5 +403,54 @@ describe('renderToolPart — question tool one-liner', () => {
     );
     expect(line).toContain('**question**');
     expect(line).toContain('Which approach should I take?');
+  });
+});
+
+describe('isUserShellMarkerText', () => {
+  it('matches the synthetic shell marker (with leading whitespace)', () => {
+    expect(isUserShellMarkerText(USER_SHELL_MARKER)).toBe(true);
+    expect(isUserShellMarkerText('  ' + USER_SHELL_MARKER + '\n\n⬦ bash pwd')).toBe(true);
+  });
+
+  it('does not match normal prompts', () => {
+    expect(isUserShellMarkerText('please run the tests')).toBe(false);
+    expect(isUserShellMarkerText('')).toBe(false);
+    expect(isUserShellMarkerText(null)).toBe(false);
+  });
+});
+
+describe('renderUserShellResult', () => {
+  it('shows a single-line command inline plus its output, regardless of verbosity', () => {
+    const out = renderUserShellResult({ command: 'pwd', output: '/home/me/project', status: 'completed' });
+    expect(out).toContain('⬦ **shell** `pwd`');
+    expect(out).toContain('```\n/home/me/project\n```');
+  });
+
+  it('fences a multi-line command as bash', () => {
+    const out = renderUserShellResult({ command: 'cd /tmp\nls -la', output: 'total 0' });
+    expect(out).toContain('```bash\ncd /tmp\nls -la\n```');
+    expect(out).toContain('```\ntotal 0\n```');
+  });
+
+  it('strips ANSI noise from the output', () => {
+    const out = renderUserShellResult({ command: 'ls', output: '\u001b[1;33myellow\u001b[0m' });
+    expect(out).toContain('yellow');
+    expect(out).not.toContain('[1;33m');
+  });
+
+  it('flags an error run and notes the missing output', () => {
+    const out = renderUserShellResult({ command: 'false', output: '', status: 'error' });
+    expect(out.startsWith('✗ **shell**')).toBe(true);
+    expect(out).toContain('no output');
+  });
+
+  it('neutralises embedded code fences so the block cannot break out', () => {
+    const out = renderUserShellResult({ command: 'echo hi', output: 'before ``` after' });
+    expect(out).not.toContain("``` after");
+    expect(out).toContain("'''");
+  });
+
+  it('returns null when there is nothing to show on a successful run', () => {
+    expect(renderUserShellResult({ command: '', output: '', status: 'completed' })).toBeNull();
   });
 });
