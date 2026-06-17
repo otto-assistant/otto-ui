@@ -59,6 +59,45 @@ function discordTokenHash(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 12);
 }
 
+/**
+ * Resolve the Discord messenger target (incl. the bot token) for a session from
+ * its persisted bridge binding + on-disk settings. Used by the bridge as a
+ * token fallback when a session has no live in-memory context (e.g. deleting an
+ * idle session from the sidebar, or a gateway-bot session after a restart).
+ *
+ * `readSettings` is ASYNC (it reads + migrates settings from disk) and MUST be
+ * awaited. A previous version called it without `await`, leaving `settings` as a
+ * pending Promise whose `.discord` was always undefined — so the bot token was
+ * never found and every token-fallback caller silently failed. The most visible
+ * symptom: hard-deleting (shift-delete) an idle session never removed its
+ * Discord thread, because `handleSessionDeleted` skips the thread delete when no
+ * token can be resolved.
+ *
+ * Exported for testing.
+ */
+export async function resolveMessengerTarget({ store, readSettings, sessionId }) {
+  if (!store || typeof readSettings !== 'function') return null;
+  const bindings = store.lookupBySessionId(sessionId);
+  if (!bindings || bindings.length === 0) return null;
+  const binding = bindings[0];
+  const settings = await readSettings();
+  if (!settings) return null;
+  if (binding.type === 'discord') {
+    const discord = settings.discord || settings.discordConnections?.[0] || {};
+    const token = discord.botToken;
+    if (!token) return null;
+    // targetKey is the thread id on Discord (or channel id for direct msgs).
+    return {
+      type: 'discord',
+      token,
+      targetKey: binding.targetKey,
+      threadId: null, // targetKey is already the thread
+      projectPath: binding.projectPath,
+    };
+  }
+  return null;
+}
+
 export function createMessengerSyncRouter({
   broadcastEvent,
   // Optional plumbing for the OpenCode↔messenger bridge. When provided,
@@ -112,32 +151,22 @@ export function createMessengerSyncRouter({
     // We need the bridgeStore reference, which is created inside the bridge.
     // Return a function that the bridge can call after initialization.
     let resolved = null;
-    return (sessionId) => {
+    return async (sessionId) => {
       // Resolve lazily after bridge is created
       if (!resolved && bridge?.store) {
         resolved = { store: bridge.store, readSettings };
       }
       if (!resolved || !resolved.readSettings) return null;
       try {
-        const bindings = resolved.store.lookupBySessionId(sessionId);
-        if (!bindings || bindings.length === 0) return null;
-        const binding = bindings[0];
-        // Read settings to get the bot token
-        const settings = resolved.readSettings();
-        if (!settings) return null;
-        if (binding.type === 'discord') {
-          const discord = settings.discord || settings.discordConnections?.[0] || {};
-          const token = discord.botToken;
-          if (!token) return null;
-          // targetKey is the thread id on Discord (or channel id for direct msgs)
-          const targetKey = binding.targetKey;
-          const threadId = null; // targetKey is already the thread
-          return { type: 'discord', token, targetKey, threadId, projectPath: binding.projectPath };
-        }
+        return await resolveMessengerTarget({
+          store: resolved.store,
+          readSettings: resolved.readSettings,
+          sessionId,
+        });
       } catch {
         // lookup failed — return null
+        return null;
       }
-      return null;
     };
   };
 
