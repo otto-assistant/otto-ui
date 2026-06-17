@@ -496,6 +496,11 @@ const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
                       </div>
                     ) : (
                       <div className="space-y-3 px-4 pb-2">
+                        {group.error ? (
+                          <div className="px-1">
+                            <span className="typography-micro text-[var(--status-warning)]">{group.error}</span>
+                          </div>
+                        ) : null}
                         {group.entries.map(([label, window]) => {
                           const displayPercent = quotaDisplayMode === 'remaining' ? window.remainingPercent : window.usedPercent;
                           const paceInfo = calculatePace(window.usedPercent, window.resetAt, window.windowSeconds, label);
@@ -2501,6 +2506,11 @@ export const Header: React.FC<HeaderProps> = ({
                               </div>
                             ) : (
                               <div className="space-y-3 px-4 pb-2">
+                                {group.error ? (
+                                  <div className="px-1">
+                                    <span className="typography-micro text-[var(--status-warning)]">{group.error}</span>
+                                  </div>
+                                ) : null}
                                 {/* Window-level entries */}
                                 {group.entries.map(([label, window]) => {
                                   const displayPercent = quotaDisplayMode === 'remaining'

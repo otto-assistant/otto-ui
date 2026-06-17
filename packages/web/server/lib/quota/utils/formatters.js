@@ -1,3 +1,17 @@
+const formatDuration = (totalSeconds) => {
+  if (totalSeconds == null || !Number.isFinite(totalSeconds) || totalSeconds < 0) {
+    return null;
+  }
+  const total = Math.floor(totalSeconds);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return '<1m';
+};
+
 export const formatResetTime = (timestamp) => {
   try {
     const resetDate = new Date(timestamp);
@@ -27,6 +41,13 @@ export const formatResetTime = (timestamp) => {
   }
 };
 
+export const formatResetRelative = (resetAfterSeconds) => {
+  if (resetAfterSeconds == null || !Number.isFinite(resetAfterSeconds) || resetAfterSeconds < 0) {
+    return null;
+  }
+  return formatDuration(resetAfterSeconds);
+};
+
 const hasResetTimestamp = (resetAt) => resetAt !== null && resetAt !== undefined && resetAt !== '';
 
 export const calculateResetAfterSeconds = (resetAt) => {
@@ -40,6 +61,7 @@ export const calculateResetAfterSeconds = (resetAt) => {
 export const toUsageWindow = ({ usedPercent, windowSeconds, resetAt, valueLabel }) => {
   const resetAfterSeconds = calculateResetAfterSeconds(resetAt);
   const resetFormatted = hasResetTimestamp(resetAt) ? formatResetTime(resetAt) : null;
+  const resetRelFormatted = formatResetRelative(resetAfterSeconds);
   const hasFiniteUsedPercent = typeof usedPercent === 'number' && Number.isFinite(usedPercent);
   return {
     usedPercent,
@@ -48,7 +70,7 @@ export const toUsageWindow = ({ usedPercent, windowSeconds, resetAt, valueLabel 
     resetAfterSeconds,
     resetAt,
     resetAtFormatted: resetFormatted,
-    resetAfterFormatted: resetFormatted,
+    resetAfterFormatted: resetRelFormatted,
     ...(valueLabel ? { valueLabel } : {})
   };
 };

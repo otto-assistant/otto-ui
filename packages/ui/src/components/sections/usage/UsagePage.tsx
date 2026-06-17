@@ -6,18 +6,19 @@ import { QUOTA_PROVIDERS } from '@/lib/quota';
 import { useQuotaAutoRefresh, useQuotaStore } from '@/stores/useQuotaStore';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible';
-import type { UsageWindows, QuotaProviderId } from '@/types';
-import { getAllModelFamilies, getDisplayModelName, sortModelFamilies, groupModelsByFamilyWithGetter } from '@/lib/quota/model-families';
+import type { UsageWindows } from '@/types';
+import { getDisplayModelName } from '@/lib/quota/model-families';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
 import { formatTimeForPreference } from '@/lib/timeFormat';
 import { useUIStore, type TimeFormatPreference } from '@/stores/useUIStore';
+import { runtimeFetch } from '@/lib/runtime-fetch';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 
 const formatTime = (timestamp: number | null, timeFormatPreference: TimeFormatPreference) => {
   if (!timestamp) return '-';
@@ -25,6 +26,241 @@ const formatTime = (timestamp: number | null, timeFormatPreference: TimeFormatPr
     return formatTimeForPreference(timestamp, timeFormatPreference, { fallback: '-' });
   } catch {
     return '-';
+  }
+};
+
+/** Parse a "Resets in" string like "3h 52m" or "4d 17h" into seconds. */
+const parseResetsIn = (str: string): number | null => {
+  const s = str.trim().toLowerCase();
+  if (!s) return null;
+  let total = 0;
+  const d = s.match(/(\d+)\s*d/);
+  const h = s.match(/(\d+)\s*h/);
+  const m = s.match(/(\d+)\s*m/);
+  if (d) total += parseInt(d[1]) * 86400;
+  if (h) total += parseInt(h[1]) * 3600;
+  if (m) total += parseInt(m[1]) * 60;
+  return total > 0 ? total : null;
+};
+
+/** Format seconds back to "Xd Xh Xm" for display. */
+const formatSec = (s: number | null | undefined): string => {
+  if (s == null || s <= 0) return '';
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  return parts.join(' ');
+};
+
+/** OpenCode Go config UI — two modes: cookie (exact) or anchor (reset times). */
+const OpenCodeGoSetup: React.FC<{
+  result: import('@/types').ProviderResult | null;
+  onConfigSaved: () => void;
+}> = ({ result, onConfigSaved }) => {
+  const usageSource = result?.usageSource;
+  const isAuthoritative = usageSource === 'dashboard' || usageSource === 'api' || usageSource === 'anchor';
+  const hasError = result && result.configured && !result.ok;
+
+  // Mode
+  const [mode, setMode] = React.useState<'cookie' | 'anchor'>('cookie');
+
+  // Cookie fields
+  const [workspaceId, setWorkspaceId] = React.useState('');
+  const [authCookie, setAuthCookie] = React.useState('');
+
+  // Anchor fields
+  const [rollingIn, setRollingIn] = React.useState('');
+  const [weeklyIn, setWeeklyIn] = React.useState('');
+  const [monthlyIn, setMonthlyIn] = React.useState('');
+
+  const [saving, setSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+  const [existingMode, setExistingMode] = React.useState<string | null>(null);
+  const [loadingConfig, setLoadingConfig] = React.useState(true);
+
+  // Load current config on mount and pre-fill fields
+  const loadConfig = React.useCallback(async () => {
+    try {
+      const resp = await runtimeFetch('/api/quota/opencode-go/config');
+      const data = await resp.json();
+      if (data?.mode) setExistingMode(data.mode);
+      if (data?.mode === 'cookie' || data?.mode === 'anchor') setMode(data.mode);
+      if (data?.anchors) {
+        setRollingIn(formatSec(data.anchors.rolling));
+        setWeeklyIn(formatSec(data.anchors.weekly));
+        setMonthlyIn(formatSec(data.anchors.monthly));
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  React.useEffect(() => {
+    setLoadingConfig(true);
+    loadConfig().finally(() => setLoadingConfig(false));
+  }, [loadConfig]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      let body: Record<string, unknown> = { mode };
+
+      if (mode === 'cookie') {
+        if (!workspaceId.trim() || !authCookie.trim()) {
+          setSaveError('Both Workspace ID and Auth Cookie are required');
+          setSaving(false);
+          return;
+        }
+        body.workspaceId = workspaceId.trim();
+        body.authCookie = authCookie.trim();
+      } else {
+        const anchors: Record<string, number> = {};
+        const r = parseResetsIn(rollingIn);
+        const w = parseResetsIn(weeklyIn);
+        const m = parseResetsIn(monthlyIn);
+        if (!r && !w && !m) {
+          setSaveError('Enter at least one "Resets in" value');
+          setSaving(false);
+          return;
+        }
+        if (r !== null) anchors.rolling = r;
+        if (w !== null) anchors.weekly = w;
+        if (m !== null) anchors.monthly = m;
+        body.anchors = anchors;
+      }
+
+      const resp = await runtimeFetch('/api/quota/opencode-go/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.ok) {
+        throw new Error(data?.error || 'Failed to save');
+      }
+      setExistingMode(mode);
+      await loadConfig();
+      onConfigSaved();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save config');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClear = async () => {
+    try {
+      await runtimeFetch('/api/quota/opencode-go/config', { method: 'DELETE' });
+      setExistingMode(null);
+      onConfigSaved();
+    } catch { /* ignore */ }
+  };
+
+  // When a mode is working, show a compact toggle to change it.
+  // Otherwise show the full setup expanded.
+  const [showSetup, setShowSetup] = React.useState(!isAuthoritative || !existingMode);
+
+  // Error from dashboard mode (cookie expired etc.)
+  if (hasError && result?.error && existingMode === 'cookie') {
+    return (
+      <div className="mb-8 rounded-lg border border-[var(--status-warning-border)] bg-[var(--status-warning-background)] px-4 py-3">
+        <p className="typography-ui-label font-medium text-[var(--status-warning)] mb-1">Dashboard connection issue</p>
+        <p className="typography-meta text-[var(--status-warning)]/80 mb-3">{result.error}</p>
+        <div className="space-y-2">
+          <label className="typography-micro text-foreground block">Workspace ID</label>
+          <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground" placeholder="wrk_xxx" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)} />
+          <label className="typography-micro text-foreground block">Auth Cookie</label>
+          <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground" placeholder="Fe26.2**..." value={authCookie} onChange={(e) => setAuthCookie(e.target.value)} />
+          {saveError && <p className="typography-micro text-[var(--status-error)]">{saveError}</p>}
+          <div className="flex items-center gap-2 mt-2">
+            <button className="rounded-md bg-primary px-4 py-1.5 typography-ui-label text-primary-foreground hover:opacity-90 disabled:opacity-40" disabled={saving} onClick={handleSave}>{saving ? 'Saving...' : 'Save & Connect'}</button>
+            <button className="rounded-md border border-[var(--interactive-border)] px-3 py-1.5 typography-ui-label text-muted-foreground hover:text-foreground" onClick={handleClear}>Clear</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading existing config
+  if (loadingConfig) return null;
+
+  // Compact toggle when a mode is working
+  if (isAuthoritative && existingMode) {
+    return (
+      <div className="mb-4 px-2">
+        <button className="flex items-center gap-1.5 typography-micro text-muted-foreground hover:text-foreground transition-colors" onClick={() => setShowSetup(!showSetup)}>
+          <Icon name={showSetup ? 'arrow-down-s' : 'arrow-right-s'} className="h-3.5 w-3.5" />
+          {showSetup ? 'Hide data source settings' : 'Change data source'}
+        </button>
+        {showSetup && renderSetup()}
+      </div>
+    );
+  }
+
+  // Show setup fully when no mode is working yet
+  return <div className="mb-8">{renderSetup()}</div>;
+
+  function renderSetup() {
+    return (
+      <div className="rounded-lg border border-[var(--interactive-border)] p-4">
+        <h3 className="typography-ui-label font-medium text-foreground mb-3">OpenCode Go — choose data source</h3>
+
+        {/* ── Option 1: Cookie mode (exact) ── */}
+        <label className="flex items-start gap-3 mb-3 p-3 rounded-lg border border-[var(--interactive-border)] cursor-pointer hover:bg-[var(--surface-subtle)] transition-colors">
+          <input type="radio" name="og-mode" className="mt-1 accent-[var(--interactive-brand)]" checked={mode === 'cookie'} onChange={() => setMode('cookie')} />
+          <div className="flex-1 min-w-0">
+            <span className="typography-ui-label text-foreground font-medium">Exact data — workspace + cookie</span>
+            <p className="typography-micro text-muted-foreground mt-0.5">Most accurate. Fetches live data from opencode.ai. Cookie needs periodic refresh.</p>
+            {mode === 'cookie' && (
+              <div className="mt-2 space-y-2">
+                <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="Workspace ID (wrk_xxx)" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)} />
+                <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="Auth Cookie (Fe26.2**...)" value={authCookie} onChange={(e) => setAuthCookie(e.target.value)} />
+              </div>
+            )}
+          </div>
+        </label>
+
+        {/* ── Option 2: Anchor mode (reset times) ── */}
+        <label className="flex items-start gap-3 p-3 rounded-lg border border-[var(--interactive-border)] cursor-pointer hover:bg-[var(--surface-subtle)] transition-colors">
+          <input type="radio" name="og-mode" className="mt-1 accent-[var(--interactive-brand)]" checked={mode === 'anchor'} onChange={() => setMode('anchor')} />
+          <div className="flex-1 min-w-0">
+            <span className="typography-ui-label text-foreground font-medium">Approximate — enter "Resets in" times</span>
+            <p className="typography-micro text-muted-foreground mt-0.5">
+              Uses local data with your billing cycle boundaries. Accurate if you only use Go on this machine.
+              <br />Enter the <span className="text-foreground">"Resets in"</span> values shown on the opencode.ai Go dashboard.
+            </p>
+            {mode === 'anchor' && (
+              <div className="mt-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="typography-micro text-muted-foreground w-20 shrink-0">Rolling:</span>
+                  <input className="flex-1 rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="e.g. 3h 52m" value={rollingIn} onChange={(e) => setRollingIn(e.target.value)} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="typography-micro text-muted-foreground w-20 shrink-0">Weekly:</span>
+                  <input className="flex-1 rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="e.g. 4d 17h" value={weeklyIn} onChange={(e) => setWeeklyIn(e.target.value)} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="typography-micro text-muted-foreground w-20 shrink-0">Monthly:</span>
+                  <input className="flex-1 rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="e.g. 17d 9h" value={monthlyIn} onChange={(e) => setMonthlyIn(e.target.value)} />
+                </div>
+              </div>
+            )}
+          </div>
+        </label>
+
+        {saveError && <p className="typography-micro text-[var(--status-error)] mt-2">{saveError}</p>}
+
+        <div className="flex items-center gap-2 mt-3">
+          <button className="rounded-md bg-primary px-4 py-1.5 typography-ui-label text-primary-foreground hover:opacity-90 disabled:opacity-40" disabled={saving} onClick={handleSave}>{saving ? 'Saving...' : 'Save'}</button>
+          {existingMode && (
+            <button className="rounded-md border border-[var(--interactive-border)] px-3 py-1.5 typography-ui-label text-muted-foreground hover:text-foreground" onClick={handleClear}>Clear & disable</button>
+          )}
+        </div>
+      </div>
+    );
   }
 };
 
@@ -46,10 +282,6 @@ export const UsagePage: React.FC = () => {
   const error = useQuotaStore((state) => state.error);
   const dropdownProviderIds = useQuotaStore((state) => state.dropdownProviderIds);
   const setDropdownProviderIds = useQuotaStore((state) => state.setDropdownProviderIds);
-  const selectedModels = useQuotaStore((state) => state.selectedModels);
-  const toggleModelSelected = useQuotaStore((state) => state.toggleModelSelected);
-  const applyDefaultSelections = useQuotaStore((state) => state.applyDefaultSelections);
-
   useQuotaAutoRefresh();
 
   React.useEffect(() => {
@@ -91,54 +323,6 @@ export const UsagePage: React.FC = () => {
       .map(([name, modelUsage]) => ({ name, windows: modelUsage }))
       .filter((model) => Object.keys(model.windows.windows).length > 0);
   }, [usage?.models]);
-
-  React.useEffect(() => {
-    if (selectedProviderId && providerModels.length > 0) {
-      applyDefaultSelections(selectedProviderId, providerModels.map((m) => m.name));
-    }
-  }, [selectedProviderId, providerModels, applyDefaultSelections]);
-
-  const modelsByFamily = React.useMemo(() => {
-    if (!selectedProviderId || providerModels.length === 0) {
-      return new Map<string | null, ModelInfo[]>();
-    }
-    return groupModelsByFamilyWithGetter(
-      providerModels,
-      (model) => model.name,
-      selectedProviderId as QuotaProviderId
-    );
-  }, [providerModels, selectedProviderId]);
-
-  const sortedFamilies = React.useMemo(() => {
-    if (!selectedProviderId) return [];
-    const families = getAllModelFamilies(selectedProviderId as QuotaProviderId);
-    return sortModelFamilies(families);
-  }, [selectedProviderId]);
-
-  const [collapsedFamilies, setCollapsedFamilies] = React.useState<Record<string, boolean>>(() => {
-    return {};
-  });
-
-  const toggleFamilyCollapsed = React.useCallback((familyId: string) => {
-    setCollapsedFamilies((prev) => ({
-      ...prev,
-      [familyId]: !prev[familyId],
-    }));
-  }, []);
-
-  const handleModelToggle = React.useCallback((modelName: string) => {
-    if (!selectedProviderId) return;
-    toggleModelSelected(selectedProviderId, modelName);
-    const currentSelected = selectedModels[selectedProviderId] ?? [];
-    const isSelected = currentSelected.includes(modelName);
-    const nextSelected = isSelected
-      ? currentSelected.filter((m) => m !== modelName)
-      : [...currentSelected, modelName];
-    const nextSettings: Record<string, string[]> = { ...selectedModels, [selectedProviderId]: nextSelected };
-    void updateDesktopSettings({ usageSelectedModels: nextSettings });
-  }, [selectedProviderId, selectedModels, toggleModelSelected]);
-
-  const providerSelectedModels = selectedProviderId ? (selectedModels[selectedProviderId] ?? []) : [];
 
   if (!selectedProviderId) {
     return (
@@ -217,7 +401,7 @@ export const UsagePage: React.FC = () => {
           </div>
         )}
 
-        {selectedResult && !selectedResult.configured && (
+        {selectedResult && !selectedResult.configured && selectedResult.providerId !== 'opencode-go' && (
           <div className="mb-8 rounded-lg border border-[var(--status-warning-border)] bg-[var(--status-warning-background)] px-4 py-3">
             <p className="typography-ui-label font-medium text-[var(--status-warning)]">{t('settings.usage.page.state.providerNotConfiguredTitle')}</p>
             <p className="typography-meta text-[var(--status-warning)]/80 mt-1">
@@ -233,6 +417,9 @@ export const UsagePage: React.FC = () => {
           </div>
         )}
 
+        {/* ── OpenCode Go: setup guide / fallback UI ── */}
+        {selectedProviderId === 'opencode-go' && <OpenCodeGoSetup result={selectedResult} onConfigSaved={() => fetchAllQuotas()} />}
+
         {/* Overall Usage Windows */}
         {usage?.windows && Object.keys(usage.windows).length > 0 && (
           <div data-settings-item="usage.model-quotas" className="mb-8">
@@ -246,119 +433,26 @@ export const UsagePage: React.FC = () => {
           </div>
         )}
 
-        {/* Models Section */}
+        {/* Models Section — flat list, no collapsible families, no checkboxes */}
         {providerModels.length > 0 && (
           <div className="mb-8">
             <div className="mb-1 px-1">
               <h3 className="typography-ui-header font-medium text-foreground">{t('settings.usage.page.section.modelQuotas')}</h3>
             </div>
-
-            <div className="space-y-3">
-              {/* Predefined families */}
-              {sortedFamilies.map((family) => {
-                const familyModels = modelsByFamily.get(family.id) ?? [];
-                if (familyModels.length === 0) return null;
-
-                const isCollapsed = collapsedFamilies[family.id] ?? false;
-
+            <div className="divide-y divide-[var(--surface-subtle)]">
+              {providerModels.map((model) => {
+                const entries = Object.entries(model.windows.windows);
+                if (entries.length === 0) return null;
+                const [label, window] = entries[0];
                 return (
-                  <section key={family.id} className="p-2">
-                    <Collapsible
-                      open={!isCollapsed}
-                      onOpenChange={() => toggleFamilyCollapsed(family.id)}
-                    >
-                      <CollapsibleTrigger className="flex w-full items-center justify-between py-0.5 group">
-                        <div className="flex items-center gap-1.5 text-left">
-                          <span className="typography-ui-label font-normal text-foreground">{family.label}</span>
-                          <span className="typography-micro text-muted-foreground">
-                            ({familyModels.length})
-                          </span>
-                        </div>
-                        {isCollapsed ? (
-                          <Icon name="arrow-right-s" className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
-                        ) : (
-                          <Icon name="arrow-down-s" className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
-                        )}
-                      </CollapsibleTrigger>
-                      <CollapsibleContent>
-                        <div className="divide-y divide-[var(--surface-subtle)] mt-1">
-                          {familyModels.map((model) => {
-                            const entries = Object.entries(model.windows.windows);
-                            if (entries.length === 0) return null;
-                            const [label, window] = entries[0];
-                            const isSelected = providerSelectedModels.includes(model.name);
-
-                            return (
-                              <UsageCard
-                                key={model.name}
-                                title={label}
-                                subtitle={getDisplayModelName(model.name)}
-                                window={window}
-                                showToggle
-                                toggleEnabled={isSelected}
-                                onToggle={() => handleModelToggle(model.name)}
-                              />
-                            );
-                          })}
-                        </div>
-                      </CollapsibleContent>
-                    </Collapsible>
-                  </section>
+                  <UsageCard
+                    key={model.name}
+                    title={label}
+                    subtitle={getDisplayModelName(model.name)}
+                    window={window}
+                  />
                 );
               })}
-
-              {/* Other family */}
-              {(() => {
-                const otherModels = modelsByFamily.get(null) ?? [];
-                if (otherModels.length === 0) return null;
-
-                const isCollapsed = collapsedFamilies['other'] ?? false;
-
-                return (
-                  <section className="p-2">
-                    <Collapsible
-                      open={!isCollapsed}
-                      onOpenChange={() => toggleFamilyCollapsed('other')}
-                    >
-                      <CollapsibleTrigger className="flex w-full items-center justify-between py-0.5 group">
-                        <div className="flex items-center gap-1.5 text-left">
-                          <span className="typography-ui-label font-normal text-foreground">{t('settings.usage.page.section.otherModels')}</span>
-                          <span className="typography-micro text-muted-foreground">
-                            ({otherModels.length})
-                          </span>
-                        </div>
-                        {isCollapsed ? (
-                          <Icon name="arrow-right-s" className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
-                        ) : (
-                          <Icon name="arrow-down-s" className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
-                        )}
-                      </CollapsibleTrigger>
-                      <CollapsibleContent>
-                        <div className="divide-y divide-[var(--surface-subtle)] mt-1">
-                          {otherModels.map((model) => {
-                            const entries = Object.entries(model.windows.windows);
-                            if (entries.length === 0) return null;
-                            const [label, window] = entries[0];
-                            const isSelected = providerSelectedModels.includes(model.name);
-
-                            return (
-                              <UsageCard
-                                key={model.name}
-                                title={label}
-                                subtitle={getDisplayModelName(model.name)}
-                                window={window}
-                                showToggle
-                                toggleEnabled={isSelected}
-                                onToggle={() => handleModelToggle(model.name)}
-                              />
-                            );
-                          })}
-                        </div>
-                      </CollapsibleContent>
-                    </Collapsible>
-                  </section>
-                );
-              })()}
             </div>
           </div>
         )}

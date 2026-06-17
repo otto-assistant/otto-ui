@@ -44,4 +44,6 @@ export interface ProviderResult {
   error?: string;
   usage: ProviderUsage | null;
   fetchedAt: number;
+  /** Indicates the source of usage data: 'api', 'dashboard', 'local', or undefined. */
+  usageSource?: 'api' | 'dashboard' | 'local' | 'anchor';
 }

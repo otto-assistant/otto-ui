@@ -30,21 +30,28 @@ export const formatQuotaResetLabel = (
   fallback?: string | null,
   timeFormatPreference: TimeFormatPreference = 'auto',
 ): string => {
+  // Use the relative duration ("4h 21m", "17d 10h") when available from the
+  // server (resetAfterFormatted). This matches the OpenCode Go dashboard style
+  // and is more useful for rolling/near-term windows than absolute timestamps.
+  if (fallback) {
+    return fallback;
+  }
+
   if (!resetAt) {
-    return fallback ?? '';
+    return '';
   }
 
   try {
     const resetDate = new Date(resetAt);
     if (!Number.isFinite(resetDate.getTime())) {
-      return fallback ?? '';
+      return '';
     }
 
     const now = new Date();
     const isToday = resetDate.toDateString() === now.toDateString();
 
     if (isToday) {
-      return formatTimeForPreference(resetDate, timeFormatPreference, { fallback: fallback ?? '' });
+      return formatTimeForPreference(resetDate, timeFormatPreference, { fallback: '' });
     }
 
     return formatDateTimeForPreference(resetDate, timeFormatPreference, {
@@ -55,7 +62,7 @@ export const formatQuotaResetLabel = (
       minute: '2-digit',
     });
   } catch {
-    return fallback ?? '';
+    return '';
   }
 };
 

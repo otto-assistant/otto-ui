@@ -950,48 +950,55 @@ const VSCodeHeader: React.FC<VSCodeHeaderProps> = ({ title, showBack, onBack, on
                     </span>
                   </DropdownMenuItem>
                 ) : (
-                  group.entries.map(([label, window]) => {
-                    const displayPercent = quotaDisplayMode === 'remaining'
-                      ? window.remainingPercent
-                      : window.usedPercent;
-                    const paceInfo = calculatePace(window.usedPercent, window.resetAt, window.windowSeconds, label);
-                    const expectedMarker = paceInfo?.dailyAllocationPercent != null
-                      ? (quotaDisplayMode === 'remaining'
-                          ? 100 - calculateExpectedUsagePercent(paceInfo.elapsedRatio)
-                          : calculateExpectedUsagePercent(paceInfo.elapsedRatio))
-                      : null;
-                    const metricLabel = formatQuotaValueLabel(window.valueLabel, displayPercent);
-                    return (
-                    <DropdownMenuItem
-                      key={`${group.providerId}-${label}`}
-                      className="cursor-default items-start"
-                      closeOnClick={false}
-                    >
-                      <span className="flex min-w-0 flex-1 flex-col gap-2">
-                              <span className="flex min-w-0 items-center justify-between gap-3">
-                                <span className="truncate typography-micro text-muted-foreground">{formatWindowLabel(label)}</span>
-                                <span className="typography-ui-label text-foreground tabular-nums">
-                                  {metricLabel === '-' ? '' : metricLabel}
+                  <>
+                    {group.error ? (
+                      <DropdownMenuItem key={`${group.providerId}-warning`} className="cursor-default" closeOnClick={false}>
+                        <span className="typography-micro text-[var(--status-warning)]">{group.error}</span>
+                      </DropdownMenuItem>
+                    ) : null}
+                    {group.entries.map(([label, window]) => {
+                      const displayPercent = quotaDisplayMode === 'remaining'
+                        ? window.remainingPercent
+                        : window.usedPercent;
+                      const paceInfo = calculatePace(window.usedPercent, window.resetAt, window.windowSeconds, label);
+                      const expectedMarker = paceInfo?.dailyAllocationPercent != null
+                        ? (quotaDisplayMode === 'remaining'
+                            ? 100 - calculateExpectedUsagePercent(paceInfo.elapsedRatio)
+                            : calculateExpectedUsagePercent(paceInfo.elapsedRatio))
+                        : null;
+                      const metricLabel = formatQuotaValueLabel(window.valueLabel, displayPercent);
+                      return (
+                      <DropdownMenuItem
+                        key={`${group.providerId}-${label}`}
+                        className="cursor-default items-start"
+                        closeOnClick={false}
+                      >
+                        <span className="flex min-w-0 flex-1 flex-col gap-2">
+                                <span className="flex min-w-0 items-center justify-between gap-3">
+                                  <span className="truncate typography-micro text-muted-foreground">{formatWindowLabel(label)}</span>
+                                  <span className="typography-ui-label text-foreground tabular-nums">
+                                    {metricLabel === '-' ? '' : metricLabel}
+                                  </span>
                                 </span>
-                              </span>
-                              <UsageProgressBar
-                                percent={displayPercent}
-                                tonePercent={window.usedPercent}
-                                className="h-1"
-                                expectedMarkerPercent={expectedMarker}
-                              />
-                              {paceInfo && showPredValues && (
-                                <div className="mt-0.5">
-                                  <PaceIndicator paceInfo={paceInfo} compact />
-                                </div>
-                              )}
-                              <span className="flex items-center justify-between typography-micro text-muted-foreground text-[10px]">
-                                <span>{formatQuotaResetLabel(window.resetAt, window.resetAfterFormatted ?? window.resetAtFormatted, timeFormatPreference)}</span>
-                              </span>
-                      </span>
-                    </DropdownMenuItem>
-                    );
-                  })
+                                <UsageProgressBar
+                                  percent={displayPercent}
+                                  tonePercent={window.usedPercent}
+                                  className="h-1"
+                                  expectedMarkerPercent={expectedMarker}
+                                />
+                                {paceInfo && showPredValues && (
+                                  <div className="mt-0.5">
+                                    <PaceIndicator paceInfo={paceInfo} compact />
+                                  </div>
+                                )}
+                                <span className="flex items-center justify-between typography-micro text-muted-foreground text-[10px]">
+                                  <span>{formatQuotaResetLabel(window.resetAt, window.resetAfterFormatted ?? window.resetAtFormatted, timeFormatPreference)}</span>
+                                </span>
+                        </span>
+                      </DropdownMenuItem>
+                      );
+                    })}
+                  </>
                 )}
                 {index < rateLimitGroups.length - 1 && <DropdownMenuSeparator />}
               </React.Fragment>

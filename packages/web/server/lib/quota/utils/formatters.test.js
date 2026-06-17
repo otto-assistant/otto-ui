@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { calculateResetAfterSeconds, formatResetTime, toUsageWindow } from './formatters.js';
+import { calculateResetAfterSeconds, formatResetTime, formatResetRelative, toUsageWindow } from './formatters.js';
 
 describe('formatResetTime', () => {
   it('returns null for invalid timestamps', () => {
@@ -30,7 +30,8 @@ describe('toUsageWindow', () => {
 
     expect(usageWindow.resetAfterSeconds).toBe(0);
     expect(usageWindow.resetAtFormatted).toBe(formatResetTime(0));
-    expect(usageWindow.resetAfterFormatted).toBe(formatResetTime(0));
+    // resetAfterFormatted is now relative format, not absolute
+    expect(usageWindow.resetAfterFormatted).toBe(formatResetRelative(0));
   });
 
   it('does not derive remaining percent from missing usage', () => {

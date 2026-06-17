@@ -269,8 +269,8 @@ const aggregateWindowSpend = (messages, providerAliases, now = Date.now()) => {
 };
 
 /**
- * Build `usage.windows` from DB-derived windowed spend. Each window carries
- * a dollar label and percentage derived from the local spend vs documented limits.
+ * Build `usage.windows` from DB-derived windowed spend. Each window shows
+ * percentage as the primary label (matching OpenCode Go dashboard style).
  */
 const buildLimitWindows = (windowSpend) => {
   const windows = {};
@@ -280,11 +280,15 @@ const buildLimitWindows = (windowSpend) => {
     const limitUsd = WINDOW_LIMITS_USD[key];
     const spend = toNumber(bucket.spend) ?? 0;
     const usedPercent = limitUsd > 0 ? (spend / limitUsd) * 100 : null;
+    let valueLabel = null;
+    if (usedPercent !== null) {
+      valueLabel = `${Math.round(usedPercent)}%`;
+    }
     windows[key] = toUsageWindow({
       usedPercent,
       windowSeconds: bucket.windowSeconds ?? null,
       resetAt: bucket.resetAt ?? null,
-      valueLabel: `$${spend.toFixed(2)} / $${limitUsd.toFixed(2)}`
+      valueLabel
     });
   }
   return windows;

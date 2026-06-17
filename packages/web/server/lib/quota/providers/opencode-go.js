@@ -4,11 +4,10 @@ import {
   normalizeAuthEntry,
   buildResult,
   toUsageWindow,
-  toNumber,
-  formatMoney
+  toNumber
 } from '../utils/index.js';
 import { readOpenCodeModelUsage, readOpenCodeWindows } from './opencode-go-usage-db.js';
-import { resolveDashboardConfig, fetchDashboardUsage } from './opencode-go-dashboard.js';
+import { resolveDashboardConfig, resolveAnchorConfig, resolveConfigMode, fetchDashboardUsage, clearDashboardConfig } from './opencode-go-dashboard.js';
 
 export const providerId = 'opencode-go';
 export const providerName = 'OpenCode Go';
@@ -16,51 +15,23 @@ export const aliases = ['opencode-go', 'opencode', 'opencode-zen'];
 
 const USAGE_ENDPOINT = 'https://opencode.ai/zen/go/v1/usage';
 
-const NEEDS_DASHBOARD_MESSAGE =
-  'OpenCode Go has no usage API yet, so usage windows are read from the console dashboard. Set OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE (or create ~/.config/opencode/opencode-go.json with workspaceId and authCookie). The auth cookie comes from opencode.ai DevTools → Application → Cookies.';
-
-/**
- * Documented OpenCode Go usage limits in USD, used to surface the dollar value
- * of each window alongside the percentage the usage API returns — mirroring the
- * console dashboard. The percentages from the API stay authoritative for the
- * progress bars; the dollar labels are derived from these limits for context.
- * Source: https://opencode.ai/docs/go/#usage-limits
- */
-const WINDOW_LIMITS_USD = {
-  '5h': 12,
-  weekly: 30,
-  monthly: 60
-};
-
 const buildWindow = (key, data) => {
-  if (!data || typeof data !== 'object') {
-    return null;
-  }
+  if (!data || typeof data !== 'object') return null;
 
   const usedPercent = toNumber(data.usagePercent);
   const resetInSeconds = toNumber(data.resetInSec);
   const resetAt = resetInSeconds !== null ? Date.now() + resetInSeconds * 1000 : null;
 
-  const limitUsd = WINDOW_LIMITS_USD[key] ?? null;
   let valueLabel = null;
-  if (limitUsd !== null && usedPercent !== null) {
-    const spent = formatMoney((usedPercent / 100) * limitUsd);
-    const limit = formatMoney(limitUsd);
-    if (spent !== null && limit !== null) {
-      valueLabel = `$${spent} / $${limit}`;
-    }
+  if (usedPercent !== null) {
+    valueLabel = `${Math.round(usedPercent)}%`;
   }
 
   if (data.status === 'rate-limited') {
     valueLabel = valueLabel ? `${valueLabel} · limit reached` : 'limit reached';
   }
 
-  return toUsageWindow({
-    usedPercent,
-    windowSeconds: null,
-    resetAt,
-    valueLabel
-  });
+  return toUsageWindow({ usedPercent, windowSeconds: null, resetAt, valueLabel });
 };
 
 const resolveApiKey = () => {
@@ -70,22 +41,13 @@ const resolveApiKey = () => {
 };
 
 export const isConfigured = () => {
-  if (resolveDashboardConfig()) {
-    return true;
-  }
-  // OpenCode Go is the runtime that manages all providers. If any provider
-  // has auth configured, OpenCode Go itself is active and can report usage
-  // from the local database.
+  if (resolveDashboardConfig()) return true;
+  if (resolveAnchorConfig()) return true;
   const auth = readAuthFile();
-  return Object.keys(auth).length > 0;
+  const entry = normalizeAuthEntry(getAuthEntry(auth, aliases));
+  return !!entry;
 };
 
-/**
- * Try the official usage endpoint. It does not exist yet (opencode#16513 is
- * unmerged and returns 404), but querying it first means this provider starts
- * working automatically once OpenCode ships the API. Returns null on any
- * non-success so the caller can fall back to dashboard scraping.
- */
 const fetchOfficialUsage = async (apiKey) => {
   const response = await fetch(USAGE_ENDPOINT, {
     method: 'GET',
@@ -94,9 +56,7 @@ const fetchOfficialUsage = async (apiKey) => {
       'Content-Type': 'application/json'
     }
   });
-  if (!response.ok) {
-    return null;
-  }
+  if (!response.ok) return null;
   const payload = await response.json();
   return {
     rolling: payload?.rollingUsage ?? null,
@@ -108,93 +68,127 @@ const fetchOfficialUsage = async (apiKey) => {
 const buildWindows = (usageData) => {
   const windows = {};
   const fiveHour = buildWindow('5h', usageData.rolling);
-  if (fiveHour) {
-    windows['5h'] = fiveHour;
-  }
+  if (fiveHour) windows['5h'] = fiveHour;
   const weekly = buildWindow('weekly', usageData.weekly);
-  if (weekly) {
-    windows['weekly'] = weekly;
-  }
+  if (weekly) windows['weekly'] = weekly;
   const monthly = buildWindow('monthly', usageData.monthly);
-  if (monthly) {
-    windows['monthly'] = monthly;
-  }
+  if (monthly) windows['monthly'] = monthly;
   return windows;
+};
+
+/**
+ * Build windows from local DB data with anchor-based reset times.
+ * Anchors provide the seconds-until-reset from the dashboard, giving
+ * accurate billing cycle boundaries.
+ */
+const buildAnchorWindows = (dbWindows, anchors) => {
+  if (!dbWindows?.windows) return null;
+  const windows = {};
+  const WINDOW_LABELS = { '5h': '5h', weekly: 'weekly', monthly: 'monthly' };
+
+  for (const [key, label] of Object.entries(WINDOW_LABELS)) {
+    const dbWindow = dbWindows.windows[key];
+    if (!dbWindow) continue;
+
+    const usedPercent = dbWindow.usedPercent;
+    const anchorSeconds = anchors[key];
+    const resetAt = anchorSeconds != null ? Date.now() + anchorSeconds * 1000 : dbWindow.resetAt;
+
+    let valueLabel = null;
+    if (usedPercent !== null) {
+      valueLabel = `${Math.round(usedPercent)}%`;
+    }
+
+    windows[key] = toUsageWindow({ usedPercent, windowSeconds: null, resetAt, valueLabel });
+  }
+  return Object.keys(windows).length > 0 ? windows : null;
 };
 
 export const fetchQuota = async () => {
   const apiKey = resolveApiKey();
   const dashboardConfig = resolveDashboardConfig();
-
-  if (!apiKey && !dashboardConfig) {
-    return buildResult({
-      providerId,
-      providerName,
-      ok: false,
-      configured: false,
-      error: 'Not configured'
-    });
-  }
-
-  // Per-model spend is read from the local OpenCode DB and is independent of
-  // the windows source, so surface it even when windows are unavailable.
+  const anchorConfig = resolveAnchorConfig();
+  const mode = resolveConfigMode();
+  const dbWindows = await readOpenCodeWindows(aliases).catch(() => null);
   const models = await readOpenCodeModelUsage(aliases);
+
   const withModels = (windows) => {
     const usage = { windows };
-    if (models) {
-      usage.models = models;
-    }
+    if (models) usage.models = models;
     return usage;
   };
 
-  try {
-    let usageData = null;
-    if (apiKey) {
-      usageData = await fetchOfficialUsage(apiKey).catch(() => null);
-    }
-    if (!usageData && dashboardConfig) {
-      usageData = await fetchDashboardUsage(dashboardConfig);
-    }
+  // If no data source is available at all, return not-configured.
+  if (!apiKey && !dashboardConfig && !anchorConfig && !dbWindows) {
+    return buildResult({
+      providerId, providerName,
+      ok: false, configured: false, error: 'Not configured'
+    });
+  }
 
-    if (!usageData) {
-      // Fall back to local DB-computed windows. The DB only knows about
-      // messages sent from this machine, so spend may undercount — but it's
-      // better than showing nothing. The dashboard setup message is included
-      // as a hint so the user knows they can get authoritative data.
-      const dbWindows = await readOpenCodeWindows(aliases).catch(() => null);
-      if (dbWindows) {
-        return buildResult({
-          providerId,
-          providerName,
-          ok: true,
-          configured: true,
-          usage: withModels(dbWindows.windows)
-        });
+  try {
+    // ── Mode 1: Cookie/dashboard (most accurate) ──
+    if (mode === 'cookie' && dashboardConfig) {
+      let usageData = null;
+      let source = null;
+      if (apiKey) {
+        usageData = await fetchOfficialUsage(apiKey).catch(() => null);
+        if (usageData) source = 'api';
       }
-      // No data source available at all — help the user set one up.
+      if (!usageData) {
+        usageData = await fetchDashboardUsage(dashboardConfig);
+        if (usageData) source = 'dashboard';
+      }
+
+      if (usageData) {
+        const windows = buildWindows(usageData);
+        // Fill missing windows from local DB
+        if (dbWindows?.windows) {
+          for (const key of ['monthly', 'weekly', '5h']) {
+            if (!windows[key] && dbWindows.windows[key]) {
+              windows[key] = dbWindows.windows[key];
+            }
+          }
+        }
+        return {
+          ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
+          usageSource: source
+        };
+      }
+
+      // Dashboard configured but failed
       return buildResult({
-        providerId,
-        providerName,
-        ok: false,
-        configured: true,
+        providerId, providerName, ok: false, configured: true,
         usage: models ? withModels({}) : null,
-        error: NEEDS_DASHBOARD_MESSAGE
+        error: 'Could not fetch usage from the OpenCode Go dashboard.'
       });
     }
 
+    // ── Mode 2: Anchor-based (local DB + reset times from user) ──
+    if (mode === 'anchor' && anchorConfig && dbWindows) {
+      const windows = buildAnchorWindows(dbWindows, anchorConfig);
+      if (windows) {
+        return {
+          ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
+          usageSource: 'anchor'
+        };
+      }
+    }
+
+    // ── Fallback: local DB only (approximate) ──
+    if (dbWindows) {
+      return {
+        ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(dbWindows.windows) }),
+        usageSource: 'local'
+      };
+    }
+
     return buildResult({
-      providerId,
-      providerName,
-      ok: true,
-      configured: true,
-      usage: withModels(buildWindows(usageData))
+      providerId, providerName, ok: false, configured: false, error: 'Not configured'
     });
   } catch (error) {
     return buildResult({
-      providerId,
-      providerName,
-      ok: false,
-      configured: true,
+      providerId, providerName, ok: false, configured: true,
       usage: models ? withModels({}) : null,
       error: error instanceof Error ? error.message : 'Request failed'
     });
