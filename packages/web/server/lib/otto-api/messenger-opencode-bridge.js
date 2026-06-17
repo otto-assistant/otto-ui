@@ -2429,7 +2429,7 @@ export function createMessengerOpencodeBridge({
       // try to look up the binding from the bridge store and messenger config.
       if (!ctx && sessionId && lookupMessengerTarget) {
         try {
-          const binding = lookupMessengerTarget(sessionId);
+          const binding = await lookupMessengerTarget(sessionId);
           if (binding) {
             // Build a temporary context so we can forward the permission
             ctx = {
@@ -2520,7 +2520,7 @@ export function createMessengerOpencodeBridge({
 
       if (!ctx && sessionId && lookupMessengerTarget) {
         try {
-          const binding = lookupMessengerTarget(sessionId);
+          const binding = await lookupMessengerTarget(sessionId);
           if (binding) {
             ctx = {
               type: binding.type,
