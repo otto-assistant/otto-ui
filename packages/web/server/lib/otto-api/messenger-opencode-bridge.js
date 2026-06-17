@@ -2881,12 +2881,31 @@ export function createMessengerOpencodeBridge({
       },
 
       async runShell({ command }) {
-        const sessionId = stored?.sessionId ?? null;
-        if (!sessionId) return { ok: false, error: 'no active session on this conversation' };
         // A native slash `/shell` reaches here without going through
         // routeInbound, so make sure we're subscribed to the event stream —
         // otherwise the shell result's SSE parts would never be mirrored.
         ensureSubscribed();
+        // Resolve OR create a session so `/shell` (and `!pwd`) work even before
+        // any chat message has spun one up — the user shouldn't have to "send a
+        // regular message first". This auto-resolves the project (channel slug /
+        // single project) and binds a fresh session to this surface, exactly
+        // like a normal first message would.
+        let resolved;
+        try {
+          resolved = await resolveOrCreateSession({
+            type,
+            token,
+            channelId,
+            threadId: threadId ?? null,
+            projectPath: stored?.projectPath ?? null,
+            projectLabel: stored?.projectLabel ?? null,
+          });
+        } catch (e) {
+          return { ok: false, error: e?.message ?? 'could not start a session for the shell command' };
+        }
+        const sessionId = resolved?.sessionId ?? null;
+        if (!sessionId) return { ok: false, error: 'could not resolve a session for this conversation' };
+        const projectPath = resolved.projectPath ?? stored?.projectPath ?? null;
         // Bind a context for this surface so the shell command's result (which
         // streams back over SSE as a bash tool part) is mirrored to the exact
         // channel/thread it was issued from, instead of an auto-resolved
@@ -2898,7 +2917,7 @@ export function createMessengerOpencodeBridge({
             token,
             channelId,
             threadId: threadId ?? null,
-            projectPath: stored?.projectPath ?? null,
+            projectPath,
             sentPartIds: new Set(),
             startedAt: Date.now(),
             lastError: null,
@@ -2917,7 +2936,7 @@ export function createMessengerOpencodeBridge({
         });
         const model =
           stored?.modelOverride ?? projectDefaults?.modelDefault ?? globals.model ?? null;
-        return opencodeAdapter.runShell(sessionId, stored?.projectPath ?? null, command, {
+        return opencodeAdapter.runShell(sessionId, projectPath, command, {
           modelOverride: model,
           agentOverride: agent,
         });

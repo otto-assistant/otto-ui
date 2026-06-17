@@ -1573,6 +1573,27 @@ describe('/shell command — agent resolution (regression: empty agent 500s)', (
     });
     expect(shellBody().command).toBe('echo hi');
   });
+
+  it('auto-creates a session when none exists (no "send a message first")', async () => {
+    // Binding with a project but NO sessionId — the user ran /shell as their
+    // first action. runShell must create + bind a session instead of erroring.
+    const bridge = makeShellBridge({ sessionId: null });
+    const result = await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1', threadId: null, text: '!pwd',
+    });
+    // A session was created…
+    const created = calls.find((c) => c.method === 'POST' && /\/session(\?|$)/.test(c.url));
+    expect(created).toBeTruthy();
+    // …and the shell command ran against it with a real agent.
+    expect(shellBody().command).toBe('pwd');
+    expect(shellBody().agent).toBe('build');
+    expect(result).toMatchObject({ ok: true, handledCommand: 'shell' });
+    // The user is never told to "send a regular message first".
+    const posts = calls
+      .filter((c) => c.method === 'POST' && c.url.includes('/messages'))
+      .map((c) => JSON.parse(c.body).content);
+    expect(posts.some((p) => /send a regular message first/i.test(p))).toBe(false);
+  });
 });
 
 describe('project ↔ channel lifecycle endpoints', () => {
