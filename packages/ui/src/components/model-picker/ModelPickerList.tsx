@@ -361,7 +361,6 @@ interface ModelPickerListProps {
   reorderFavoriteTitle?: string;
   providerOrder?: string[];
   onReorderProvider?: (orderedProviderIDs: string[]) => void;
-  reorderProviderAriaLabel?: string;
   reorderProviderTitle?: string;
   footerContent?: React.ReactNode | ((activeEntry: ModelPickerEntry | undefined) => React.ReactNode);
   renderVersion?: number;
@@ -402,7 +401,6 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   reorderFavoriteTitle,
   providerOrder,
   onReorderProvider,
-  reorderProviderAriaLabel,
   reorderProviderTitle,
   footerContent,
   renderVersion,
@@ -668,54 +666,41 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   const isSectionCollapsed = (key: string) => collapsedSections.has(key);
   const toggleSectionCollapsed = (key: string) => toggleSection(key);
 
-  const renderProviderDragHandle = (dragHandleProps: SortableFavoriteHandleProps) => (
-    <button
-      type="button"
-      ref={dragHandleProps.setActivatorNodeRef}
-      {...dragHandleProps.attributes}
-      {...dragHandleProps.listeners}
-      disabled={disabled}
-      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-      className="model-favorite-drag-handle flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none"
-      aria-label={reorderProviderAriaLabel}
-      title={reorderProviderTitle}
-    >
-      <Icon name="draggable" className="size-3.5" />
-    </button>
-  );
-
-  const renderSectionHeader = (key: string, icon: React.ReactNode, label: React.ReactNode, dragHandle?: React.ReactNode) => {
+  const renderSectionHeader = (key: string, icon: React.ReactNode, label: React.ReactNode, headerDragProps?: SortableFavoriteHandleProps) => {
     const collapsed = isSectionCollapsed(key);
-    const inner = (
-      <>
-        {dragHandle ?? null}
-        {icon}
-        <span className="min-w-0 truncate">{label}</span>
-        <span className="ml-auto flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground">
-          <Icon name={collapsed ? 'arrow-right-s' : 'arrow-down-s'} className="size-4" />
-        </span>
-      </>
-    );
+    const toggleKeyDown = (event: React.KeyboardEvent) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        toggleSectionCollapsed(key);
+      }
+    };
 
-    // A draggable header cannot be a <button> (the drag handle is itself a
-    // <button>, and nested buttons are invalid), so render a div with button
-    // semantics when a drag handle is present.
-    if (dragHandle) {
+    // When the section is reorderable, the whole header acts as the drag
+    // activator (desktop mouse, with an 8px threshold so a plain click still
+    // toggles collapse). A <button> cannot be the activator because dnd-kit's
+    // attributes/listeners turn it into a draggable widget, so render a div
+    // with button semantics. The drag listeners are spread first so our
+    // onClick/onKeyDown collapse handlers take precedence.
+    if (headerDragProps) {
       return (
         <div
+          ref={headerDragProps.setActivatorNodeRef}
+          {...headerDragProps.attributes}
+          {...headerDragProps.listeners}
           role="button"
           tabIndex={0}
           aria-expanded={!collapsed}
-          className={cn(headerClassName, 'w-full text-left cursor-pointer')}
+          title={reorderProviderTitle}
+          className={cn(headerClassName, 'w-full text-left cursor-grab select-none active:cursor-grabbing')}
           onClick={() => toggleSectionCollapsed(key)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              toggleSectionCollapsed(key);
-            }
-          }}
+          onKeyDown={toggleKeyDown}
         >
-          {inner}
+          <Icon name="draggable" className="size-3.5 flex-shrink-0 text-muted-foreground/70" />
+          {icon}
+          <span className="min-w-0 truncate">{label}</span>
+          <span className="ml-auto flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground">
+            <Icon name={collapsed ? 'arrow-right-s' : 'arrow-down-s'} className="size-4" />
+          </span>
         </div>
       );
     }
@@ -727,7 +712,11 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
         onClick={() => toggleSectionCollapsed(key)}
         aria-expanded={!collapsed}
       >
-        {inner}
+        {icon}
+        <span className="min-w-0 truncate">{label}</span>
+        <span className="ml-auto flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground">
+          <Icon name={collapsed ? 'arrow-right-s' : 'arrow-down-s'} className="size-4" />
+        </span>
       </button>
     );
   };
@@ -735,11 +724,11 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   const renderProviderSection = (
     provider: (typeof filteredProviders)[number],
     providerIndex: number,
-    dragHandle?: React.ReactNode,
+    headerDragProps?: SortableFavoriteHandleProps,
   ) => (
     <>
       {providerIndex > 0 ? <div className="h-px bg-border/40 my-1" /> : null}
-      {renderSectionHeader(`provider:${provider.id}`, <ProviderLogo providerId={provider.id} className="h-4 w-4 flex-shrink-0" />, provider.name || provider.id, dragHandle)}
+      {renderSectionHeader(`provider:${provider.id}`, <ProviderLogo providerId={provider.id} className="h-4 w-4 flex-shrink-0" />, provider.name || provider.id, headerDragProps)}
       {!isSectionCollapsed(`provider:${provider.id}`)
         ? provider.models.map((model) => renderRow({ model, providerID: provider.id, modelID: model.id as string }, 'provider', false, currentFlatIndex++))
         : null}
@@ -819,7 +808,7 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
               <SortableContext items={filteredProviders.map((provider) => provider.id)} strategy={verticalListSortingStrategy}>
                 {filteredProviders.map((provider, providerIndex) => (
                   <SortableProviderSection key={provider.id} id={provider.id} disabled={disabled}>
-                    {(dragHandleProps) => renderProviderSection(provider, providerIndex, renderProviderDragHandle(dragHandleProps))}
+                    {(dragHandleProps) => renderProviderSection(provider, providerIndex, dragHandleProps)}
                   </SortableProviderSection>
                 ))}
               </SortableContext>

@@ -2364,7 +2364,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                 reorderFavoriteTitle={t('chat.modelControls.reorderFavoriteTitle')}
                                 providerOrder={providerOrder}
                                 onReorderProvider={setProviderOrder}
-                                reorderProviderAriaLabel={t('chat.modelControls.reorderProviderAria')}
                                 reorderProviderTitle={t('chat.modelControls.reorderProviderTitle')}
                                 footerContent={(activeEntry) => {
                                     const activeHasThinkingVariants = activeEntry
