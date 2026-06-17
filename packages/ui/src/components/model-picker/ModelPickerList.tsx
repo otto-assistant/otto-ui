@@ -18,6 +18,7 @@ import { getCurrentIntlLocale } from '@/lib/i18n';
 import { mergeModelMetadataWithLiveModel } from '@/lib/modelMetadata';
 import { getModelDisplayName as getSharedModelDisplayName } from '@/lib/modelDisplay';
 import { cn } from '@/lib/utils';
+import { useModelPickerSectionsStore } from '@/stores/useModelPickerSectionsStore';
 import type { ModelMetadata } from '@/types';
 
 export type ProviderModel = Record<string, unknown> & { id?: string; name?: string };
@@ -376,7 +377,12 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   const scrollRef = React.useRef<HTMLElement | null>(null);
   const keyboardOwnsSelectionRef = React.useRef(false);
   const lastMousePositionRef = React.useRef<{ x: number; y: number } | null>(null);
-  const [collapsedSections, setCollapsedSections] = React.useState<Set<string>>(() => new Set());
+  const collapsedRecord = useModelPickerSectionsStore((state) => state.collapsedSections);
+  const toggleSection = useModelPickerSectionsStore((state) => state.toggleSection);
+  const collapsedSections = React.useMemo(
+    () => new Set(Object.keys(collapsedRecord).filter((key) => collapsedRecord[key])),
+    [collapsedRecord],
+  );
   const favoriteRowSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
   );
@@ -592,14 +598,7 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   };
 
   const isSectionCollapsed = (key: string) => collapsedSections.has(key);
-  const toggleSectionCollapsed = (key: string) => {
-    setCollapsedSections((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
+  const toggleSectionCollapsed = (key: string) => toggleSection(key);
 
   const renderSectionHeader = (key: string, icon: React.ReactNode, label: React.ReactNode) => {
     const collapsed = isSectionCollapsed(key);
