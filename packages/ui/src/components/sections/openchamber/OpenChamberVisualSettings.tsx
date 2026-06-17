@@ -407,7 +407,6 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         void updateDesktopSettings({ expandedEditorToolbar: enabled });
     }, [setExpandedEditorToolbar]);
 
-
     const handleCollapsibleUserMessagesChange = React.useCallback((enabled: boolean) => {
         setCollapsibleUserMessages(enabled);
         void updateDesktopSettings({ collapsibleUserMessages: enabled });

@@ -80,7 +80,6 @@ export async function bootstrapGlobal(
         set({ projects })
       }),
     ),
-    retry(() => sdk.provider.list().then((x) => set({ providers: unwrap(x, "provider.list") }))),
   ])
 
   const errors = results
@@ -217,7 +216,6 @@ export async function bootstrapDirectory(input: {
   // These enrich the UI but aren't required for basic functionality.
   // ---------------------------------------------------------------------------
   void Promise.allSettled([
-    retry(() => sdk.app.agents().then((x) => set({ agent: unwrap(x, "app.agents") }))),
     retry(() => sdk.command.list().then((x) => set({ command: unwrap(x, "command.list") }))),
     retry(() => sdk.mcp.status().then((x) => set({ mcp: unwrap(x, "mcp.status") }))),
     retry(() => sdk.lsp.status().then((x) => set({ lsp: unwrap(x, "lsp.status") }))),

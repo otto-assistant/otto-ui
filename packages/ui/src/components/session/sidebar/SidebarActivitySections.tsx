@@ -97,11 +97,7 @@ export function SidebarActivitySections({
         if (flatVariant) {
           return (
             <div key={section.key} className="space-y-0.5">
-              {visibleItems.map((item) => (
-                <React.Fragment key={item.node.session.id}>
-                  {renderSessionNode(item.node, 0, item.groupDirectory, item.projectId, false, item.secondaryMeta, 'recent')}
-                </React.Fragment>
-              ))}
+              {visibleItems.map((item) => renderSessionNode(item.node, 0, item.groupDirectory, item.projectId, false, item.secondaryMeta, 'recent'))}
               {remainingCount > 0 ? (
                 <button
                   type="button"
@@ -130,11 +126,7 @@ export function SidebarActivitySections({
             </button>
             {!isCollapsed ? (
               <div className={cn('space-y-0.5 pl-7')}>
-                {visibleItems.map((item) => (
-                  <React.Fragment key={item.node.session.id}>
-                    {renderSessionNode(item.node, 0, item.groupDirectory, item.projectId, false, item.secondaryMeta, 'recent')}
-                  </React.Fragment>
-                ))}
+                {visibleItems.map((item) => renderSessionNode(item.node, 0, item.groupDirectory, item.projectId, false, item.secondaryMeta, 'recent'))}
                 {remainingCount > 0 ? (
                   <button
                     type="button"

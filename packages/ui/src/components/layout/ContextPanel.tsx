@@ -3,7 +3,9 @@ import React from 'react';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import { Button } from '@/components/ui/button';
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
-import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
+import { DiffView } from '@/components/views/DiffView';
+import { FilesView } from '@/components/views/FilesView';
+import { PlanView } from '@/components/views/PlanView';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { openExternalUrl } from '@/lib/url';
 import { copyTextToClipboard } from '@/lib/clipboard';
@@ -24,6 +26,7 @@ import { getRuntimeApiBaseUrl } from '@/lib/runtime-switch';
 import { Icon } from "@/components/icon/Icon";
 import { OpenChamberLogo } from "@/components/ui/OpenChamberLogo";
 import { invokeDesktopCommand } from '@/lib/desktopNative';
+import { getOrCreateEmbeddedSessionChatURL, type EmbeddedSessionChatURLCacheEntry } from './contextPanelEmbeddedChat';
 import {
   type PreviewElementMetadata,
   isPreviewElementMetadata,
@@ -34,14 +37,6 @@ import {
   getBrowserProxyTargetKey,
   previewProxyTargetCache,
 } from '@/lib/preview/screenshot-capture';
-
-// Heavy views deferred so the diff/files/plan stack (shiki + @pierre diff
-// highlighter, codemirror, etc.) stays out of the initial module graph until
-// the user actually opens a diff/files/plan tab. Render sites are wrapped in
-// <Suspense> below.
-const DiffView = lazyWithChunkRecovery(() => import('@/components/views/DiffView').then(m => ({ default: m.DiffView })));
-const FilesView = lazyWithChunkRecovery(() => import('@/components/views/FilesView').then(m => ({ default: m.FilesView })));
-const PlanView = lazyWithChunkRecovery(() => import('@/components/views/PlanView').then(m => ({ default: m.PlanView })));
 
 const CONTEXT_PANEL_MIN_WIDTH = 380;
 const CONTEXT_PANEL_MAX_WIDTH = 1400;
@@ -406,29 +401,6 @@ const runIframeScript = async <T,>(iframe: HTMLIFrameElement, script: string): P
   return await Promise.resolve(result) as T;
 };
 
-
-const buildEmbeddedSessionChatURL = (sessionID: string, directory: string | null, readOnly: boolean): string => {
-  if (typeof window === 'undefined') {
-    return '';
-  }
-
-  const url = new URL(window.location.pathname, window.location.origin);
-  url.searchParams.set('ocPanel', 'session-chat');
-  url.searchParams.set('sessionId', sessionID);
-  if (readOnly) {
-    url.searchParams.set('readOnly', '1');
-  } else {
-    url.searchParams.delete('readOnly');
-  }
-  if (directory && directory.trim().length > 0) {
-    url.searchParams.set('directory', directory);
-  } else {
-    url.searchParams.delete('directory');
-  }
-
-  url.hash = '';
-  return url.toString();
-};
 
 const truncateTabLabel = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) {
@@ -2010,7 +1982,7 @@ export const ContextPanel: React.FC = () => {
   const reorderContextPanelTabs = useUIStore((state) => state.reorderContextPanelTabs);
   const setSelectedFilePath = useFilesViewTabsStore((state) => state.setSelectedPath);
   const openContextPreview = useUIStore((state) => state.openContextPreview);
-  const { themeMode, lightThemeId, darkThemeId, currentTheme } = useThemeSystem();
+  const { themeMode, setThemeMode, lightThemeId, darkThemeId, currentTheme } = useThemeSystem();
 
   const tabs = React.useMemo(() => panelState?.tabs ?? [], [panelState?.tabs]);
   const activeTab = tabs.find((tab) => tab.id === panelState?.activeTabId) ?? tabs[tabs.length - 1] ?? null;
@@ -2026,6 +1998,7 @@ export const ContextPanel: React.FC = () => {
   const activeResizePointerIDRef = React.useRef<number | null>(null);
   const panelRef = React.useRef<HTMLElement | null>(null);
   const chatFrameRefs = React.useRef<Map<string, HTMLIFrameElement>>(new Map());
+  const chatFrameSrcByTabIDRef = React.useRef<Map<string, EmbeddedSessionChatURLCacheEntry>>(new Map());
   const wasOpenRef = React.useRef(false);
   const previousIsOpenRef = React.useRef(isOpen);
   const suppressWidthTransitionFrameRef = React.useRef<number | null>(null);
@@ -2185,6 +2158,24 @@ export const ContextPanel: React.FC = () => {
 
   const activeChatTabID = activeTab?.mode === 'chat' ? activeTab.id : null;
 
+  const getEmbeddedChatSrc = React.useCallback((tabID: string, sessionID: string, readOnly: boolean): string => {
+    return getOrCreateEmbeddedSessionChatURL(chatFrameSrcByTabIDRef.current, tabID, sessionID, directoryKey || null, readOnly, {
+      mode: themeMode,
+      lightThemeId,
+      darkThemeId,
+      currentTheme,
+    });
+  }, [currentTheme, darkThemeId, directoryKey, lightThemeId, themeMode]);
+
+  React.useEffect(() => {
+    const liveTabIDs = new Set(tabs.map((tab) => tab.id));
+    for (const tabID of chatFrameSrcByTabIDRef.current.keys()) {
+      if (!liveTabIDs.has(tabID)) {
+        chatFrameSrcByTabIDRef.current.delete(tabID);
+      }
+    }
+  }, [tabs]);
+
   const handleDiffScopeChange = React.useCallback((nextScope: 'working' | 'staged') => {
     if (!directoryKey || activeTab?.mode !== 'diff') {
       return;
@@ -2272,6 +2263,37 @@ export const ContextPanel: React.FC = () => {
       );
     }
   }, [activeChatTabID]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+
+      const isKnownChatFrame = Array.from(chatFrameRefs.current.values())
+        .some((frame) => frame.contentWindow === event.source);
+      if (!isKnownChatFrame) {
+        return;
+      }
+
+      const data = event.data as { type?: unknown };
+      if (data?.type !== 'openchamber:cycle-theme-request') {
+        return;
+      }
+
+      const modes: Array<'light' | 'dark' | 'system'> = ['light', 'dark', 'system'];
+      const currentIndex = modes.indexOf(themeMode);
+      const nextIndex = (currentIndex + 1) % modes.length;
+      setThemeMode(modes[nextIndex]);
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [setThemeMode, themeMode]);
 
   React.useLayoutEffect(() => {
     const hasAnyChatTab = tabs.some((tab) => tab.mode === 'chat');
@@ -2444,7 +2466,7 @@ export const ContextPanel: React.FC = () => {
       <div className={cn('relative min-h-0 flex-1 overflow-hidden', isResizing && 'pointer-events-none')}>
         {hasFileTabs ? (
           <div className={cn('absolute inset-0', isFileTabActive ? 'block' : 'hidden')}>
-            <React.Suspense fallback={null}><FilesView mode="editor-only" /></React.Suspense>
+            <FilesView mode="editor-only" />
           </div>
         ) : null}
         {chatTabs.map((tab) => {
@@ -2453,7 +2475,7 @@ export const ContextPanel: React.FC = () => {
             return null;
           }
 
-          const src = buildEmbeddedSessionChatURL(sessionID, directoryKey || null, tab.readOnly);
+          const src = getEmbeddedChatSrc(tab.id, sessionID, tab.readOnly);
           if (!src) {
             return null;
           }
@@ -2500,23 +2522,19 @@ export const ContextPanel: React.FC = () => {
               activeTab?.id !== tab.id && 'hidden'
             )}
           >
-            <React.Suspense fallback={null}>
-              <DiffView
-                hideStackedFileSidebar
-                stackedDefaultCollapsedAll
-                pinSelectedFileHeaderToTopOnNavigate
-                showOpenInEditorAction
-                diffScope={tab.stagedDiff ? 'staged' : 'working'}
-                onDiffScopeChange={handleDiffScopeChange}
-                targetFilePath={tab.targetPath}
-                flushContent
-              />
-            </React.Suspense>
+            <DiffView
+              hideStackedFileSidebar
+              stackedDefaultCollapsedAll
+              pinSelectedFileHeaderToTopOnNavigate
+              showOpenInEditorAction
+              diffScope={tab.stagedDiff ? 'staged' : 'working'}
+              onDiffScopeChange={handleDiffScopeChange}
+              targetFilePath={tab.targetPath}
+              flushContent
+            />
           </div>
         ))}
-        {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff'
-          ? <React.Suspense fallback={null}>{activeNonChatContent}</React.Suspense>
-          : null}
+        {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff' ? activeNonChatContent : null}
       </div>
     </aside>
   );
