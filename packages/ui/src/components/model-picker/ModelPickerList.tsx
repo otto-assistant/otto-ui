@@ -1,13 +1,14 @@
 import React from 'react';
 import {
   DndContext,
+  MouseSensor,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
 } from '@dnd-kit/core';
-import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS as DndCSS } from '@dnd-kit/utilities';
 import { Icon } from '@/components/icon/Icon';
 import { Input } from '@/components/ui/input';
@@ -257,6 +258,35 @@ const SortableFavoriteModelRow: React.FC<{
   );
 };
 
+const SortableProviderSection: React.FC<{
+  id: string;
+  disabled?: boolean;
+  children: (dragHandleProps: SortableFavoriteHandleProps) => React.ReactNode;
+}> = ({ id, disabled = false, children }) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id, disabled });
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: DndCSS.Translate.toString(transform),
+        transition,
+      }}
+      className={cn(isDragging && 'opacity-60')}
+    >
+      {children({ attributes, listeners, setActivatorNodeRef, isDragging })}
+    </div>
+  );
+};
+
 const STICKY_HEADER_OFFSET = 32;
 
 const scrollIntoView = (container: HTMLElement | null, node: HTMLElement | null) => {
@@ -329,6 +359,10 @@ interface ModelPickerListProps {
   onReorderFavorite?: (active: ModelPickerEntry, over: ModelPickerEntry) => void;
   reorderFavoriteAriaLabel?: string;
   reorderFavoriteTitle?: string;
+  providerOrder?: string[];
+  onReorderProvider?: (orderedProviderIDs: string[]) => void;
+  reorderProviderAriaLabel?: string;
+  reorderProviderTitle?: string;
   footerContent?: React.ReactNode | ((activeEntry: ModelPickerEntry | undefined) => React.ReactNode);
   renderVersion?: number;
   tooltipsEnabled?: boolean;
@@ -366,6 +400,10 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   onReorderFavorite,
   reorderFavoriteAriaLabel,
   reorderFavoriteTitle,
+  providerOrder,
+  onReorderProvider,
+  reorderProviderAriaLabel,
+  reorderProviderTitle,
   footerContent,
   renderVersion,
   tooltipsEnabled = true,
@@ -385,6 +423,12 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
   );
   const favoriteRowSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  );
+  // Desktop-only provider reordering: a MouseSensor (no TouchSensor) keeps the
+  // section headers tappable/scrollable on touch devices while enabling
+  // click-and-drag with a mouse.
+  const providerSectionSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
   );
 
   const allowedProviderSet = React.useMemo(() => {
@@ -418,7 +462,17 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
     return matchesQuery(getModelDisplayName(model), providerName);
   }), [allowedProviderSet, isHidden, matchesQuery, providerById, recentModels]);
 
-  const filteredProviders = React.useMemo(() => providers
+  const orderedProviders = React.useMemo(() => {
+    if (!providerOrder || providerOrder.length === 0) return providers;
+    const rank = new Map(providerOrder.map((id, index) => [id, index] as const));
+    const ranked = providers
+      .filter((provider) => rank.has(provider.id))
+      .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+    const unranked = providers.filter((provider) => !rank.has(provider.id));
+    return [...ranked, ...unranked];
+  }, [providerOrder, providers]);
+
+  const filteredProviders = React.useMemo(() => orderedProviders
     .filter((provider) => !allowedProviderSet || allowedProviderSet.has(provider.id))
     .map((provider) => {
       const models = Array.isArray(provider.models) ? provider.models : [];
@@ -429,7 +483,7 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
       });
       return { ...provider, models: filteredModels };
     })
-    .filter((provider) => provider.models.length > 0), [allowedProviderSet, isHidden, matchesQuery, providers]);
+    .filter((provider) => provider.models.length > 0), [allowedProviderSet, isHidden, matchesQuery, orderedProviders]);
 
   const flatModelList = React.useMemo(() => {
     const items: ModelPickerEntry[] = [];
@@ -444,6 +498,7 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
 
   const hasResults = flatModelList.length > 0;
   const favoriteSortingEnabled = Boolean(onReorderFavorite) && searchQuery.trim().length === 0 && filteredFavorites.length > 1;
+  const providerSortingEnabled = Boolean(onReorderProvider) && searchQuery.trim().length === 0 && !allowedProviderSet && filteredProviders.length > 1;
   const favoriteLookup: Map<string, ModelPickerEntry> = React.useMemo(() => new Map(
     filteredFavorites.map((entry) => [`${entry.providerID}:${entry.modelID}`, entry] as const),
   ), [filteredFavorites]);
@@ -597,11 +652,74 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
     onReorderFavorite(activeFavorite, overFavorite);
   };
 
+  const handleProviderDragEnd = (event: DragEndEvent) => {
+    if (!onReorderProvider) return;
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const ids = orderedProviders.map((provider) => provider.id);
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from === -1 || to === -1) return;
+
+    onReorderProvider(arrayMove(ids, from, to));
+  };
+
   const isSectionCollapsed = (key: string) => collapsedSections.has(key);
   const toggleSectionCollapsed = (key: string) => toggleSection(key);
 
-  const renderSectionHeader = (key: string, icon: React.ReactNode, label: React.ReactNode) => {
+  const renderProviderDragHandle = (dragHandleProps: SortableFavoriteHandleProps) => (
+    <button
+      type="button"
+      ref={dragHandleProps.setActivatorNodeRef}
+      {...dragHandleProps.attributes}
+      {...dragHandleProps.listeners}
+      disabled={disabled}
+      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+      className="model-favorite-drag-handle flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none"
+      aria-label={reorderProviderAriaLabel}
+      title={reorderProviderTitle}
+    >
+      <Icon name="draggable" className="size-3.5" />
+    </button>
+  );
+
+  const renderSectionHeader = (key: string, icon: React.ReactNode, label: React.ReactNode, dragHandle?: React.ReactNode) => {
     const collapsed = isSectionCollapsed(key);
+    const inner = (
+      <>
+        {dragHandle ?? null}
+        {icon}
+        <span className="min-w-0 truncate">{label}</span>
+        <span className="ml-auto flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground">
+          <Icon name={collapsed ? 'arrow-right-s' : 'arrow-down-s'} className="size-4" />
+        </span>
+      </>
+    );
+
+    // A draggable header cannot be a <button> (the drag handle is itself a
+    // <button>, and nested buttons are invalid), so render a div with button
+    // semantics when a drag handle is present.
+    if (dragHandle) {
+      return (
+        <div
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          className={cn(headerClassName, 'w-full text-left cursor-pointer')}
+          onClick={() => toggleSectionCollapsed(key)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              toggleSectionCollapsed(key);
+            }
+          }}
+        >
+          {inner}
+        </div>
+      );
+    }
+
     return (
       <button
         type="button"
@@ -609,14 +727,24 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
         onClick={() => toggleSectionCollapsed(key)}
         aria-expanded={!collapsed}
       >
-        {icon}
-        <span className="min-w-0 truncate">{label}</span>
-        <span className="ml-auto flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground">
-          <Icon name={collapsed ? 'arrow-right-s' : 'arrow-down-s'} className="size-4" />
-        </span>
+        {inner}
       </button>
     );
   };
+
+  const renderProviderSection = (
+    provider: (typeof filteredProviders)[number],
+    providerIndex: number,
+    dragHandle?: React.ReactNode,
+  ) => (
+    <>
+      {providerIndex > 0 ? <div className="h-px bg-border/40 my-1" /> : null}
+      {renderSectionHeader(`provider:${provider.id}`, <ProviderLogo providerId={provider.id} className="h-4 w-4 flex-shrink-0" />, provider.name || provider.id, dragHandle)}
+      {!isSectionCollapsed(`provider:${provider.id}`)
+        ? provider.models.map((model) => renderRow({ model, providerID: provider.id, modelID: model.id as string }, 'provider', false, currentFlatIndex++))
+        : null}
+    </>
+  );
 
   return (
     <>
@@ -686,15 +814,23 @@ export const ModelPickerList: React.FC<ModelPickerListProps> = ({
 
           {(filteredFavorites.length > 0 || filteredRecents.length > 0) && filteredProviders.length > 0 ? <div className="h-px bg-border/40 my-1" /> : null}
 
-          {filteredProviders.map((provider, providerIndex) => (
-            <div key={provider.id}>
-              {providerIndex > 0 ? <div className="h-px bg-border/40 my-1" /> : null}
-              {renderSectionHeader(`provider:${provider.id}`, <ProviderLogo providerId={provider.id} className="h-4 w-4 flex-shrink-0" />, provider.name || provider.id)}
-              {!isSectionCollapsed(`provider:${provider.id}`)
-                ? provider.models.map((model) => renderRow({ model, providerID: provider.id, modelID: model.id as string }, 'provider', false, currentFlatIndex++))
-                : null}
-            </div>
-          ))}
+          {providerSortingEnabled ? (
+            <DndContext sensors={providerSectionSensors} collisionDetection={closestCenter} onDragEnd={handleProviderDragEnd}>
+              <SortableContext items={filteredProviders.map((provider) => provider.id)} strategy={verticalListSortingStrategy}>
+                {filteredProviders.map((provider, providerIndex) => (
+                  <SortableProviderSection key={provider.id} id={provider.id} disabled={disabled}>
+                    {(dragHandleProps) => renderProviderSection(provider, providerIndex, renderProviderDragHandle(dragHandleProps))}
+                  </SortableProviderSection>
+                ))}
+              </SortableContext>
+            </DndContext>
+          ) : (
+            filteredProviders.map((provider, providerIndex) => (
+              <div key={provider.id}>
+                {renderProviderSection(provider, providerIndex)}
+              </div>
+            ))
+          )}
         </div>
       </ScrollableOverlay>
 

@@ -1957,6 +1957,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.modelControls.noProvidersOrModelsFound": "Жоден провайдер або модель не відповідає пошуку.",
   "chat.modelControls.reorderFavoriteAria": "Змінити порядок вибраного",
   "chat.modelControls.reorderFavoriteTitle": "Перетягніть, щоб змінити порядок вибраного",
+  "chat.modelControls.reorderProviderAria": "Змінити порядок провайдера",
+  "chat.modelControls.reorderProviderTitle": "Перетягніть, щоб змінити порядок провайдера",
   "chat.modelControls.permissionLabel.custom": "Custom",
   "chat.modelControls.permissionLabel.allow": "Дозволити",
   "chat.modelControls.permissionLabel.deny": "Заборонити",
