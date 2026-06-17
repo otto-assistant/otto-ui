@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { createMessengerOpencodeBridge, questionContexts } from './messenger-opencode-bridge.js';
-import { createMessengerSyncRouter } from './messenger-sync.js';
+import { createMessengerSyncRouter, resolveMessengerTarget } from './messenger-sync.js';
 
 /**
  * Regression coverage for the Discord approval flow: a button click must reply
@@ -1882,6 +1882,190 @@ describe('two-way channel events (Discord → bridge)', () => {
     expect(persistSettings).not.toHaveBeenCalled();
     expect(broadcastEvent).not.toHaveBeenCalledWith(
       'messenger.bridge.project_channel_renamed',
+      expect.anything(),
+    );
+  });
+});
+
+describe('resolveMessengerTarget — async token lookup (regression)', () => {
+  const store = {
+    lookupBySessionId: (id) =>
+      id === 'ses-bound'
+        ? [{ type: 'discord', targetKey: 'thread-x', projectPath: '/proj' }]
+        : [],
+  };
+
+  // The bug: readSettings is async, so calling it without `await` left the bot
+  // token undefined and this returned null. Guard that it now awaits and
+  // surfaces the token.
+  it('awaits async readSettings and returns the bot token + thread binding', async () => {
+    const readSettings = vi.fn(async () => ({ discord: { botToken: 'bot-token' } }));
+    const target = await resolveMessengerTarget({ store, readSettings, sessionId: 'ses-bound' });
+    expect(readSettings).toHaveBeenCalledTimes(1);
+    expect(target).toMatchObject({
+      type: 'discord',
+      token: 'bot-token',
+      targetKey: 'thread-x',
+      threadId: null,
+      projectPath: '/proj',
+    });
+  });
+
+  it('reads the token from a legacy discordConnections[0] shape too', async () => {
+    const readSettings = async () => ({ discordConnections: [{ botToken: 'legacy-token' }] });
+    const target = await resolveMessengerTarget({ store, readSettings, sessionId: 'ses-bound' });
+    expect(target?.token).toBe('legacy-token');
+  });
+
+  it('returns null when settings carry no bot token', async () => {
+    const target = await resolveMessengerTarget({
+      store,
+      readSettings: async () => ({ discord: {} }),
+      sessionId: 'ses-bound',
+    });
+    expect(target).toBeNull();
+  });
+
+  it('returns null for a session with no binding', async () => {
+    const target = await resolveMessengerTarget({
+      store,
+      readSettings: async () => ({ discord: { botToken: 'bot-token' } }),
+      sessionId: 'ses-unbound',
+    });
+    expect(target).toBeNull();
+  });
+});
+
+describe('session deletion → Discord thread cleanup', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function makeDeleteStore({ unbind }) {
+    const binding = {
+      type: 'discord',
+      targetKey: 'thread-del',
+      botTokenHash: 'hash-1',
+      sessionId: 'ses-del',
+      projectPath: '/p',
+    };
+    return {
+      ...makeFakeStore(),
+      lookupBySessionId: (id) => (id === 'ses-del' ? [binding] : []),
+      findByTargetKey: ({ targetKey }) => (targetKey === 'thread-del' ? [binding] : []),
+      unbind,
+    };
+  }
+
+  // Regression: shift-delete (hard delete) of an *idle* session — one with no
+  // live in-memory context — must still delete its Discord thread. The bot
+  // token is resolved through `lookupMessengerTarget`, which reads settings
+  // from disk asynchronously. A previous bug left that lookup non-awaited, so
+  // the token was always undefined and the thread was orphaned.
+  it('deletes the bound Discord thread for an idle session via the async token lookup', async () => {
+    const deleteCalls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      if (init?.method === 'DELETE') deleteCalls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const unbind = vi.fn();
+    const broadcastEvent = vi.fn();
+    // Async, exactly like the real makeLookupMessengerTarget after the fix.
+    const lookupMessengerTarget = vi.fn(async (sessionId) =>
+      sessionId === 'ses-del'
+        ? { type: 'discord', token: 'bot-token', targetKey: 'thread-del', threadId: null, projectPath: '/p' }
+        : null,
+    );
+
+    const bridge = makeBridge({
+      store: makeDeleteStore({ unbind }),
+      lookupMessengerTarget,
+      broadcastEvent,
+    });
+
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.deleted', properties: { sessionID: 'ses-del' } },
+    });
+    await flush();
+    await flush();
+
+    expect(lookupMessengerTarget).toHaveBeenCalledWith('ses-del');
+    expect(deleteCalls.some((u) => u.includes('/channels/thread-del'))).toBe(true);
+    expect(unbind).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'discord', targetKey: 'thread-del', botTokenHash: 'hash-1' }),
+    );
+    expect(broadcastEvent).toHaveBeenCalledWith(
+      'messenger.bridge.thread_deleted_from_session',
+      expect.objectContaining({ type: 'discord', threadId: 'thread-del', sessionId: 'ses-del' }),
+    );
+  });
+
+  it('also handles the session.removed alias', async () => {
+    const deleteCalls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      if (init?.method === 'DELETE') deleteCalls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: makeDeleteStore({ unbind: vi.fn() }),
+      lookupMessengerTarget: async () => ({
+        type: 'discord',
+        token: 'bot-token',
+        targetKey: 'thread-del',
+        threadId: null,
+        projectPath: '/p',
+      }),
+    });
+
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.removed', properties: { sessionID: 'ses-del' } },
+    });
+    await flush();
+    await flush();
+
+    expect(deleteCalls.some((u) => u.includes('/channels/thread-del'))).toBe(true);
+  });
+
+  // Defensive: when no token can be resolved (no live context AND the lookup
+  // can't find one) we must not pretend the thread was deleted — the binding is
+  // still dropped, but no Discord DELETE is issued and no success event fires.
+  it('does not issue a Discord delete (or success event) when no token can be resolved', async () => {
+    const deleteCalls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      if (init?.method === 'DELETE') deleteCalls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const unbind = vi.fn();
+    const broadcastEvent = vi.fn();
+    const bridge = makeBridge({
+      store: makeDeleteStore({ unbind }),
+      lookupMessengerTarget: async () => null,
+      broadcastEvent,
+    });
+
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.deleted', properties: { sessionID: 'ses-del' } },
+    });
+    await flush();
+    await flush();
+
+    expect(deleteCalls).toHaveLength(0);
+    expect(unbind).toHaveBeenCalled();
+    expect(broadcastEvent).not.toHaveBeenCalledWith(
+      'messenger.bridge.thread_deleted_from_session',
       expect.anything(),
     );
   });
