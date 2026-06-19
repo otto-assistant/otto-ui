@@ -48,16 +48,29 @@ function tripleToRecord(triple) {
     project: '',
     createdAt: triple.validFrom ?? triple.valid_from ?? null,
     updatedAt: triple.validTo ?? triple.valid_to ?? null,
+    _current: triple.current,
     _triple: { subject, predicate, object },
   };
 }
 
 function parseTriplesFromText(text) {
   if (!text) return [];
-  // mempalace tools return JSON or human text depending on version; try JSON.
+  // mempalace tools return JSON in several shapes depending on the tool:
+  //  - an array of triples
+  //  - { triples: [...] } / { results: [...] }
+  //  - an index-keyed object { "0": {...}, "1": {...} } (kg_timeline)
   try {
     const parsed = JSON.parse(text);
-    const arr = Array.isArray(parsed) ? parsed : (parsed.triples || parsed.results || parsed.entities || []);
+    let arr;
+    if (Array.isArray(parsed)) {
+      arr = parsed;
+    } else if (Array.isArray(parsed.triples) || Array.isArray(parsed.results) || Array.isArray(parsed.entities)) {
+      arr = parsed.triples || parsed.results || parsed.entities;
+    } else if (parsed && typeof parsed === 'object') {
+      arr = Object.values(parsed).filter((v) => v && typeof v === 'object');
+    } else {
+      arr = [];
+    }
     return arr.map(tripleToRecord).filter(Boolean);
   } catch {
     return [];
@@ -150,20 +163,18 @@ export const mempalaceAdapter = {
 
     async list({ query }) {
       return withMempalace(async ({ callTool }) => {
-        const toolName = query ? 'mempalace_search' : 'mempalace_kg_stats';
+        // kg_timeline with no entity returns every triple in the graph. We list
+        // current (non-invalidated) facts and filter client-side for queries so
+        // search reliably covers the knowledge graph (vector search only covers
+        // mined drawers, not manually-added facts).
+        const result = await callTool('mempalace_kg_timeline', {});
+        let triples = parseTriplesFromText(mcpResultText(result)).filter((t) => t._current !== false);
         if (query) {
-          const result = await callTool('mempalace_search', { query });
-          return parseTriplesFromText(mcpResultText(result));
+          const q = query.toLowerCase();
+          triples = triples.filter((t) => t.content.toLowerCase().includes(q));
         }
-        // Without a query, surface graph stats as a single informational record
-        // plus any timeline entries the server can produce.
-        const result = await callTool(toolName, {});
-        const text = mcpResultText(result);
-        const triples = parseTriplesFromText(text);
-        if (triples.length) return triples;
-        return text
-          ? [{ id: 'kg-stats', title: 'Knowledge graph', content: text, kind: 'stats', tags: [], project: '' }]
-          : [];
+        // Strip internal fields before returning.
+        return triples.map(({ _current, _triple, ...rest }) => ({ ...rest, _triple }));
       });
     },
 

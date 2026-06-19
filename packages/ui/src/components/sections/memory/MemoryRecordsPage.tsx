@@ -210,7 +210,7 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
                           ))}
                         </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                         {caps.update && (
                           <Button size="icon" variant="ghost" className="h-7 w-7" aria-label={t('settings.memory.records.edit')} onClick={() => openEdit(record)}>
                             <Icon name="edit" className="h-4 w-4" />

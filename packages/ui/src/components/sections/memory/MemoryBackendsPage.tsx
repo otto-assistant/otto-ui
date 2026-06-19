@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
 import { Icon } from '@/components/icon/Icon';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { toast } from '@/components/ui';
 import {
   Dialog,
@@ -48,7 +49,8 @@ const BackendCard: React.FC<{
   onActivate: () => void;
   onDeactivate: () => void;
   onManage: () => void;
-}> = ({ backend, busy, onInstall, onActivate, onDeactivate, onManage }) => {
+  onConfigure: () => void;
+}> = ({ backend, busy, onInstall, onActivate, onDeactivate, onManage, onConfigure }) => {
   const { t } = useI18n();
   return (
     <div
@@ -148,6 +150,12 @@ const BackendCard: React.FC<{
             )}
           </>
         )}
+        {backend.capabilities.configurable && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onConfigure}>
+            <Icon name="settings-3" className="h-4 w-4" />
+            {t('settings.memory.action.configure')}
+          </Button>
+        )}
         <a
           href={backend.docsUrl}
           target="_blank"
@@ -170,10 +178,13 @@ export const MemoryBackendsPage: React.FC = () => {
   const installBackend = useMemoryStore((s) => s.installBackend);
   const activateBackend = useMemoryStore((s) => s.activateBackend);
   const deactivateBackend = useMemoryStore((s) => s.deactivateBackend);
+  const getBackendConfig = useMemoryStore((s) => s.getBackendConfig);
+  const saveBackendConfig = useMemoryStore((s) => s.saveBackendConfig);
   const setSettingsPage = useUIStore((s) => s.setSettingsPage);
 
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState<PendingAction | null>(null);
+  const [config, setConfig] = React.useState<{ backend: MemoryBackend; raw: string; path: string; loading: boolean; saving: boolean } | null>(null);
 
   React.useEffect(() => {
     void loadStatus();
@@ -232,6 +243,27 @@ export const MemoryBackendsPage: React.FC = () => {
     }
   }, [deactivateBackend, t]);
 
+  const openConfigure = React.useCallback(async (backend: MemoryBackend) => {
+    setConfig({ backend, raw: '', path: '', loading: true, saving: false });
+    const cfg = await getBackendConfig(backend.id);
+    setConfig((prev) => (prev && prev.backend.id === backend.id
+      ? { ...prev, raw: cfg?.raw ?? '', path: cfg?.path ?? '', loading: false }
+      : prev));
+  }, [getBackendConfig]);
+
+  const saveConfig = React.useCallback(async () => {
+    if (!config) return;
+    setConfig((prev) => (prev ? { ...prev, saving: true } : prev));
+    const ok = await saveBackendConfig(config.backend.id, config.raw);
+    if (ok) {
+      toast.success(t('settings.memory.config.saved'));
+      setConfig(null);
+    } else {
+      toast.error(t('settings.memory.config.saveFailed'));
+      setConfig((prev) => (prev ? { ...prev, saving: false } : prev));
+    }
+  }, [config, saveBackendConfig, t]);
+
   const confirmPending = React.useCallback(async (deactivateOthers: boolean) => {
     if (!pending) return;
     const { kind, backend } = pending;
@@ -264,6 +296,7 @@ export const MemoryBackendsPage: React.FC = () => {
                 onActivate={() => beginAction('activate', backend)}
                 onDeactivate={() => handleDeactivate(backend)}
                 onManage={() => setSettingsPage(memoryBackendSlug(backend.id))}
+                onConfigure={() => void openConfigure(backend)}
               />
             ))}
           </div>
@@ -289,6 +322,39 @@ export const MemoryBackendsPage: React.FC = () => {
             </Button>
             <Button variant="default" onClick={() => void confirmPending(true)}>
               {t('settings.memory.recommend.deactivateContinue')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={config !== null} onOpenChange={(open) => { if (!open) setConfig(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {config ? `${config.backend.name} — ${t('settings.memory.config.title')}` : t('settings.memory.config.title')}
+            </DialogTitle>
+            {config?.path && (
+              <DialogDescription className="break-all">{config.path}</DialogDescription>
+            )}
+          </DialogHeader>
+          {config?.loading ? (
+            <div className="flex items-center gap-2 py-6 text-muted-foreground">
+              <Icon name="loader-4" className="h-4 w-4 animate-spin" />
+              <span className="typography-meta">{t('common.loading')}</span>
+            </div>
+          ) : (
+            <Textarea
+              className="min-h-[220px] font-mono text-xs"
+              value={config?.raw ?? ''}
+              onChange={(e) => setConfig((prev) => (prev ? { ...prev, raw: e.target.value } : prev))}
+              spellCheck={false}
+            />
+          )}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfig(null)}>{t('settings.memory.recommend.cancel')}</Button>
+            <Button variant="default" disabled={!config || config.loading || config.saving} onClick={() => void saveConfig()}>
+              {config?.saving ? <Icon name="loader-4" className="h-4 w-4 animate-spin" /> : null}
+              {t('settings.memory.config.save')}
             </Button>
           </DialogFooter>
         </DialogContent>

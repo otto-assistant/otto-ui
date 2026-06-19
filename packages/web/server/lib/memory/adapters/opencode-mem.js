@@ -2,6 +2,7 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import { createRequire } from 'module';
+import { pathToFileURL } from 'url';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { hasPlugin, addPlugin, removePlugin } from '../opencode-config.js';
 import { AGENT_SCOPE, OPENCODE_CONFIG_DIR } from '../../opencode/shared.js';
@@ -52,21 +53,56 @@ function dataDir() {
 
 /**
  * Resolve opencode-mem's own `getProjectTagInfo` so we can compute the exact
- * container tag a project's memories live under. The plugin is installed by
- * OpenCode into its config dir node_modules.
+ * container tag a project's memories live under.
+ *
+ * OpenCode downloads plugins into its package cache
+ * (~/.cache/opencode/packages/opencode-mem@<ver>/node_modules/opencode-mem),
+ * not the config dir, so we search both. The module is ESM, so we dynamic
+ * import the resolved file.
  */
-function resolveProjectTagInfo(directory) {
-  const requireFrom = createRequire(path.join(OPENCODE_CONFIG_DIR, 'noop.js'));
+let cachedTagsModule;
+function findTagsModulePaths() {
+  const paths = [];
   try {
-    // Package exports "./tags" -> dist/services/tags.js
-    const mod = requireFrom('opencode-mem/tags');
-    if (mod && typeof mod.getProjectTagInfo === 'function') {
-      return mod.getProjectTagInfo(directory);
+    const requireFrom = createRequire(path.join(OPENCODE_CONFIG_DIR, 'noop.js'));
+    paths.push(requireFrom.resolve('opencode-mem/tags'));
+  } catch { /* not in config dir */ }
+  try {
+    const cacheBase = path.join(os.homedir(), '.cache', 'opencode', 'packages');
+    if (fs.existsSync(cacheBase)) {
+      for (const dir of fs.readdirSync(cacheBase)) {
+        if (!dir.startsWith('opencode-mem')) continue;
+        const candidate = path.join(cacheBase, dir, 'node_modules', 'opencode-mem', 'dist', 'services', 'tags.js');
+        if (fs.existsSync(candidate)) paths.push(candidate);
+      }
     }
-  } catch {
-    /* not resolvable until OpenCode downloads the plugin */
+  } catch { /* ignore */ }
+  return paths;
+}
+
+async function loadTagsModule() {
+  if (cachedTagsModule !== undefined) return cachedTagsModule;
+  for (const candidate of findTagsModulePaths()) {
+    try {
+      const mod = await import(pathToFileURL(candidate).href);
+      if (mod && typeof mod.getProjectTagInfo === 'function') {
+        cachedTagsModule = mod;
+        return mod;
+      }
+    } catch { /* try next */ }
   }
+  cachedTagsModule = null;
   return null;
+}
+
+async function resolveProjectTagInfo(directory) {
+  const mod = await loadTagsModule();
+  if (!mod) return null;
+  try {
+    return mod.getProjectTagInfo(directory);
+  } catch {
+    return null;
+  }
 }
 
 async function memFetch(pathname, init = {}, timeoutMs = 8000) {
@@ -78,6 +114,27 @@ async function memFetch(pathname, init = {}, timeoutMs = 8000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The opencode-mem web server wraps responses as { success, data: {...} }.
+ * Memory lists live at data.items (list) or data.results (search); some
+ * versions return a bare array. Normalize all of these to an array.
+ */
+function extractList(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  const data = payload.data;
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === 'object') {
+    if (Array.isArray(data.items)) return data.items;
+    if (Array.isArray(data.results)) return data.results;
+    if (Array.isArray(data.memories)) return data.memories;
+  }
+  if (Array.isArray(payload.items)) return payload.items;
+  if (Array.isArray(payload.results)) return payload.results;
+  if (Array.isArray(payload.memories)) return payload.memories;
+  return [];
 }
 
 function normalizeRecord(raw) {
@@ -194,19 +251,19 @@ export const opencodeMemAdapter = {
       const res = await memFetch(pathname, { method: 'GET' });
       if (!res.ok) throw new Error(`opencode-mem web server returned ${res.status}`);
       const payload = await res.json();
-      const list = payload?.memories || payload?.results || payload?.data || [];
-      const tagInfo = resolveProjectTagInfo(workingDirectory);
-      const records = list.map(normalizeRecord).filter(Boolean);
+      const list = extractList(payload);
+      const tagInfo = await resolveProjectTagInfo(workingDirectory);
       if (tagInfo?.tag) {
-        const filtered = list.filter((m) => m.containerTag === tagInfo.tag).map(normalizeRecord).filter(Boolean);
-        // Only narrow when the project tag actually matched something.
-        if (filtered.length > 0) return filtered;
+        const filtered = list.filter((m) => m.containerTag === tagInfo.tag);
+        // Only narrow when the project tag actually matched something so a
+        // not-yet-tagged project still shows its memories.
+        if (filtered.length > 0) return filtered.map(normalizeRecord).filter(Boolean);
       }
-      return records;
+      return list.map(normalizeRecord).filter(Boolean);
     },
 
     async create({ workingDirectory, input }) {
-      const tagInfo = resolveProjectTagInfo(workingDirectory);
+      const tagInfo = await resolveProjectTagInfo(workingDirectory);
       if (!tagInfo?.tag) {
         throw new Error('Cannot determine project container tag — start OpenCode once with opencode-mem active so the plugin is downloaded.');
       }
@@ -218,16 +275,30 @@ export const opencodeMemAdapter = {
         projectPath: tagInfo.projectPath,
         projectName: tagInfo.projectName,
       };
+      // First create can trigger a local embedding-model download, so allow time.
       const res = await memFetch('/api/memories', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }, 30000);
+      }, 120000);
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || payload?.success === false) {
         throw new Error(payload?.error || `opencode-mem create failed (${res.status})`);
       }
-      return normalizeRecord(payload.memory || payload.data || { ...body, id: payload.id });
+      // The create endpoint returns only the new id; synthesize the full record
+      // from the input we sent so the UI can render it immediately (the next
+      // list refresh replaces it with the server-normalized version).
+      const newId = payload?.data?.id ?? payload?.id ?? Date.now().toString();
+      return {
+        id: String(newId),
+        title: '',
+        content: input.content || '',
+        kind: input.kind || '',
+        tags: Array.isArray(input.tags) ? input.tags : [],
+        project: tagInfo.projectName || '',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
     },
 
     async update({ workingDirectory, id, input }) {
@@ -235,12 +306,13 @@ export const opencodeMemAdapter = {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: input.content, tags: input.tags }),
-      }, 30000);
+      }, 120000);
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || payload?.success === false) {
         throw new Error(payload?.error || `opencode-mem update failed (${res.status})`);
       }
-      return normalizeRecord(payload.memory || payload.data || { id, ...input, project: resolveProjectTagInfo(workingDirectory)?.projectName });
+      const tagInfo = await resolveProjectTagInfo(workingDirectory);
+      return normalizeRecord(payload.data || payload.memory || { id, content: input.content, type: input.kind, projectName: tagInfo?.projectName });
     },
 
     async remove({ id }) {
