@@ -49,6 +49,17 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
     case 'skills.catalog':
       return 'book';
 
+    case 'memory':
+      return 'brain';
+    case 'memory.opencode-mem':
+      return 'database-2';
+    case 'memory.mempalace':
+      return 'node-tree';
+    case 'memory.codemem':
+      return 'archive';
+    case 'memory.hindsight':
+      return 'sparkling';
+
     case 'git':
       return 'git-branch';
 

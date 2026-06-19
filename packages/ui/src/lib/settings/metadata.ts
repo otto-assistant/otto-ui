@@ -13,6 +13,11 @@ export type SettingsPageSlug =
   | 'plugins'
   | 'skills.installed'
   | 'skills.catalog'
+  | 'memory'
+  | 'memory.opencode-mem'
+  | 'memory.mempalace'
+  | 'memory.codemem'
+  | 'memory.hindsight'
   | 'git'
   | 'integrations'
   | 'appearance'
@@ -33,6 +38,7 @@ export type SettingsPageGroup =
   | 'opencode'
   | 'git'
   | 'skills'
+  | 'memory'
   | 'usage'
   | 'advanced';
 
@@ -60,6 +66,7 @@ export const SETTINGS_GROUP_LABELS: Record<SettingsPageGroup, string> = {
   opencode: 'OpenCode',
   git: 'Git',
   skills: 'Skills',
+  memory: 'Memory',
   usage: 'Usage',
   advanced: 'Advanced',
 };
@@ -150,6 +157,41 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'skills',
     kind: 'single',
     keywords: ['install', 'catalog', 'external', 'repository', 'skills catalog'],
+  },
+  {
+    slug: 'memory',
+    title: 'Memory',
+    group: 'memory',
+    kind: 'single',
+    keywords: ['memory', 'persistent', 'recall', 'context', 'knowledge', 'opencode-mem', 'mempalace', 'codemem', 'hindsight', 'backend'],
+  },
+  {
+    slug: 'memory.opencode-mem',
+    title: 'OpenCode Memory',
+    group: 'memory',
+    kind: 'single',
+    keywords: ['opencode-mem', 'memory', 'records', 'vector'],
+  },
+  {
+    slug: 'memory.mempalace',
+    title: 'MemPalace',
+    group: 'memory',
+    kind: 'single',
+    keywords: ['mempalace', 'memory', 'knowledge graph', 'records'],
+  },
+  {
+    slug: 'memory.codemem',
+    title: 'codemem',
+    group: 'memory',
+    kind: 'single',
+    keywords: ['codemem', 'memory', 'records'],
+  },
+  {
+    slug: 'memory.hindsight',
+    title: 'Hindsight',
+    group: 'memory',
+    kind: 'single',
+    keywords: ['hindsight', 'memory', 'records', 'retain', 'recall'],
   },
   {
     slug: 'git',
