@@ -49,8 +49,14 @@ export class ChildStoreManager {
   private readonly pins = new Map<string, number>()
   private readonly disposers = new Map<string, () => void>()
   private readonly registrySubscribers = new Set<() => void>()
+  // Tracks how deeply each directory has been bootstrapped. Sidebar rows request
+  // a "lazy" bootstrap (only the reads the sidebar needs: session list, status,
+  // permissions); the active directory requests a "full" bootstrap. A lazy
+  // directory is upgraded to full the first time something asks for it without
+  // the lazy flag (e.g. it becomes the active chat directory).
+  private readonly bootstrapModes = new Map<string, 'lazy' | 'full'>()
 
-  private onBootstrap?: (directory: string) => void
+  private onBootstrap?: (directory: string, lazy: boolean) => void
   private onDispose?: (directory: string) => void
   private isBooting?: (directory: string) => boolean
   private isLoadingSessions?: (directory: string) => boolean
@@ -62,7 +68,7 @@ export class ChildStoreManager {
   }
 
   configure(callbacks: {
-    onBootstrap?: (directory: string) => void
+    onBootstrap?: (directory: string, lazy: boolean) => void
     onDispose?: (directory: string) => void
     isBooting?: (directory: string) => boolean
     isLoadingSessions?: (directory: string) => boolean
@@ -100,7 +106,7 @@ export class ChildStoreManager {
     return (this.pins.get(directory) ?? 0) > 0
   }
 
-  ensureChild(directory: string, options?: { bootstrap?: boolean }): StoreApi<DirectoryStore> {
+  ensureChild(directory: string, options?: { bootstrap?: boolean; lazy?: boolean }): StoreApi<DirectoryStore> {
     if (!directory) throw new Error("No directory provided to ensureChild")
 
     let store = this.children.get(directory)
@@ -113,8 +119,19 @@ export class ChildStoreManager {
     this.mark(directory)
 
     const shouldBootstrap = options?.bootstrap ?? true
-    if (shouldBootstrap && store.getState().status === "loading") {
-      this.onBootstrap?.(directory)
+    if (shouldBootstrap) {
+      const wantLazy = options?.lazy === true
+      if (store.getState().status === "loading") {
+        // Fresh store — bootstrap at the requested depth.
+        this.bootstrapModes.set(directory, wantLazy ? "lazy" : "full")
+        this.onBootstrap?.(directory, wantLazy)
+      } else if (!wantLazy && this.bootstrapModes.get(directory) === "lazy") {
+        // A previously lazy-bootstrapped directory is now needed in full
+        // (e.g. it became the active chat directory). Upgrade it so chat-only
+        // data (config, providers, commands, mcp/lsp/vcs, …) gets fetched.
+        this.bootstrapModes.set(directory, "full")
+        this.onBootstrap?.(directory, false)
+      }
     }
 
     return store
@@ -140,6 +157,7 @@ export class ChildStoreManager {
 
     this.lifecycle.delete(directory)
     this.children.delete(directory)
+    this.bootstrapModes.delete(directory)
     this.notifyRegistrySubscribers()
     const dispose = this.disposers.get(directory)
     if (dispose) {
@@ -193,6 +211,7 @@ export class ChildStoreManager {
     this.lifecycle.clear()
     this.pins.clear()
     this.disposers.clear()
+    this.bootstrapModes.clear()
   }
 
   subscribeRegistry(listener: () => void): () => void {

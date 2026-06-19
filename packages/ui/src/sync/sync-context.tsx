@@ -1758,19 +1758,31 @@ export function SyncProvider(props: {
   // Configure child store manager
   useEffect(() => {
     const bootingDirs = new Set<string>()
+    // Directories whose lazy bootstrap is in flight when a full bootstrap is
+    // requested. We can't run both concurrently, so we remember the upgrade and
+    // re-run as full once the lazy pass settles.
+    const pendingFullBootstrap = new Set<string>()
 
-    childStores.configure({
-      onBootstrap: (directory) => {
-        if (bootingDirs.has(directory)) return
-        bootingDirs.add(directory)
+    const handleBootstrap = (directory: string, lazy: boolean) => {
+      if (bootingDirs.has(directory)) {
+        // A bootstrap is already running for this directory. If a full pass is
+        // requested while a lazy one is in flight, queue the upgrade.
+        if (!lazy) pendingFullBootstrap.add(directory)
+        return
+      }
+      bootingDirs.add(directory)
 
-        const store = childStores.getChild(directory)
-        if (!store) return
+      const store = childStores.getChild(directory)
+      if (!store) {
+        bootingDirs.delete(directory)
+        return
+      }
 
-        const runBootstrap = async (attempt: number) => {
+      const runBootstrap = async (attempt: number) => {
           const globalState = useGlobalSyncStore.getState()
           await bootstrapDirectory({
             directory,
+            lazy,
             sdk: props.sdk,
             getState: () => store.getState(),
             set: (patch) => {
@@ -1862,12 +1874,22 @@ export function SyncProvider(props: {
           }
         }
 
-        runBootstrap(0).finally(() => {
-          bootingDirs.delete(directory)
-        })
-      },
+      runBootstrap(0).finally(() => {
+        bootingDirs.delete(directory)
+        // A full bootstrap was requested while this (lazy) pass was running —
+        // run it now to fetch the chat-only data the lazy pass skipped.
+        if (pendingFullBootstrap.has(directory)) {
+          pendingFullBootstrap.delete(directory)
+          handleBootstrap(directory, false)
+        }
+      })
+    }
+
+    childStores.configure({
+      onBootstrap: handleBootstrap,
       onDispose: (directory) => {
         bootingDirs.delete(directory)
+        pendingFullBootstrap.delete(directory)
       },
       isBooting: (directory) => bootingDirs.has(directory),
       isLoadingSessions: () => false,
@@ -2192,7 +2214,7 @@ export function useGlobalSyncSelector<T>(selector: (state: GlobalSyncStore) => T
  */
 export function useDirectoryStore(
   directory?: string,
-  options?: { bootstrap?: boolean },
+  options?: { bootstrap?: boolean; lazy?: boolean },
 ): StoreApi<DirectoryStore> {
   const system = useSyncSystem()
   const dir = directory ?? system.directory
