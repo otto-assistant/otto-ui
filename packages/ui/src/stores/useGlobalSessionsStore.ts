@@ -3,6 +3,8 @@ import type { OpencodeClient, Session } from '@opencode-ai/sdk/v2';
 import { opencodeClient } from '@/lib/opencode/client';
 import { isPlaceholderSessionTitle } from '@/lib/session/displayTitle';
 import { listGlobalSessionPages, type GlobalSessionRecord, type InitialSessionPage } from '@/stores/globalSessions';
+import { getReviewTransferDirection, type ReviewTransferDirection } from '@/lib/reviewFlow';
+import { getOriginalSessionID, getReviewSessionID } from '@/lib/sessionReviewMetadata';
 
 type GlobalSessionsStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -14,6 +16,7 @@ type LoadResult = {
 type GlobalSessionsState = {
   activeSessions: Session[];
   archivedSessions: Session[];
+  reviewTransferBySessionId: Map<string, ReviewTransferDirection>;
   hasLoaded: boolean;
   status: GlobalSessionsStatus;
   loadSessions: (fallbackActive?: Session[]) => Promise<LoadResult>;
@@ -313,6 +316,33 @@ const mergeSessionLists = (existing: Session[], incoming?: Session[]): Session[]
   return ordered;
 };
 
+// The review-transfer map is purely derived from the active sessions; it is
+// precomputed here (instead of per-render in MessageList) so the chat view can
+// resolve a session's review-transfer direction with a single Map lookup.
+const buildReviewTransferMap = (sessions: Session[]): Map<string, ReviewTransferDirection> => {
+  const next = new Map<string, ReviewTransferDirection>();
+  const activeIds = new Set(sessions.map((s) => s.id));
+  for (const session of sessions) {
+    const direction = getReviewTransferDirection(session);
+    if (!direction) continue;
+    const targetSessionId = direction === 'review-to-original'
+      ? getOriginalSessionID(session)
+      : getReviewSessionID(session);
+    if (!targetSessionId || !activeIds.has(targetSessionId)) continue;
+    next.set(session.id, direction);
+  }
+  return next;
+};
+
+const resolveReviewTransferMap = (
+  state: GlobalSessionsState,
+  nextActiveSessions: Session[],
+): Map<string, ReviewTransferDirection> => (
+  nextActiveSessions === state.activeSessions
+    ? state.reviewTransferBySessionId
+    : buildReviewTransferMap(nextActiveSessions)
+);
+
 const applySnapshot = (
   state: GlobalSessionsState,
   activeSessions: Session[],
@@ -325,10 +355,12 @@ const applySnapshot = (
   const nextArchivedSessions = sameSessionList(state.archivedSessions, archivedSessions)
     ? state.archivedSessions
     : archivedSessions;
+  const nextReviewTransferMap = resolveReviewTransferMap(state, nextActiveSessions);
 
   if (
     nextActiveSessions === state.activeSessions
     && nextArchivedSessions === state.archivedSessions
+    && nextReviewTransferMap === state.reviewTransferBySessionId
     && state.hasLoaded
     && state.status === status
   ) {
@@ -338,6 +370,7 @@ const applySnapshot = (
   return {
     activeSessions: nextActiveSessions,
     archivedSessions: nextArchivedSessions,
+    reviewTransferBySessionId: nextReviewTransferMap,
     hasLoaded: true,
     status,
   };
@@ -346,6 +379,7 @@ const applySnapshot = (
 export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => ({
   activeSessions: [],
   archivedSessions: [],
+  reviewTransferBySessionId: new Map(),
   hasLoaded: false,
   status: 'idle',
 
@@ -384,6 +418,12 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
           return state;
         }
         const next = Array.from(byId.values());
+        if (bucket === 'activeSessions') {
+          return {
+            activeSessions: next,
+            reviewTransferBySessionId: buildReviewTransferMap(next),
+          } as Partial<GlobalSessionsState>;
+        }
         return { [bucket]: next } as Partial<GlobalSessionsState>;
       });
     };
@@ -524,6 +564,7 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: nextArchivedSessions,
+        reviewTransferBySessionId: resolveReviewTransferMap(state, nextActiveSessions),
       };
     });
 
@@ -555,6 +596,7 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: nextArchivedSessions,
+        reviewTransferBySessionId: resolveReviewTransferMap(state, nextActiveSessions),
       };
     });
   },
@@ -579,6 +621,7 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: nextArchivedSessions,
+        reviewTransferBySessionId: resolveReviewTransferMap(state, nextActiveSessions),
       };
     });
   },
@@ -615,6 +658,7 @@ export const useGlobalSessionsStore = create<GlobalSessionsState>((set, get) => 
       return {
         activeSessions: nextActiveSessions,
         archivedSessions: [...movedSessions, ...remainingArchivedSessions],
+        reviewTransferBySessionId: buildReviewTransferMap(nextActiveSessions),
       };
     });
   },
