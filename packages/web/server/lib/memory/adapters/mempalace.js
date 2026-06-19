@@ -13,13 +13,14 @@ function palaceDir() {
   return process.env.MEMPALACE_PATH || path.join(os.homedir(), '.mempalace');
 }
 
-function modelReady() {
-  // Transformers.js caches the embedding model under ~/.cache or the palace
-  // dir; treat presence of the palace knowledge graph or a cached model as
-  // "ready enough" to attempt record operations.
-  return fs.existsSync(path.join(palaceDir(), 'knowledge_graph.sqlite3'))
-    || fs.existsSync(path.join(palaceDir(), 'models'))
-    || fs.existsSync(path.join(os.homedir(), '.cache', 'huggingface'));
+function palaceInitialized() {
+  // The MCP server initializes a palace under ~/.mempalace/palace on first run.
+  // Knowledge-graph operations (add/query/stats) do not need the embedding
+  // model — only semantic (vector) search does — so palace presence is enough
+  // to enable record management.
+  return fs.existsSync(path.join(palaceDir(), 'palace', 'knowledge_graph.sqlite3'))
+    || fs.existsSync(path.join(palaceDir(), 'knowledge_graph.sqlite3'))
+    || fs.existsSync(palaceDir());
 }
 
 async function withMempalace(run) {
@@ -92,8 +93,8 @@ export const mempalaceAdapter = {
     const active = Boolean(mcp && mcp.enabled !== false);
     const installed = Boolean(mcp) || fs.existsSync(palaceDir());
     const issues = [];
-    if (active && !modelReady()) {
-      issues.push('Embedding model not downloaded yet — run install again or the first search may be slow.');
+    if (active && !palaceInitialized()) {
+      issues.push('Palace not initialized yet — the first semantic search may download a ~90MB embedding model.');
     }
     return {
       installed,
@@ -142,9 +143,8 @@ export const mempalaceAdapter = {
 
   records: {
     async available() {
-      if (!modelReady()) {
-        return { ok: false, reason: 'Embedding model not downloaded yet — run install to pre-download.' };
-      }
+      // KG add/list/stats only need the MCP server, which npx can always
+      // launch. Semantic search lazily downloads the embedding model.
       return { ok: true, reason: 'MCP knowledge graph' };
     },
 

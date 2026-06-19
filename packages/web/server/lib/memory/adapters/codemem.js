@@ -134,6 +134,35 @@ export const codememAdapter = {
 
   async install({ workingDirectory }) {
     const steps = [];
+
+    // Nuance: codemem's OpenCode *plugin* shells out to the `codemem` binary at
+    // runtime, so the CLI must be resolvable on PATH for memory capture/injection
+    // to work inside OpenCode. Ensure a global install first (best-effort — a
+    // root-owned npm prefix can make this fail, in which case the user must
+    // install it themselves; we surface that explicitly instead of silently
+    // shipping a broken plugin).
+    if (!(await commandExists('codemem'))) {
+      try {
+        const gi = await runCommand('npm', ['install', '-g', 'codemem@latest'], { timeoutMs: 180000 });
+        const giOk = gi.code === 0 && (await commandExists('codemem'));
+        steps.push({
+          label: 'Install codemem CLI globally (required by the OpenCode plugin)',
+          ok: giOk,
+          detail: giOk
+            ? 'codemem available on PATH.'
+            : 'Could not install globally (likely an npm permissions issue). Run `npm install -g codemem` manually so the plugin can capture/inject memory.',
+        });
+      } catch (error) {
+        steps.push({
+          label: 'Install codemem CLI globally (required by the OpenCode plugin)',
+          ok: false,
+          detail: `Skipped: ${error.message}. Run \`npm install -g codemem\` manually.`,
+        });
+      }
+    } else {
+      steps.push({ label: 'codemem CLI already on PATH', ok: true });
+    }
+
     // `codemem setup --opencode-only` registers BOTH the OpenCode plugin and
     // the MCP server in the user config.
     const result = await runCodemem(['setup', '--opencode-only', '--force'], {
