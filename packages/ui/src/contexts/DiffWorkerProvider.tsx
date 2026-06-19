@@ -41,6 +41,14 @@ const WORKER_POOL_CONFIG: Record<WorkerPoolStyle, { poolSize: number; totalASTLR
 let unifiedWorkerPool: WorkerPoolManager | undefined;
 let splitWorkerPool: WorkerPoolManager | undefined;
 
+// The render theme the next lazily-created pool should start with. Seeded by
+// DiffWorkerProvider's effect so a pool created on first diff use already
+// matches the app theme (instead of the Pierre built-in fallback).
+let currentRenderTheme: { light: string; dark: string } = {
+  light: 'pierre-light',
+  dark: 'pierre-dark',
+};
+
 const createWorkerPool = (style: WorkerPoolStyle) => {
   const config = WORKER_POOL_CONFIG[style];
   const pool = new WorkerPoolManager(
@@ -50,10 +58,7 @@ const createWorkerPool = (style: WorkerPoolStyle) => {
       totalASTLRUCacheSize: config.totalASTLRUCacheSize,
     },
     {
-      theme: {
-        light: 'pierre-light',
-        dark: 'pierre-dark',
-      },
+      theme: currentRenderTheme,
       langs: PRELOAD_LANGS,
       lineDiffType: config.lineDiffType,
       preferredHighlighter: 'shiki-wasm',
@@ -61,6 +66,26 @@ const createWorkerPool = (style: WorkerPoolStyle) => {
   );
   void pool.initialize();
   return pool;
+};
+
+// Apply the render theme WITHOUT forcing pool creation: update the seed for
+// future pools and push render options to any pool that already exists. This
+// lets us drop the eager warmup (which spun up both worker pools + shiki-wasm
+// at app mount) and defer pool creation to the first actual diff render.
+const applyRenderThemeToExistingPools = (renderTheme: { light: string; dark: string }) => {
+  currentRenderTheme = renderTheme;
+  if (unifiedWorkerPool) {
+    void unifiedWorkerPool.setRenderOptions({
+      theme: renderTheme,
+      lineDiffType: WORKER_POOL_CONFIG.unified.lineDiffType,
+    });
+  }
+  if (splitWorkerPool) {
+    void splitWorkerPool.setRenderOptions({
+      theme: renderTheme,
+      lineDiffType: WORKER_POOL_CONFIG.split.lineDiffType,
+    });
+  }
 };
 
 const getWorkerPool = (style: WorkerPoolStyle): WorkerPoolManager | undefined => {
@@ -77,27 +102,15 @@ const getWorkerPool = (style: WorkerPoolStyle): WorkerPoolManager | undefined =>
   return unifiedWorkerPool;
 };
 
-const WorkerPoolWarmup: React.FC<{
+const WorkerPoolThemeSync: React.FC<{
   children: React.ReactNode;
   renderTheme: { light: string; dark: string };
 }> = ({ children, renderTheme }) => {
-  const unifiedPool = useWorkerPool('unified');
-  const splitPool = useWorkerPool('split');
-
   useEffect(() => {
-    if (unifiedPool) {
-      void unifiedPool.setRenderOptions({
-        theme: renderTheme,
-        lineDiffType: WORKER_POOL_CONFIG.unified.lineDiffType,
-      });
-    }
-    if (splitPool) {
-      void splitPool.setRenderOptions({
-        theme: renderTheme,
-        lineDiffType: WORKER_POOL_CONFIG.split.lineDiffType,
-      });
-    }
-  }, [renderTheme, splitPool, unifiedPool]);
+    // Does NOT create pools — only seeds the theme for future pools and
+    // updates any already-created pool. Pools are created lazily on first diff.
+    applyRenderThemeToExistingPools(renderTheme);
+  }, [renderTheme]);
 
   return <>{children}</>;
 };
@@ -130,9 +143,9 @@ export const DiffWorkerProvider: React.FC<DiffWorkerProviderProps> = ({ children
   );
 
   return (
-    <WorkerPoolWarmup renderTheme={renderTheme}>
+    <WorkerPoolThemeSync renderTheme={renderTheme}>
       {children}
-    </WorkerPoolWarmup>
+    </WorkerPoolThemeSync>
   );
 };
 
