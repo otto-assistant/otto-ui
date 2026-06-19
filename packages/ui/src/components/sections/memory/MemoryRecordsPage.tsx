@@ -14,6 +14,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { SettingsPageLayout, SettingsSection } from '@/components/sections/shared';
+import { SettingsProjectSelector } from '@/components/sections/shared/SettingsProjectSelector';
+import { useProjectsStore } from '@/stores/useProjectsStore';
 import {
   useMemoryStore,
   type MemoryBackend,
@@ -46,11 +48,13 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
   const updateRecord = useMemoryStore((s) => s.updateRecord);
   const deleteRecord = useMemoryStore((s) => s.deleteRecord);
   const loadStatus = useMemoryStore((s) => s.loadStatus);
+  const activeProjectId = useProjectsStore((s) => s.activeProjectId);
 
   const backend: MemoryBackend | undefined = React.useMemo(
     () => status?.backends.find((b) => b.id === backendId),
     [status, backendId],
   );
+  const projectScoped = backend?.capabilities?.projectScoped !== false;
 
   const [search, setSearch] = React.useState('');
   const [draft, setDraft] = React.useState<DraftState>(emptyDraft);
@@ -60,9 +64,12 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
     if (!status) void loadStatus();
   }, [status, loadStatus]);
 
+  // Reload when the backend changes, or (for project-scoped backends) when the
+  // active project changes so records follow the selected project.
   React.useEffect(() => {
     void loadRecords(backendId);
-  }, [backendId, loadRecords]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendId, loadRecords, projectScoped ? activeProjectId : null]);
 
   const items = recordsState?.items ?? [];
   const availability = recordsState?.availability;
@@ -132,15 +139,20 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
               <h2 className="typography-ui-header font-semibold text-foreground truncate">
                 {backend?.name ?? backendId}
               </h2>
-              <p className="typography-meta text-muted-foreground">{t('settings.memory.records.subtitle')}</p>
+              <p className="typography-meta text-muted-foreground">
+                {projectScoped ? t('settings.memory.records.subtitle') : t('settings.memory.records.subtitleGlobal')}
+              </p>
             </div>
           </div>
-          {caps.create && availability?.ok !== false && (
-            <Button size="sm" variant="default" onClick={openCreate}>
-              <Icon name="add" className="h-4 w-4" />
-              {t('settings.memory.records.add')}
-            </Button>
-          )}
+          <div className="flex shrink-0 items-center gap-2">
+            {projectScoped && <SettingsProjectSelector className="w-44" />}
+            {caps.create && availability?.ok !== false && (
+              <Button size="sm" variant="default" onClick={openCreate}>
+                <Icon name="add" className="h-4 w-4" />
+                {t('settings.memory.records.add')}
+              </Button>
+            )}
+          </div>
         </div>
 
         {availability && availability.ok === false ? (
