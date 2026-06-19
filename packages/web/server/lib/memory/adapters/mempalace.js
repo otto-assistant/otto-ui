@@ -27,51 +27,54 @@ async function withMempalace(run) {
   return withMcpStdio(MCP_COMMAND[0], MCP_COMMAND.slice(1), run, { timeoutMs: 120000 });
 }
 
-/**
- * Records in mempalace are temporal knowledge-graph triples
- * (subject -> predicate -> object). We render them as canonical records where
- * `content` is the "subject predicate object" sentence and the predicate is
- * surfaced as `kind`.
- */
-function tripleToRecord(triple) {
-  if (!triple || typeof triple !== 'object') return null;
-  const subject = triple.subject ?? triple.subName ?? triple.s ?? '';
-  const predicate = triple.predicate ?? triple.p ?? '';
-  const object = triple.object ?? triple.objName ?? triple.o ?? '';
-  const id = triple.id ?? `${subject}|${predicate}|${object}`;
+// MemPalace "records" are drawers: the verbatim notes/memories filed into a
+// wing -> room taxonomy. We surface them as canonical records. Drawer ids have
+// the form `drawer_<wing>_<room>_<hash>` so wing/room can be recovered for
+// edits (which are delete+re-add, since drawers have no in-place update tool).
+const DEFAULT_WING = 'notes';
+const DEFAULT_ROOM = 'general';
+// Semantic search returns every drawer up to `limit` (ranked), so a broad query
+// with a high limit acts as "list all".
+const LIST_ALL_QUERY = 'memory note knowledge fact';
+const LIST_LIMIT = 200;
+
+function drawerToRecord(drawer) {
+  if (!drawer || typeof drawer !== 'object') return null;
+  const id = drawer.id;
+  if (!id) return null;
+  const wing = drawer.wing ?? '';
+  const room = drawer.room ?? '';
+  const location = [wing, room].filter(Boolean).join('/');
   return {
     id: String(id),
-    title: subject,
-    content: [subject, predicate, object].filter(Boolean).join(' '),
-    kind: predicate,
+    title: '',
+    content: drawer.content ?? drawer.text ?? '',
+    kind: location,
     tags: [],
-    project: '',
-    createdAt: triple.validFrom ?? triple.valid_from ?? null,
-    updatedAt: triple.validTo ?? triple.valid_to ?? null,
-    _current: triple.current,
-    _triple: { subject, predicate, object },
+    project: wing,
+    createdAt: drawer.filedAt ?? drawer.created_at ?? null,
+    updatedAt: null,
   };
 }
 
-function parseTriplesFromText(text) {
+/** Recover { wing, room } from a `drawer_<wing>_<room>_<hash>` id. */
+function locationFromId(id) {
+  const parts = String(id).split('_');
+  if (parts[0] === 'drawer' && parts.length >= 4) {
+    return { wing: parts[1] || DEFAULT_WING, room: parts[2] || DEFAULT_ROOM };
+  }
+  return { wing: DEFAULT_WING, room: DEFAULT_ROOM };
+}
+
+function parseDrawersFromText(text) {
   if (!text) return [];
-  // mempalace tools return JSON in several shapes depending on the tool:
-  //  - an array of triples
-  //  - { triples: [...] } / { results: [...] }
-  //  - an index-keyed object { "0": {...}, "1": {...} } (kg_timeline)
   try {
     const parsed = JSON.parse(text);
-    let arr;
-    if (Array.isArray(parsed)) {
-      arr = parsed;
-    } else if (Array.isArray(parsed.triples) || Array.isArray(parsed.results) || Array.isArray(parsed.entities)) {
-      arr = parsed.triples || parsed.results || parsed.entities;
-    } else if (parsed && typeof parsed === 'object') {
-      arr = Object.values(parsed).filter((v) => v && typeof v === 'object');
-    } else {
-      arr = [];
-    }
-    return arr.map(tripleToRecord).filter(Boolean);
+    const arr = Array.isArray(parsed) ? parsed : (parsed.results || parsed.drawers || []);
+    // Drop the heavy embedding vectors before returning.
+    return arr.map((d) => { if (d && typeof d === 'object') delete d.vector; return d; })
+      .map(drawerToRecord)
+      .filter(Boolean);
   } catch {
     return [];
   }
@@ -80,12 +83,12 @@ function parseTriplesFromText(text) {
 export const mempalaceAdapter = {
   id: 'mempalace',
   name: 'MemPalace',
-  tagline: 'Zero-LLM temporal knowledge-graph memory (MCP server)',
+  tagline: 'Zero-LLM memory palace: notes filed into wings & rooms (MCP server)',
   description:
-    'A local-first memory palace exposing a temporal knowledge graph (SQLite) and embedded vector search (LanceDB) over MCP. Stores facts as triples with validity ranges.',
+    'A local-first memory palace that stores verbatim notes ("drawers") organized into a wing/room taxonomy, with embedded vector search (LanceDB) and a temporal knowledge graph, exposed over MCP.',
   docsUrl: 'https://github.com/adshaa/mempalacejs',
   integration: 'mcp',
-  badges: ['local-first', 'knowledge-graph', 'vector', 'mcp', 'zero-llm'],
+  badges: ['local-first', 'notes', 'vector', 'mcp', 'zero-llm'],
   requirements: [
     { id: 'network', label: 'Network access to npm + a ~90MB embedding model download on first use' },
     { id: 'node', label: 'Native better-sqlite3 (runs under Node; pre-download model with mempalace setup)' },
@@ -99,7 +102,7 @@ export const mempalaceAdapter = {
     projectScoped: false,
     configurable: false,
   },
-  recordModel: { title: true, kind: true, tags: false, triple: true },
+  recordModel: { title: false, kind: false, tags: false },
 
   async detect({ workingDirectory }) {
     const mcp = getMcpConfig(MCP_NAME, workingDirectory);
@@ -156,54 +159,74 @@ export const mempalaceAdapter = {
 
   records: {
     async available() {
-      // KG add/list/stats only need the MCP server, which npx can always
-      // launch. Semantic search lazily downloads the embedding model.
-      return { ok: true, reason: 'MCP knowledge graph' };
+      // The MCP server is always launchable via npx; drawer search lazily
+      // downloads the embedding model on first use.
+      return { ok: true, reason: 'MemPalace drawers' };
     },
 
     async list({ query }) {
+      // Drawers are the notes filed in the palace. Semantic search returns every
+      // drawer up to `limit` (ranked), so a broad query lists them all; a real
+      // query ranks by relevance.
       return withMempalace(async ({ callTool }) => {
-        // kg_timeline with no entity returns every triple in the graph. We list
-        // current (non-invalidated) facts and filter client-side for queries so
-        // search reliably covers the knowledge graph (vector search only covers
-        // mined drawers, not manually-added facts).
-        const result = await callTool('mempalace_kg_timeline', {});
-        let triples = parseTriplesFromText(mcpResultText(result)).filter((t) => t._current !== false);
-        if (query) {
-          const q = query.toLowerCase();
-          triples = triples.filter((t) => t.content.toLowerCase().includes(q));
-        }
-        // Strip internal fields before returning.
-        return triples.map(({ _current, _triple, ...rest }) => ({ ...rest, _triple }));
+        const result = await callTool('mempalace_search', {
+          query: query && query.trim() ? query.trim() : LIST_ALL_QUERY,
+          limit: LIST_LIMIT,
+        });
+        return parseDrawersFromText(mcpResultText(result));
       });
     },
 
     async create({ input }) {
-      // Expect input.content as "subject | predicate | object" or use the
-      // structured fields if provided.
-      let { subject, predicate, object } = input.triple || {};
-      if (!subject && typeof input.content === 'string' && input.content.includes('|')) {
-        [subject, predicate, object] = input.content.split('|').map((s) => s.trim());
-      }
-      if (!subject || !predicate || !object) {
-        throw new Error('MemPalace records are facts. Provide subject, predicate and object (or "subject | predicate | object").');
-      }
+      const content = (input.content || '').trim();
+      if (!content) throw new Error('A note (content) is required.');
       return withMempalace(async ({ callTool }) => {
-        await callTool('mempalace_kg_add', { subject, predicate, object });
-        return tripleToRecord({ subject, predicate, object });
+        const res = await callTool('mempalace_add_drawer', {
+          wing: DEFAULT_WING,
+          room: DEFAULT_ROOM,
+          content,
+        });
+        let id;
+        try { id = JSON.parse(mcpResultText(res))?.id; } catch { /* ignore */ }
+        return {
+          id: String(id || `drawer_${DEFAULT_WING}_${DEFAULT_ROOM}_${Date.now()}`),
+          title: '',
+          content,
+          kind: `${DEFAULT_WING}/${DEFAULT_ROOM}`,
+          tags: [],
+          project: DEFAULT_WING,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
       });
     },
 
     async update({ id, input }) {
-      await this.remove({ id });
-      return this.create({ input });
+      // Drawers have no in-place edit; recreate in the same wing/room.
+      const { wing, room } = locationFromId(id);
+      const content = (input.content || '').trim();
+      return withMempalace(async ({ callTool }) => {
+        try { await callTool('mempalace_delete_drawer', { id: String(id) }); } catch { /* may already be gone */ }
+        const res = await callTool('mempalace_add_drawer', { wing, room, content });
+        let newId;
+        try { newId = JSON.parse(mcpResultText(res))?.id; } catch { /* ignore */ }
+        return {
+          id: String(newId || id),
+          title: '',
+          content,
+          kind: `${wing}/${room}`,
+          tags: [],
+          project: wing,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+      });
     },
 
     async remove({ id }) {
-      const [subject, predicate, object] = String(id).split('|');
-      if (!subject) throw new Error('Invalid mempalace record id');
+      if (!id) throw new Error('Invalid mempalace drawer id');
       return withMempalace(async ({ callTool }) => {
-        await callTool('mempalace_kg_invalidate', { subject, predicate, object });
+        await callTool('mempalace_delete_drawer', { id: String(id) });
       });
     },
   },

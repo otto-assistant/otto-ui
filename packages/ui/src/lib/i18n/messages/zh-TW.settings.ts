@@ -1812,6 +1812,7 @@
   "settings.memory.config.saveFailed": "Failed to save configuration",
   "settings.memory.records.heading": "Records",
   "settings.memory.records.subtitle": "Create, edit and delete memory entries for the current project.",
+  "settings.memory.records.subtitleGlobal": "Create, edit and delete memory entries.",
   "settings.memory.records.add": "Add record",
   "settings.memory.records.searchPlaceholder": "Search records…",
   "settings.memory.records.refresh": "Refresh",

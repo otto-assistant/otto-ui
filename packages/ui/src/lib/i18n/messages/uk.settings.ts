@@ -1812,6 +1812,7 @@ export const settingsDict = {
   "settings.memory.config.saveFailed": "Не вдалося зберегти конфігурацію",
   "settings.memory.records.heading": "Записи",
   "settings.memory.records.subtitle": "Створюйте, редагуйте та видаляйте записи пам'яті для поточного проєкту.",
+  "settings.memory.records.subtitleGlobal": "Створюйте, редагуйте та видаляйте записи памʼяті.",
   "settings.memory.records.add": "Додати запис",
   "settings.memory.records.searchPlaceholder": "Пошук записів…",
   "settings.memory.records.refresh": "Оновити",
