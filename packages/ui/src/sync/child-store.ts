@@ -121,11 +121,17 @@ export class ChildStoreManager {
     const shouldBootstrap = options?.bootstrap ?? true
     if (shouldBootstrap) {
       const wantLazy = options?.lazy === true
+      const currentMode = this.bootstrapModes.get(directory)
       if (store.getState().status === "loading") {
-        // Fresh store — bootstrap at the requested depth.
-        this.bootstrapModes.set(directory, wantLazy ? "lazy" : "full")
-        this.onBootstrap?.(directory, wantLazy)
-      } else if (!wantLazy && this.bootstrapModes.get(directory) === "lazy") {
+        // Fresh store (or a forced re-bootstrap). Never DOWNGRADE an
+        // already-requested full bootstrap to lazy: if a full pass was already
+        // requested (possibly still in flight before status flips off
+        // "loading"), keep it full so a lazy sidebar render can't strand the
+        // active directory without its chat-only data.
+        const lazyBootstrap = wantLazy && currentMode !== "full"
+        this.bootstrapModes.set(directory, lazyBootstrap ? "lazy" : "full")
+        this.onBootstrap?.(directory, lazyBootstrap)
+      } else if (currentMode === "lazy" && !wantLazy) {
         // A previously lazy-bootstrapped directory is now needed in full
         // (e.g. it became the active chat directory). Upgrade it so chat-only
         // data (config, providers, commands, mcp/lsp/vcs, …) gets fetched.

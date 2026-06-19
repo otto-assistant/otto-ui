@@ -1750,6 +1750,12 @@ export function SyncProvider(props: {
   const resyncingDirectoriesRef = useRef(new Set<string>())
   const statusPollingDirectoriesRef = useRef(new Set<string>())
   const pipelineReconnectRef = useRef<((reason?: string) => void) | null>(null)
+  // The workspace the user is currently in (may differ from the last viewed
+  // session's directory, e.g. while composing a new-session draft). The
+  // watchdog keeps this directory actively watched even when no session there
+  // is running. Kept current via a ref so the interval reads the latest value.
+  const activeWorkspaceDirectoryRef = useRef(props.directory)
+  activeWorkspaceDirectoryRef.current = props.directory
 
   const system = useMemo<SyncSystem>(
     () => ({
@@ -1779,7 +1785,8 @@ export function SyncProvider(props: {
 
   // Configure child store manager
   useEffect(() => {
-    const bootingDirs = new Set<string>()
+    // Maps each in-flight directory bootstrap to whether it's the lazy variant.
+    const bootingDirs = new Map<string, boolean>()
     // Directories whose lazy bootstrap is in flight when a full bootstrap is
     // requested. We can't run both concurrently, so we remember the upgrade and
     // re-run as full once the lazy pass settles.
@@ -1787,12 +1794,13 @@ export function SyncProvider(props: {
 
     const handleBootstrap = (directory: string, lazy: boolean) => {
       if (bootingDirs.has(directory)) {
-        // A bootstrap is already running for this directory. If a full pass is
-        // requested while a lazy one is in flight, queue the upgrade.
-        if (!lazy) pendingFullBootstrap.add(directory)
+        // A bootstrap is already running for this directory. Only queue a
+        // full upgrade if the in-flight pass is the LAZY variant — if a full
+        // pass is already running, a second full would be redundant.
+        if (!lazy && bootingDirs.get(directory) === true) pendingFullBootstrap.add(directory)
         return
       }
-      bootingDirs.add(directory)
+      bootingDirs.set(directory, lazy)
 
       const store = childStores.getChild(directory)
       if (!store) {
@@ -2097,11 +2105,16 @@ export function SyncProvider(props: {
           for (const [directory, store] of childStores.children.entries()) {
             const state = store.getState()
             const candidateSessionIds = getActiveSessionCandidateIds(directory, state)
-            // Only the active directory and directories with a running session
-            // need the watchdog's per-5s polling. Idle, non-active directories
-            // (the bulk of the sidebar when many projects are open) are kept
-            // live by the global SSE stream — polling them is pure waste.
-            const needsActiveWatch = directory === _activeDirectory || directoryHasRunningSession(state)
+            // Only directories the user is actually engaged with need the
+            // watchdog's per-5s polling: the current workspace, the viewed
+            // session's directory, or any directory with a running session.
+            // Idle, non-active directories (the bulk of the sidebar when many
+            // projects are open) are kept live by the global SSE stream —
+            // polling them is pure waste.
+            const needsActiveWatch =
+              directory === activeWorkspaceDirectoryRef.current
+              || directory === _activeDirectory
+              || directoryHasRunningSession(state)
             if (candidateSessionIds.length === 0 || !needsActiveWatch) {
               lastActiveEventAtByDirectoryRef.current.delete(directory)
               lastStatusPollAtByDirectoryRef.current.delete(directory)
