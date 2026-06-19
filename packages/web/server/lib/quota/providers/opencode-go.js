@@ -128,54 +128,74 @@ export const fetchQuota = async () => {
 
   try {
     // ── Mode 1: Cookie/dashboard (most accurate) ──
-    if (mode === 'cookie' && dashboardConfig) {
-      let usageData = null;
-      let source = null;
-      if (apiKey) {
-        usageData = await fetchOfficialUsage(apiKey).catch(() => null);
-        if (usageData) source = 'api';
-      }
-      if (!usageData) {
-        usageData = await fetchDashboardUsage(dashboardConfig);
-        if (usageData) source = 'dashboard';
-      }
+    if (mode === 'cookie') {
+      if (dashboardConfig) {
+        let usageData = null;
+        let source = null;
+        if (apiKey) {
+          usageData = await fetchOfficialUsage(apiKey).catch(() => null);
+          if (usageData) source = 'api';
+        }
+        if (!usageData) {
+          usageData = await fetchDashboardUsage(dashboardConfig);
+          if (usageData) source = 'dashboard';
+        }
 
-      if (usageData) {
-        const windows = buildWindows(usageData);
-        // Fill missing windows from local DB
-        if (dbWindows?.windows) {
-          for (const key of ['monthly', 'weekly', '5h']) {
-            if (!windows[key] && dbWindows.windows[key]) {
-              windows[key] = dbWindows.windows[key];
+        if (usageData) {
+          const windows = buildWindows(usageData);
+          // Fill missing windows from local DB for windows the dashboard
+          // didn't return (e.g. API returns rolling+weekly but not monthly).
+          if (dbWindows?.windows) {
+            for (const key of ['monthly', 'weekly', '5h']) {
+              if (!windows[key] && dbWindows.windows[key]) {
+                windows[key] = dbWindows.windows[key];
+              }
             }
           }
+          return {
+            ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
+            usageSource: source
+          };
         }
-        return {
-          ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
-          usageSource: source
-        };
+
+        // Cookie mode configured but dashboard fetch failed
+        return buildResult({
+          providerId, providerName, ok: false, configured: true,
+          usage: models ? withModels({}) : null,
+          error: 'Could not fetch usage from the OpenCode Go dashboard.'
+        });
       }
 
-      // Dashboard configured but failed
+      // mode === 'cookie' but no dashboardConfig found (stale/missing creds)
       return buildResult({
         providerId, providerName, ok: false, configured: true,
         usage: models ? withModels({}) : null,
-        error: 'Could not fetch usage from the OpenCode Go dashboard.'
+        error: 'Cookie mode configured but no workspace credentials found. Re-enter your Workspace ID and Auth Cookie.'
       });
     }
 
     // ── Mode 2: Anchor-based (local DB + reset times from user) ──
-    if (mode === 'anchor' && anchorConfig && dbWindows) {
-      const windows = buildAnchorWindows(dbWindows, anchorConfig);
-      if (windows) {
-        return {
-          ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
-          usageSource: 'anchor'
-        };
+    if (mode === 'anchor') {
+      if (anchorConfig && dbWindows) {
+        const windows = buildAnchorWindows(dbWindows, anchorConfig);
+        if (windows) {
+          return {
+            ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
+            usageSource: 'anchor'
+          };
+        }
       }
+      // Anchor mode configured but anchor data or local DB missing
+      return buildResult({
+        providerId, providerName, ok: false, configured: true,
+        usage: null,
+        error: anchorConfig
+          ? 'Could not compute usage windows from local data with the provided reset times.'
+          : 'Anchor mode configured but no reset times found. Re-enter your "Resets in" values.'
+      });
     }
 
-    // ── Fallback: local DB only (approximate) ──
+    // ── Fallback: local DB only (approximate) — only when no mode configured ──
     if (dbWindows) {
       return {
         ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(dbWindows.windows) }),

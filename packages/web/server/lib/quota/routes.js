@@ -1,6 +1,26 @@
 import express from 'express';
 import { resolveDashboardConfig, saveDashboardConfig, saveAnchorConfig, clearDashboardConfig, resolveConfigMode, resolveAnchorConfig } from './providers/opencode-go-dashboard.js';
 
+/**
+ * Mask a sensitive string for display — shows first and last few chars
+ * with asterisks in between so the user can see credentials are present
+ * without exposing the full value.
+ *
+ * @param {string | null} value
+ * @param {{ prefix?: number, suffix?: number }} [opts]
+ * @returns {string | null}
+ */
+const maskSensitiveValue = (value, opts = {}) => {
+  if (!value || typeof value !== 'string') return null;
+  const { prefix = 4, suffix = 4 } = opts;
+  const trimmed = value.trim();
+  if (trimmed.length <= prefix + suffix + 2) {
+    // Too short to mask meaningfully — show as fully masked.
+    return '••••••••';
+  }
+  return trimmed.slice(0, prefix) + '••••' + trimmed.slice(-suffix);
+};
+
 export function registerQuotaRoutes(app, { getQuotaProviders }) {
   app.get('/api/quota/providers', async (_req, res) => {
     try {
@@ -41,6 +61,9 @@ export function registerQuotaRoutes(app, { getQuotaProviders }) {
       hasCookie: !!cookieConfig,
       hasAnchors: !!anchorConfig,
       cookieSource: cookieConfig?.source ?? null,
+      // Masked values so UI can show that credentials are saved
+      maskedWorkspaceId: cookieConfig ? maskSensitiveValue(cookieConfig.workspaceId, { prefix: 4, suffix: 4 }) : null,
+      hasAuthCookie: !!cookieConfig?.authCookie,
       // Return anchor values (seconds until reset) so UI can pre-fill edit fields
       anchors: anchorConfig ?? null,
     });
@@ -52,10 +75,19 @@ export function registerQuotaRoutes(app, { getQuotaProviders }) {
       const { mode, workspaceId, authCookie, anchors } = req.body ?? {};
 
       if (mode === 'cookie') {
-        if (!workspaceId || !authCookie) {
+        // Support partial updates: if workspaceId/authCookie are not provided
+        // (or are empty/just the masked placeholder), preserve existing values.
+        const existing = resolveDashboardConfig();
+        const finalWorkspaceId = (workspaceId && typeof workspaceId === 'string' && !workspaceId.includes('••••'))
+          ? workspaceId.trim()
+          : existing?.workspaceId ?? null;
+        const finalAuthCookie = (authCookie && typeof authCookie === 'string' && !authCookie.includes('••••'))
+          ? authCookie.trim()
+          : existing?.authCookie ?? null;
+        if (!finalWorkspaceId || !finalAuthCookie) {
           return res.status(400).json({ ok: false, error: 'workspaceId and authCookie are required' });
         }
-        saveDashboardConfig({ workspaceId, authCookie });
+        saveDashboardConfig({ workspaceId: finalWorkspaceId, authCookie: finalAuthCookie });
       } else if (mode === 'anchor') {
         if (!anchors || typeof anchors !== 'object') {
           return res.status(400).json({ ok: false, error: 'anchors object is required' });

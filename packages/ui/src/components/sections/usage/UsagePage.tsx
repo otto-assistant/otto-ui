@@ -66,6 +66,8 @@ const OpenCodeGoSetup: React.FC<{
   // Cookie fields
   const [workspaceId, setWorkspaceId] = React.useState('');
   const [authCookie, setAuthCookie] = React.useState('');
+  const [maskedWorkspaceId, setMaskedWorkspaceId] = React.useState<string | null>(null);
+  const [hasAuthCookie, setHasAuthCookie] = React.useState(false);
 
   // Anchor fields
   const [rollingIn, setRollingIn] = React.useState('');
@@ -84,6 +86,8 @@ const OpenCodeGoSetup: React.FC<{
       const data = await resp.json();
       if (data?.mode) setExistingMode(data.mode);
       if (data?.mode === 'cookie' || data?.mode === 'anchor') setMode(data.mode);
+      setMaskedWorkspaceId(data?.maskedWorkspaceId ?? null);
+      setHasAuthCookie(data?.hasAuthCookie === true);
       if (data?.anchors) {
         setRollingIn(formatSec(data.anchors.rolling));
         setWeeklyIn(formatSec(data.anchors.weekly));
@@ -104,13 +108,20 @@ const OpenCodeGoSetup: React.FC<{
       const body: Record<string, unknown> = { mode };
 
       if (mode === 'cookie') {
-        if (!workspaceId.trim() || !authCookie.trim()) {
+        // Allow empty fields when saved credentials exist — user can keep
+        // existing values by leaving the masked placeholders unchanged.
+        const hasExistingCreds = maskedWorkspaceId && hasAuthCookie;
+        const wsValue = workspaceId.trim();
+        const acValue = authCookie.trim();
+        if (!wsValue && !acValue && hasExistingCreds) {
+          // Keep existing — don't send new values (server will preserve them).
+        } else if (!wsValue || !acValue) {
           setSaveError('Both Workspace ID and Auth Cookie are required');
           setSaving(false);
           return;
         }
-        body.workspaceId = workspaceId.trim();
-        body.authCookie = authCookie.trim();
+        body.workspaceId = wsValue;
+        body.authCookie = acValue;
       } else {
         const anchors: Record<string, number> = {};
         const r = parseResetsIn(rollingIn);
@@ -150,13 +161,17 @@ const OpenCodeGoSetup: React.FC<{
     try {
       await runtimeFetch('/api/quota/opencode-go/config', { method: 'DELETE' });
       setExistingMode(null);
+      setMaskedWorkspaceId(null);
+      setHasAuthCookie(false);
+      setWorkspaceId('');
+      setAuthCookie('');
       onConfigSaved();
     } catch { /* ignore */ }
   };
 
-  // When a mode is working, show a compact toggle to change it.
+  // When a mode is saved, show a compact toggle to change it.
   // Otherwise show the full setup expanded.
-  const [showSetup, setShowSetup] = React.useState(!isAuthoritative || !existingMode);
+  const [showSetup, setShowSetup] = React.useState(!existingMode);
 
   // Error from dashboard mode (cookie expired etc.)
   if (hasError && result?.error && existingMode === 'cookie') {
@@ -166,9 +181,21 @@ const OpenCodeGoSetup: React.FC<{
         <p className="typography-meta text-[var(--status-warning)]/80 mb-3">{result.error}</p>
         <div className="space-y-2">
           <label className="typography-micro text-foreground block">Workspace ID</label>
-          <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground" placeholder="wrk_xxx" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)} />
+          <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground"
+            placeholder="wrk_xxx"
+            value={workspaceId || (maskedWorkspaceId ?? '')}
+            onChange={(e) => setWorkspaceId(e.target.value)} />
+          {maskedWorkspaceId && !workspaceId && (
+            <p className="typography-micro text-muted-foreground/60 mt-0.5">Saved: {maskedWorkspaceId}</p>
+          )}
           <label className="typography-micro text-foreground block">Auth Cookie</label>
-          <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground" placeholder="Fe26.2**..." value={authCookie} onChange={(e) => setAuthCookie(e.target.value)} />
+          <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground"
+            placeholder="Fe26.2**..."
+            value={authCookie || (hasAuthCookie ? '••••••••' : '')}
+            onChange={(e) => setAuthCookie(e.target.value)} />
+          {hasAuthCookie && !authCookie && (
+            <p className="typography-micro text-muted-foreground/60 mt-0.5">Saved: ••••••••</p>
+          )}
           {saveError && <p className="typography-micro text-[var(--status-error)]">{saveError}</p>}
           <div className="flex items-center gap-2 mt-2">
             <button className="rounded-md bg-primary px-4 py-1.5 typography-ui-label text-primary-foreground hover:opacity-90 disabled:opacity-40" disabled={saving} onClick={handleSave}>{saving ? 'Saving...' : 'Save & Connect'}</button>
@@ -182,8 +209,9 @@ const OpenCodeGoSetup: React.FC<{
   // Loading existing config
   if (loadingConfig) return null;
 
-  // Compact toggle when a mode is working
-  if (isAuthoritative && existingMode) {
+  // Compact toggle when a mode is active (even if fetch failed — user
+  // can expand to fix credentials or switch modes).
+  if (existingMode) {
     return (
       <div className="mb-4 px-2">
         <button className="flex items-center gap-1.5 typography-micro text-muted-foreground hover:text-foreground transition-colors" onClick={() => setShowSetup(!showSetup)}>
@@ -211,8 +239,20 @@ const OpenCodeGoSetup: React.FC<{
             <p className="typography-micro text-muted-foreground mt-0.5">Most accurate. Fetches live data from opencode.ai. Cookie needs periodic refresh.</p>
             {mode === 'cookie' && (
               <div className="mt-2 space-y-2">
-                <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="Workspace ID (wrk_xxx)" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)} />
-                <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50" placeholder="Auth Cookie (Fe26.2**...)" value={authCookie} onChange={(e) => setAuthCookie(e.target.value)} />
+                <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50"
+                  placeholder="Workspace ID (wrk_xxx)"
+                  value={workspaceId || (maskedWorkspaceId ?? '')}
+                  onChange={(e) => setWorkspaceId(e.target.value)} />
+                {maskedWorkspaceId && !workspaceId && (
+                  <p className="typography-micro text-muted-foreground/60 mt-0.5">Saved: {maskedWorkspaceId} — type to change</p>
+                )}
+                <input className="w-full rounded-md border border-[var(--interactive-border)] bg-[var(--surface-input)] px-3 py-1.5 typography-body text-foreground placeholder:text-muted-foreground/50"
+                  placeholder="Auth Cookie (Fe26.2**...)"
+                  value={authCookie || (hasAuthCookie ? '••••••••' : '')}
+                  onChange={(e) => setAuthCookie(e.target.value)} />
+                {hasAuthCookie && !authCookie && (
+                  <p className="typography-micro text-muted-foreground/60 mt-0.5">Saved: •••••••• — type to change</p>
+                )}
               </div>
             )}
           </div>
