@@ -14,11 +14,6 @@ import { useI18n } from '@/lib/i18n';
 import { formatTimeForPreference } from '@/lib/timeFormat';
 import { useUIStore, type TimeFormatPreference } from '@/stores/useUIStore';
 import { runtimeFetch } from '@/lib/runtime-fetch';
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible';
 
 const formatTime = (timestamp: number | null, timeFormatPreference: TimeFormatPreference) => {
   if (!timestamp) return '-';
@@ -106,7 +101,7 @@ const OpenCodeGoSetup: React.FC<{
     setSaving(true);
     setSaveError(null);
     try {
-      let body: Record<string, unknown> = { mode };
+      const body: Record<string, unknown> = { mode };
 
       if (mode === 'cookie') {
         if (!workspaceId.trim() || !authCookie.trim()) {

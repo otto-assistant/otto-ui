@@ -23,6 +23,10 @@ import { PluginsSidebar, PluginsPage } from '@/components/sections/plugins';
 import { usePluginsStore } from '@/stores/usePluginsStore';
 import { SkillsSidebar } from '@/components/sections/skills/SkillsSidebar';
 import { SkillsPage } from '@/components/sections/skills/SkillsPage';
+import { MemoryBackendsPage } from '@/components/sections/memory/MemoryBackendsPage';
+import { MemoryRecordsPage } from '@/components/sections/memory/MemoryRecordsPage';
+import { backendIdFromSlug } from '@/components/sections/memory/backendMeta';
+import { useMemoryStore } from '@/stores/useMemoryStore';
 import { ProjectsSidebar } from '@/components/sections/projects/ProjectsSidebar';
 import { ProjectsPage } from '@/components/sections/projects/ProjectsPage';
 import { RemoteInstancesPage } from '@/components/sections/remote-instances/RemoteInstancesPage';
@@ -103,12 +107,21 @@ const pageOrder: SettingsPageSlug[] = [
   'usage',
   'skills.installed',
   'skills.catalog',
+  'memory',
+  'memory.opencode-mem',
+  'memory.mempalace',
+  'memory.codemem',
+  'memory.hindsight',
   'voice',
   'tunnel',
   'about',
 ];
 
 const ADD_PROVIDER_SETTINGS_ID = '__add_provider__';
+
+// Stable empty array so the memory active-ids selector keeps referential
+// equality when no backend is active (avoids settings nav re-render churn).
+const EMPTY_MEMORY_IDS: string[] = [];
 
 function buildRuntimeContext(isDesktop: boolean, isMobile: boolean): SettingsRuntimeContext {
   const isVSCode = isVSCodeRuntime();
@@ -284,15 +297,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
 
   const runtimeCtx = React.useMemo(() => buildRuntimeContext(isDesktopApp, isMobile), [isDesktopApp, isMobile]);
 
+  // Per-backend memory record pages only appear in the nav once their backend
+  // is active. Subscribe to the (low-frequency) active id list.
+  const memoryActiveIds = useMemoryStore((state) => state.status?.activeBackends ?? EMPTY_MEMORY_IDS);
+
   const visiblePages = React.useMemo(() => {
     const allowedPages = visiblePageSlugs ? new Set<SettingsPageSlug>(visiblePageSlugs) : null;
+    const activeMemory = new Set(memoryActiveIds);
     return SETTINGS_PAGE_METADATA
       .filter((page) => page.slug !== 'home')
       .filter((page) => !allowedPages || allowedPages.has(page.slug))
       .filter((page) => isPageAvailable(page, runtimeCtx))
       .filter((page) => !(runtimeCtx.isVSCode && page.slug === 'projects'))
-      .filter((page) => !(isMobile && page.slug === 'shortcuts'));
-  }, [runtimeCtx, isMobile, visiblePageSlugs]);
+      .filter((page) => !(isMobile && page.slug === 'shortcuts'))
+      .filter((page) => {
+        const backendId = backendIdFromSlug(page.slug);
+        return !backendId || activeMemory.has(backendId);
+      });
+  }, [runtimeCtx, isMobile, visiblePageSlugs, memoryActiveIds]);
 
   const sortedFilteredPages = React.useMemo(() => {
     const rank = new Map<SettingsPageSlug, number>(pageOrder.map((s, i) => [s, i]));
@@ -394,7 +416,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
     if (settingsSlug === 'snippets') {
       void useSnippetsStore.getState().loadSnippets();
     }
+    if (settingsSlug === 'memory' || settingsSlug.startsWith('memory.')) {
+      void useMemoryStore.getState().loadStatus();
+      const backendId = backendIdFromSlug(settingsSlug);
+      if (backendId) {
+        void useMemoryStore.getState().loadRecords(backendId);
+      }
+    }
   }, [activeProjectId, isSettingsDialogOpen, isWindowed, runtimeCtx.isVSCode, settingsSlug]);
+
+  // Load memory status whenever settings is available so active backends'
+  // record pages appear in the nav even before visiting the Memory page.
+  React.useEffect(() => {
+    if (!isSettingsDialogOpen && !runtimeCtx.isVSCode && !isWindowed) {
+      return;
+    }
+    void useMemoryStore.getState().loadStatus();
+  }, [isSettingsDialogOpen, isWindowed, runtimeCtx.isVSCode]);
 
   const openPage = React.useCallback((slug: SettingsPageSlug) => {
     setSettingsPage(slug);
@@ -427,6 +465,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
   }), []);
 
   const getPageTitle = React.useCallback((slug: SettingsPageSlug): string => {
+    if (backendIdFromSlug(slug)) {
+      return getSettingsPageMeta(slug)?.title ?? slug;
+    }
     switch (slug) {
       case 'projects':
         return t('settings.page.projects.title');
@@ -450,6 +491,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return t('settings.page.skills.title');
       case 'skills.catalog':
         return t('settings.page.skillsCatalog.title');
+      case 'memory':
+        return t('settings.page.memory.title');
       case 'git':
         return t('settings.page.git.title');
       case 'integrations':
@@ -722,6 +765,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
       return renderUnavailable();
     }
 
+    const memoryBackendId = backendIdFromSlug(slug);
+    if (memoryBackendId) {
+      return <MemoryRecordsPage backendId={memoryBackendId} />;
+    }
+
     switch (slug) {
       case 'home':
         return <SettingsHome onOpen={openPage} />;
@@ -743,6 +791,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <SkillsPage view="installed" />;
       case 'skills.catalog':
         return <SkillsPage view="catalog" />;
+      case 'memory':
+        return <MemoryBackendsPage />;
       case 'providers':
         return <ProvidersPage />;
       case 'usage':
