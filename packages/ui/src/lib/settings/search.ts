@@ -24,6 +24,14 @@ export interface SettingsSearchAvailabilityContext extends SettingsRuntimeContex
 
 export const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
   {
+    id: 'memory.backends',
+    page: 'memory',
+    titleKey: 'settings.memory.header.title',
+    descriptionKey: 'settings.memory.header.subtitle',
+    keywords: ['memory', 'persistent', 'recall', 'context', 'opencode-mem', 'mempalace', 'codemem', 'hindsight'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
     id: 'appearance.language',
     page: 'appearance',
     titleKey: 'settings.appearance.language.label',

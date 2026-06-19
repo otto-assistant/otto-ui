@@ -164,6 +164,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'memory',
     kind: 'single',
     keywords: ['memory', 'persistent', 'recall', 'context', 'knowledge', 'opencode-mem', 'mempalace', 'codemem', 'hindsight', 'backend'],
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     slug: 'memory.opencode-mem',
@@ -171,6 +172,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'memory',
     kind: 'single',
     keywords: ['opencode-mem', 'memory', 'records', 'vector'],
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     slug: 'memory.mempalace',
@@ -178,6 +180,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'memory',
     kind: 'single',
     keywords: ['mempalace', 'memory', 'knowledge graph', 'records'],
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     slug: 'memory.codemem',
@@ -185,6 +188,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'memory',
     kind: 'single',
     keywords: ['codemem', 'memory', 'records'],
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     slug: 'memory.hindsight',
@@ -192,6 +196,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'memory',
     kind: 'single',
     keywords: ['hindsight', 'memory', 'records', 'retain', 'recall'],
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     slug: 'git',
