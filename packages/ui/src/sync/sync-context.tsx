@@ -489,6 +489,28 @@ function getActiveSessionCandidateIds(directory: string, state: DirectoryStore):
   })
 }
 
+// A directory is "live" — worth the watchdog's per-5s status poll / stale
+// resync / child discovery — only when something there is actually changing:
+// a session is running (busy/retry) or has an in-progress assistant message.
+// Idle directories are kept current by the global SSE event stream, so polling
+// them every 5s just multiplies request volume across every open project.
+function directoryHasRunningSession(state: DirectoryStore): boolean {
+  for (const status of Object.values(state.session_status ?? {})) {
+    if (status && (status.type === "busy" || status.type === "retry")) return true
+  }
+  for (const messages of Object.values(state.message ?? {})) {
+    const last = messages[messages.length - 1]
+    if (
+      last
+      && last.role === "assistant"
+      && typeof (last as { time?: { completed?: number } }).time?.completed !== "number"
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 type DirectorySessionStatusSnapshot = NonNullable<
   Awaited<ReturnType<typeof opencodeClient.getSessionStatusForDirectory>>
 >
@@ -2075,7 +2097,12 @@ export function SyncProvider(props: {
           for (const [directory, store] of childStores.children.entries()) {
             const state = store.getState()
             const candidateSessionIds = getActiveSessionCandidateIds(directory, state)
-            if (candidateSessionIds.length === 0) {
+            // Only the active directory and directories with a running session
+            // need the watchdog's per-5s polling. Idle, non-active directories
+            // (the bulk of the sidebar when many projects are open) are kept
+            // live by the global SSE stream — polling them is pure waste.
+            const needsActiveWatch = directory === _activeDirectory || directoryHasRunningSession(state)
+            if (candidateSessionIds.length === 0 || !needsActiveWatch) {
               lastActiveEventAtByDirectoryRef.current.delete(directory)
               lastStatusPollAtByDirectoryRef.current.delete(directory)
               lastFullResyncAtByDirectoryRef.current.delete(directory)
