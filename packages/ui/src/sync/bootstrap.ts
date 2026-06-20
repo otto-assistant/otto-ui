@@ -161,8 +161,16 @@ export async function bootstrapDirectory(input: {
     path?: unknown
   }
   loadSessions: (directory: string) => Promise<void> | void
+  // Lazy bootstrap (sidebar rows for non-active directories): fetch ONLY the
+  // reads the sidebar needs — session list, session status and permissions —
+  // and skip the chat-only reads (config, providers, project.current, path,
+  // commands, mcp/lsp/vcs, questions). The directory is upgraded to a full
+  // bootstrap the moment it becomes the active chat directory. This keeps
+  // startup network volume proportional to "1 active directory" instead of
+  // "every visible project".
+  lazy?: boolean
 }) {
-  const { directory, sdk, getState, set, global: g } = input
+  const { directory, sdk, getState, set, global: g, lazy = false } = input
   const state = getState()
   const loading = state.status !== "complete"
 
@@ -194,10 +202,14 @@ export async function bootstrapDirectory(input: {
   // remaining global reads that DO fire (race with global bootstrap, phase 2)
   // are coalesced across concurrent directory bootstraps via coalesceGlobalRead.
   // ---------------------------------------------------------------------------
-  const providerListTask = seededProviders || g.providers.all.length > 0
+  // For lazy bootstraps these chat-only reads are deferred until the directory
+  // becomes active (skip the fetch; the global seed above already covers the
+  // sidebar's needs). `session.status` is fetched in both modes — the sidebar
+  // needs live status.
+  const providerListTask = seededProviders || g.providers.all.length > 0 || lazy
     ? Promise.resolve()
     : retry(() => coalesceGlobalRead("provider.list", () => sdk.provider.list()).then((x) => set({ provider: unwrap(x, "provider.list") })))
-  const configGetTask = globalConfigAvailable
+  const configGetTask = globalConfigAvailable || lazy
     ? Promise.resolve()
     : retry(() => coalesceGlobalRead("config.get", () => sdk.config.get()).then((x) => set({ config: unwrap(x, "config.get") })))
   const pathGetTask = seededPath
@@ -207,17 +219,19 @@ export async function bootstrapDirectory(input: {
         const next = projectID((g.path as { directory?: string })?.directory ?? directory, g.projects)
         if (next) set({ project: next })
       })
-    : retry(() =>
-        coalesceGlobalRead("path.get", () => sdk.path.get()).then((x) => {
-          const data = unwrap(x, "path.get")
-          set({ path: data })
-          const next = projectID(data?.directory ?? directory, g.projects)
-          if (next) set({ project: next })
-        }),
-      )
+    : lazy
+      ? Promise.resolve()
+      : retry(() =>
+          coalesceGlobalRead("path.get", () => sdk.path.get()).then((x) => {
+            const data = unwrap(x, "path.get")
+            set({ path: data })
+            const next = projectID(data?.directory ?? directory, g.projects)
+            if (next) set({ project: next })
+          }),
+        )
 
   const phase1Results = await Promise.allSettled([
-    seededProject
+    seededProject || lazy
       ? Promise.resolve()
       : retry(() => coalesceGlobalRead("project.current", () => sdk.project.current()).then((x) => set({ project: unwrap(x, "project.current").id }))),
     providerListTask,
@@ -253,8 +267,13 @@ export async function bootstrapDirectory(input: {
   // ---------------------------------------------------------------------------
   // Phase 2: Deferrable — fetch after first paint without blocking.
   // These enrich the UI but aren't required for basic functionality.
+  //
+  // Chat-only reads (commands, mcp/lsp/vcs, questions) are skipped for lazy
+  // bootstraps — the sidebar never shows them; they're fetched when the
+  // directory is upgraded to full on activation. `permission.list` IS fetched
+  // in both modes because the sidebar renders a pending-permission badge.
   // ---------------------------------------------------------------------------
-  void Promise.allSettled([
+  const chatOnlyPhase2Tasks = lazy ? [] : [
     retry(() => coalesceGlobalRead("command.list", () => sdk.command.list()).then((x) => set({ command: unwrap(x, "command.list") }))),
     retry(() => coalesceGlobalRead("mcp.status", () => sdk.mcp.status()).then((x) => set({ mcp: unwrap(x, "mcp.status") }))),
     retry(() => coalesceGlobalRead("lsp.status", () => sdk.lsp.status()).then((x) => set({ lsp: unwrap(x, "lsp.status") }))),
@@ -298,6 +317,9 @@ export async function bootstrapDirectory(input: {
       }
       set({ question: merged })
     }),
+  ]
+
+  const permissionTask =
     retry(async () => {
       const before = getState()
       const beforeSignatures = new Map(
@@ -328,8 +350,9 @@ export async function bootstrapDirectory(input: {
         delete merged[sessionID]
       }
       set({ permission: merged })
-    }),
-  ]).then((results) => {
+    })
+
+  void Promise.allSettled([...chatOnlyPhase2Tasks, permissionTask]).then((results) => {
     const errors = results
       .filter((r): r is PromiseRejectedResult => r.status === "rejected")
       .map((r) => r.reason)

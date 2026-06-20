@@ -489,6 +489,28 @@ function getActiveSessionCandidateIds(directory: string, state: DirectoryStore):
   })
 }
 
+// A directory is "live" — worth the watchdog's per-5s status poll / stale
+// resync / child discovery — only when something there is actually changing:
+// a session is running (busy/retry) or has an in-progress assistant message.
+// Idle directories are kept current by the global SSE event stream, so polling
+// them every 5s just multiplies request volume across every open project.
+function directoryHasRunningSession(state: DirectoryStore): boolean {
+  for (const status of Object.values(state.session_status ?? {})) {
+    if (status && (status.type === "busy" || status.type === "retry")) return true
+  }
+  for (const messages of Object.values(state.message ?? {})) {
+    const last = messages[messages.length - 1]
+    if (
+      last
+      && last.role === "assistant"
+      && typeof (last as { time?: { completed?: number } }).time?.completed !== "number"
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 type DirectorySessionStatusSnapshot = NonNullable<
   Awaited<ReturnType<typeof opencodeClient.getSessionStatusForDirectory>>
 >
@@ -1728,6 +1750,12 @@ export function SyncProvider(props: {
   const resyncingDirectoriesRef = useRef(new Set<string>())
   const statusPollingDirectoriesRef = useRef(new Set<string>())
   const pipelineReconnectRef = useRef<((reason?: string) => void) | null>(null)
+  // The workspace the user is currently in (may differ from the last viewed
+  // session's directory, e.g. while composing a new-session draft). The
+  // watchdog keeps this directory actively watched even when no session there
+  // is running. Kept current via a ref so the interval reads the latest value.
+  const activeWorkspaceDirectoryRef = useRef(props.directory)
+  activeWorkspaceDirectoryRef.current = props.directory
 
   const system = useMemo<SyncSystem>(
     () => ({
@@ -1757,20 +1785,34 @@ export function SyncProvider(props: {
 
   // Configure child store manager
   useEffect(() => {
-    const bootingDirs = new Set<string>()
+    // Maps each in-flight directory bootstrap to whether it's the lazy variant.
+    const bootingDirs = new Map<string, boolean>()
+    // Directories whose lazy bootstrap is in flight when a full bootstrap is
+    // requested. We can't run both concurrently, so we remember the upgrade and
+    // re-run as full once the lazy pass settles.
+    const pendingFullBootstrap = new Set<string>()
 
-    childStores.configure({
-      onBootstrap: (directory) => {
-        if (bootingDirs.has(directory)) return
-        bootingDirs.add(directory)
+    const handleBootstrap = (directory: string, lazy: boolean) => {
+      if (bootingDirs.has(directory)) {
+        // A bootstrap is already running for this directory. Only queue a
+        // full upgrade if the in-flight pass is the LAZY variant — if a full
+        // pass is already running, a second full would be redundant.
+        if (!lazy && bootingDirs.get(directory) === true) pendingFullBootstrap.add(directory)
+        return
+      }
+      bootingDirs.set(directory, lazy)
 
-        const store = childStores.getChild(directory)
-        if (!store) return
+      const store = childStores.getChild(directory)
+      if (!store) {
+        bootingDirs.delete(directory)
+        return
+      }
 
-        const runBootstrap = async (attempt: number) => {
+      const runBootstrap = async (attempt: number) => {
           const globalState = useGlobalSyncStore.getState()
           await bootstrapDirectory({
             directory,
+            lazy,
             sdk: props.sdk,
             getState: () => store.getState(),
             set: (patch) => {
@@ -1862,12 +1904,22 @@ export function SyncProvider(props: {
           }
         }
 
-        runBootstrap(0).finally(() => {
-          bootingDirs.delete(directory)
-        })
-      },
+      runBootstrap(0).finally(() => {
+        bootingDirs.delete(directory)
+        // A full bootstrap was requested while this (lazy) pass was running —
+        // run it now to fetch the chat-only data the lazy pass skipped.
+        if (pendingFullBootstrap.has(directory)) {
+          pendingFullBootstrap.delete(directory)
+          handleBootstrap(directory, false)
+        }
+      })
+    }
+
+    childStores.configure({
+      onBootstrap: handleBootstrap,
       onDispose: (directory) => {
         bootingDirs.delete(directory)
+        pendingFullBootstrap.delete(directory)
       },
       isBooting: (directory) => bootingDirs.has(directory),
       isLoadingSessions: () => false,
@@ -2053,7 +2105,17 @@ export function SyncProvider(props: {
           for (const [directory, store] of childStores.children.entries()) {
             const state = store.getState()
             const candidateSessionIds = getActiveSessionCandidateIds(directory, state)
-            if (candidateSessionIds.length === 0) {
+            // Only directories the user is actually engaged with need the
+            // watchdog's per-5s polling: the current workspace, the viewed
+            // session's directory, or any directory with a running session.
+            // Idle, non-active directories (the bulk of the sidebar when many
+            // projects are open) are kept live by the global SSE stream —
+            // polling them is pure waste.
+            const needsActiveWatch =
+              directory === activeWorkspaceDirectoryRef.current
+              || directory === _activeDirectory
+              || directoryHasRunningSession(state)
+            if (candidateSessionIds.length === 0 || !needsActiveWatch) {
               lastActiveEventAtByDirectoryRef.current.delete(directory)
               lastStatusPollAtByDirectoryRef.current.delete(directory)
               lastFullResyncAtByDirectoryRef.current.delete(directory)
@@ -2192,7 +2254,7 @@ export function useGlobalSyncSelector<T>(selector: (state: GlobalSyncStore) => T
  */
 export function useDirectoryStore(
   directory?: string,
-  options?: { bootstrap?: boolean },
+  options?: { bootstrap?: boolean; lazy?: boolean },
 ): StoreApi<DirectoryStore> {
   const system = useSyncSystem()
   const dir = directory ?? system.directory
