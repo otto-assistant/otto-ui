@@ -580,7 +580,7 @@ function ApprovalsPanel({
       const d = event.data as
         | {
             approvalId: string;
-            decision: 'approve' | 'deny';
+            decision: 'approve' | 'approve-always' | 'deny';
             by?: { username?: string | null; firstName?: string | null; displayName?: string | null };
           }
         | undefined;
@@ -638,7 +638,7 @@ function ApprovalsPanel({
                 <span
                   className={cn(
                     'font-medium',
-                    a.decision === 'approve'
+                    a.decision && a.decision !== 'deny'
                       ? 'text-green-600 dark:text-green-400'
                       : a.decision === 'deny'
                         ? 'text-destructive'
@@ -648,9 +648,11 @@ function ApprovalsPanel({
                   )}
                 >
                   {a.decision
-                    ? a.decision === 'approve'
-                      ? `✓ Approved by ${a.decidedBy ?? 'user'}`
-                      : `✗ Denied by ${a.decidedBy ?? 'user'}`
+                    ? a.decision === 'deny'
+                      ? `✗ Denied by ${a.decidedBy ?? 'user'}`
+                      : a.decision === 'approve-always'
+                        ? `✓ Always allowed by ${a.decidedBy ?? 'user'}`
+                        : `✓ Approved by ${a.decidedBy ?? 'user'}`
                     : a.error
                       ? '✗ Failed to send'
                       : '⏳ Waiting for response'}

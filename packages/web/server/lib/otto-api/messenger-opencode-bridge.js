@@ -98,10 +98,6 @@ function targetKey({ type, channelId, threadId }) {
   return threadId ? `${channelId}:${threadId}` : `${channelId}`;
 }
 
-function maxLenFor(_type) {
-  return DISCORD_LIMIT;
-}
-
 function slugify(s) {
   return String(s ?? '')
     .toLowerCase()
@@ -1930,11 +1926,17 @@ export function createMessengerOpencodeBridge({
 
   function startTypingPulse(ctx) {
     if (ctx.typingTimer) return;
+    ctx.typingStopped = false;
     const pulse = async () => {
+      if (ctx.typingStopped) return;
       if (!sessionContexts.has(ctx.sessionId)) return;
       if (ctx.type === 'discord') {
         await discordTyping({ token: ctx.token, channelId: ctx.threadId ?? ctx.channelId });
       }
+      // Re-check after the await: stopTypingPulse may have run while the
+      // typing request was in flight (when typingTimer was still unset),
+      // which would otherwise let a stale pulse re-arm the timer forever.
+      if (ctx.typingStopped) return;
       ctx.typingTimer = setTimeout(pulse, TYPING_PULSE_DISCORD_MS);
     };
     // First pulse immediately so the user sees the indicator right away.
@@ -1942,6 +1944,7 @@ export function createMessengerOpencodeBridge({
   }
 
   function stopTypingPulse(ctx) {
+    ctx.typingStopped = true;
     if (ctx.typingTimer) {
       clearTimeout(ctx.typingTimer);
       ctx.typingTimer = undefined;

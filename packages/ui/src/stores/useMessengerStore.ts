@@ -170,7 +170,7 @@ export interface DiscordHistoryMessage {
   attachmentCount: number;
 }
 
-export type MessengerApprovalDecision = 'approve' | 'deny';
+export type MessengerApprovalDecision = 'approve' | 'approve-always' | 'deny';
 
 export interface MessengerApproval {
   id: string;
