@@ -7,7 +7,7 @@ import {
   toNumber
 } from '../utils/index.js';
 import { readOpenCodeModelUsage, readOpenCodeWindows } from './opencode-go-usage-db.js';
-import { resolveDashboardConfig, resolveAnchorConfig, resolveConfigMode, fetchDashboardUsage, clearDashboardConfig } from './opencode-go-dashboard.js';
+import { resolveDashboardConfig, resolveAnchorConfig, resolveConfigMode, fetchDashboardUsage } from './opencode-go-dashboard.js';
 
 export const providerId = 'opencode-go';
 export const providerName = 'OpenCode Go';
@@ -15,7 +15,7 @@ export const aliases = ['opencode-go', 'opencode', 'opencode-zen'];
 
 const USAGE_ENDPOINT = 'https://opencode.ai/zen/go/v1/usage';
 
-const buildWindow = (key, data) => {
+const buildWindow = (data) => {
   if (!data || typeof data !== 'object') return null;
 
   const usedPercent = toNumber(data.usagePercent);
@@ -67,11 +67,11 @@ const fetchOfficialUsage = async (apiKey) => {
 
 const buildWindows = (usageData) => {
   const windows = {};
-  const fiveHour = buildWindow('5h', usageData.rolling);
+  const fiveHour = buildWindow(usageData.rolling);
   if (fiveHour) windows['5h'] = fiveHour;
-  const weekly = buildWindow('weekly', usageData.weekly);
+  const weekly = buildWindow(usageData.weekly);
   if (weekly) windows['weekly'] = weekly;
-  const monthly = buildWindow('monthly', usageData.monthly);
+  const monthly = buildWindow(usageData.monthly);
   if (monthly) windows['monthly'] = monthly;
   return windows;
 };
@@ -84,9 +84,8 @@ const buildWindows = (usageData) => {
 const buildAnchorWindows = (dbWindows, anchors) => {
   if (!dbWindows?.windows) return null;
   const windows = {};
-  const WINDOW_LABELS = { '5h': '5h', weekly: 'weekly', monthly: 'monthly' };
 
-  for (const [key, label] of Object.entries(WINDOW_LABELS)) {
+  for (const key of ['5h', 'weekly', 'monthly']) {
     const dbWindow = dbWindows.windows[key];
     if (!dbWindow) continue;
 

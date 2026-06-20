@@ -193,7 +193,7 @@ export const hindsightAdapter = {
 
     // Start the server with the resolved LLM key.
     const { key, source } = resolveLlmKey(readSettings());
-    const start = await startServer(startupConfig());
+    await startServer(startupConfig());
     const healthy = await waitForHealth(baseUrl(), 120000);
     steps.push({
       label: 'Start Hindsight server (embedded PostgreSQL + REST/MCP)',
@@ -209,7 +209,6 @@ export const hindsightAdapter = {
         detail: `No key found in env "${source}". Fact extraction (create) needs one. Set the env var or edit llmApiKeyEnv in Configure.`,
       });
     }
-    void start;
 
     const mcp = getMcpConfig(MCP_NAME, workingDirectory);
     if (mcp) {
