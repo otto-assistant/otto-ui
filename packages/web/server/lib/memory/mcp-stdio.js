@@ -58,6 +58,11 @@ export async function withMcpStdio(command, args, run, { env, timeoutMs = 90000 
     pending.clear();
   });
 
+  // Writing to a child that has already exited emits EPIPE on the stdin
+  // stream; absorb it so it can't escalate to an uncaught exception (the
+  // pending requests are already rejected via the 'error'/'close' handlers).
+  child.stdin?.on('error', () => {});
+
   const send = (method, params) => new Promise((resolve, reject) => {
     if (fatalError) { reject(fatalError); return; }
     const id = nextId++;

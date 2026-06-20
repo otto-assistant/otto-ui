@@ -179,6 +179,9 @@ export async function startServer(config) {
     windowsHide: true,
   });
   child.unref();
+  // The child keeps its own dup of the log fd; close the parent copy so the
+  // long-lived server process doesn't leak one fd per (re)start.
+  fs.closeSync(out);
   fs.writeFileSync(PID_FILE, String(child.pid));
   return { started: true, pid: child.pid, keyMissing: !key, keyEnv: source };
 }
