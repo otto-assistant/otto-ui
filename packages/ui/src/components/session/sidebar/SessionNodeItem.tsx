@@ -21,7 +21,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Icon } from "@/components/icon/Icon";
 import { buildExportFilename, downloadAsMarkdown, formatSessionAsMarkdown, getExportRevealLabelKey, revealExportedMarkdown, saveAsMarkdownDesktop } from '@/lib/exportSession';
 import type { ChildSessionExport } from '@/lib/exportSession';
-import { buildSessionMessageRecordsSnapshot, useDirectoryStore, useGlobalSessionStatus, useSessionPermissions } from '@/sync/sync-context';
+import { buildSessionMessageRecordsSnapshot, useDirectoryStore, useGlobalSessionStatus, useGlobalSessionPermissions } from '@/sync/sync-context';
 import { useSync } from '@/sync/use-sync';
 import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
 import { DraggableSessionRow } from './sessionFolderDnd';
@@ -322,7 +322,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   // Skip bootstrap for archived rows; the store ref is only read on-demand via
   // getState() in the export handlers (never subscribed). Active rows keep
   // bootstrapping so live cross-directory session/status still aggregates.
-  const directoryStore = useDirectoryStore(sessionDirectory ?? undefined, { bootstrap: !archivedBucket });
+  const directoryStore = useDirectoryStore(sessionDirectory ?? undefined, { bootstrap: !archivedBucket, lazy: true });
   const sync = useSync();
 
   const selectionModeEnabled = useSessionMultiSelectStore((state) => state.enabled);
@@ -352,7 +352,11 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     React.useCallback((state) => Boolean(state.sessionMemoryState.get(viewportSessionKey(session.id))?.isZombie), [session.id]),
   );
   const sessionStatus = useGlobalSessionStatus(session.id);
-  const sessionPermissions = useSessionPermissions(session.id, sessionDirectory ?? undefined);
+  // Use the no-bootstrap global permission reader so rendering a sidebar row
+  // doesn't force a full bootstrap of its directory (which would defeat the
+  // lazy bootstrap above). The lazy bootstrap fetches permissions into the
+  // child store; this scans already-loaded stores for the badge count.
+  const sessionPermissions = useGlobalSessionPermissions(session.id);
   const isActive = currentSessionId === session.id;
   const sessionTitle = resolvedSession.title || t('sessions.sidebar.session.untitled');
   const hasChildren = node.children.length > 0;

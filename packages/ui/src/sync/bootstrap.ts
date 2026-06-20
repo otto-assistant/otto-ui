@@ -60,6 +60,39 @@ function projectID(directory: string, projects: Project[]) {
 }
 
 // ---------------------------------------------------------------------------
+// Global read coalescing across concurrent directory bootstraps
+//
+// `bootstrapDirectory` runs against the UNSCOPED global SDK, so reads like
+// `config.get`, `session.status`, `provider.list`, `command.list`, `mcp.status`,
+// `lsp.status`, `vcs.get` and `path.get` carry no `?directory=` and return the
+// SAME global payload regardless of which directory is bootstrapping. On startup
+// with many projects, every visible sidebar row bootstraps its directory, so
+// these identical global reads fan out into N copies each — saturating the dev
+// proxy's (HTTP/1.1, ~6 connections) request pool and stalling the page for
+// seconds.
+//
+// Coalesce genuinely-concurrent identical global reads so the network does the
+// work once; each directory still applies the shared result to its own child
+// store via its own `set()`. The entry clears as soon as the request settles, so
+// this only ever shares overlapping in-flight reads — it never serves a stale
+// snapshot. Directory-scoped reads (question/permission/session lists) are NOT
+// coalesced here because their payloads differ per directory.
+// ---------------------------------------------------------------------------
+const globalReadInFlight = new Map<string, Promise<unknown>>()
+
+function coalesceGlobalRead<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const existing = globalReadInFlight.get(key)
+  if (existing) return existing as Promise<T>
+  const pending = run()
+  globalReadInFlight.set(key, pending)
+  pending.then(
+    () => globalReadInFlight.delete(key),
+    () => globalReadInFlight.delete(key),
+  )
+  return pending
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap global state
 // ---------------------------------------------------------------------------
 
@@ -128,8 +161,16 @@ export async function bootstrapDirectory(input: {
     path?: unknown
   }
   loadSessions: (directory: string) => Promise<void> | void
+  // Lazy bootstrap (sidebar rows for non-active directories): fetch ONLY the
+  // reads the sidebar needs — session list, session status and permissions —
+  // and skip the chat-only reads (config, providers, project.current, path,
+  // commands, mcp/lsp/vcs, questions). The directory is upgraded to a full
+  // bootstrap the moment it becomes the active chat directory. This keeps
+  // startup network volume proportional to "1 active directory" instead of
+  // "every visible project".
+  lazy?: boolean
 }) {
-  const { directory, sdk, getState, set, global: g } = input
+  const { directory, sdk, getState, set, global: g, lazy = false } = input
   const state = getState()
   const loading = state.status !== "complete"
 
@@ -140,7 +181,8 @@ export async function bootstrapDirectory(input: {
   if (seededProviders) {
     set({ provider: g.providers as State["provider"] })
   }
-  if (Object.keys(state.config ?? {}).length === 0 && Object.keys(g.config ?? {}).length > 0) {
+  const globalConfigAvailable = Object.keys(g.config ?? {}).length > 0
+  if (Object.keys(state.config ?? {}).length === 0 && globalConfigAvailable) {
     set({ config: g.config as State["config"] })
   }
   const seededPath = !!g.path
@@ -154,13 +196,22 @@ export async function bootstrapDirectory(input: {
   // These are the minimum data needed to show a functional chat interface.
   //
   // We deliberately skip fetches whose data is fully global (provider.list,
-  // path.get) when `bootstrapGlobal` already populated them. Re-fetching the
-  // same multi-hundred-KB provider catalog and path metadata per directory
-  // doubled startup network volume for no benefit.
+  // config.get, path.get) when `bootstrapGlobal` already populated them.
+  // Re-fetching the same multi-hundred-KB provider catalog, config and path
+  // metadata per directory doubled startup network volume for no benefit. Any
+  // remaining global reads that DO fire (race with global bootstrap, phase 2)
+  // are coalesced across concurrent directory bootstraps via coalesceGlobalRead.
   // ---------------------------------------------------------------------------
-  const providerListTask = seededProviders || g.providers.all.length > 0
+  // For lazy bootstraps these chat-only reads are deferred until the directory
+  // becomes active (skip the fetch; the global seed above already covers the
+  // sidebar's needs). `session.status` is fetched in both modes — the sidebar
+  // needs live status.
+  const providerListTask = seededProviders || g.providers.all.length > 0 || lazy
     ? Promise.resolve()
-    : retry(() => sdk.provider.list().then((x) => set({ provider: unwrap(x, "provider.list") })))
+    : retry(() => coalesceGlobalRead("provider.list", () => sdk.provider.list()).then((x) => set({ provider: unwrap(x, "provider.list") })))
+  const configGetTask = globalConfigAvailable || lazy
+    ? Promise.resolve()
+    : retry(() => coalesceGlobalRead("config.get", () => sdk.config.get()).then((x) => set({ config: unwrap(x, "config.get") })))
   const pathGetTask = seededPath
     ? Promise.resolve().then(() => {
         // Still refresh the per-directory project mapping using the
@@ -168,23 +219,25 @@ export async function bootstrapDirectory(input: {
         const next = projectID((g.path as { directory?: string })?.directory ?? directory, g.projects)
         if (next) set({ project: next })
       })
-    : retry(() =>
-        sdk.path.get().then((x) => {
-          const data = unwrap(x, "path.get")
-          set({ path: data })
-          const next = projectID(data?.directory ?? directory, g.projects)
-          if (next) set({ project: next })
-        }),
-      )
+    : lazy
+      ? Promise.resolve()
+      : retry(() =>
+          coalesceGlobalRead("path.get", () => sdk.path.get()).then((x) => {
+            const data = unwrap(x, "path.get")
+            set({ path: data })
+            const next = projectID(data?.directory ?? directory, g.projects)
+            if (next) set({ project: next })
+          }),
+        )
 
   const phase1Results = await Promise.allSettled([
-    seededProject
+    seededProject || lazy
       ? Promise.resolve()
-      : retry(() => sdk.project.current().then((x) => set({ project: unwrap(x, "project.current").id }))),
+      : retry(() => coalesceGlobalRead("project.current", () => sdk.project.current()).then((x) => set({ project: unwrap(x, "project.current").id }))),
     providerListTask,
-    retry(() => sdk.config.get().then((x) => set({ config: unwrap(x, "config.get") }))),
+    configGetTask,
     pathGetTask,
-    retry(() => sdk.session.status().then((x) => set({ session_status: unwrap(x, "session.status") }))),
+    retry(() => coalesceGlobalRead("session.status", () => sdk.session.status()).then((x) => set({ session_status: unwrap(x, "session.status") }))),
   ])
 
   const phase1Errors = phase1Results
@@ -214,13 +267,18 @@ export async function bootstrapDirectory(input: {
   // ---------------------------------------------------------------------------
   // Phase 2: Deferrable — fetch after first paint without blocking.
   // These enrich the UI but aren't required for basic functionality.
+  //
+  // Chat-only reads (commands, mcp/lsp/vcs, questions) are skipped for lazy
+  // bootstraps — the sidebar never shows them; they're fetched when the
+  // directory is upgraded to full on activation. `permission.list` IS fetched
+  // in both modes because the sidebar renders a pending-permission badge.
   // ---------------------------------------------------------------------------
-  void Promise.allSettled([
-    retry(() => sdk.command.list().then((x) => set({ command: unwrap(x, "command.list") }))),
-    retry(() => sdk.mcp.status().then((x) => set({ mcp: unwrap(x, "mcp.status") }))),
-    retry(() => sdk.lsp.status().then((x) => set({ lsp: unwrap(x, "lsp.status") }))),
+  const chatOnlyPhase2Tasks = lazy ? [] : [
+    retry(() => coalesceGlobalRead("command.list", () => sdk.command.list()).then((x) => set({ command: unwrap(x, "command.list") }))),
+    retry(() => coalesceGlobalRead("mcp.status", () => sdk.mcp.status()).then((x) => set({ mcp: unwrap(x, "mcp.status") }))),
+    retry(() => coalesceGlobalRead("lsp.status", () => sdk.lsp.status()).then((x) => set({ lsp: unwrap(x, "lsp.status") }))),
     retry(() =>
-      sdk.vcs.get().then((x) => {
+      coalesceGlobalRead("vcs.get", () => sdk.vcs.get()).then((x) => {
         const current = getState()
         if (x.error) {
           throw new Error(`vcs.get failed: ${String(x.error)}`)
@@ -259,6 +317,9 @@ export async function bootstrapDirectory(input: {
       }
       set({ question: merged })
     }),
+  ]
+
+  const permissionTask =
     retry(async () => {
       const before = getState()
       const beforeSignatures = new Map(
@@ -289,8 +350,9 @@ export async function bootstrapDirectory(input: {
         delete merged[sessionID]
       }
       set({ permission: merged })
-    }),
-  ]).then((results) => {
+    })
+
+  void Promise.allSettled([...chatOnlyPhase2Tasks, permissionTask]).then((results) => {
     const errors = results
       .filter((r): r is PromiseRejectedResult => r.status === "rejected")
       .map((r) => r.reason)

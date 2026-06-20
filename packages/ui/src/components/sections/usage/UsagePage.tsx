@@ -56,8 +56,6 @@ const OpenCodeGoSetup: React.FC<{
   result: import('@/types').ProviderResult | null;
   onConfigSaved: () => void;
 }> = ({ result, onConfigSaved }) => {
-  const usageSource = result?.usageSource;
-  const isAuthoritative = usageSource === 'dashboard' || usageSource === 'api' || usageSource === 'anchor';
   const hasError = result && result.configured && !result.ok;
 
   // Mode

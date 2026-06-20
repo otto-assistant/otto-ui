@@ -3,9 +3,7 @@ import React from 'react';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import { Button } from '@/components/ui/button';
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
-import { DiffView } from '@/components/views/DiffView';
-import { FilesView } from '@/components/views/FilesView';
-import { PlanView } from '@/components/views/PlanView';
+import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { openExternalUrl } from '@/lib/url';
 import { copyTextToClipboard } from '@/lib/clipboard';
@@ -37,6 +35,14 @@ import {
   getBrowserProxyTargetKey,
   previewProxyTargetCache,
 } from '@/lib/preview/screenshot-capture';
+
+// Lazy-load the heavy editor/diff/plan views so the context panel (always
+// mounted on desktop) does not pull CodeMirror, the Shiki worker and the
+// Pierre diff stack into the initial bundle. They only render when the user
+// opens a file/diff/plan tab, where Suspense loads the chunk on demand.
+const DiffView = lazyWithChunkRecovery(() => import('@/components/views/DiffView').then((m) => ({ default: m.DiffView })));
+const FilesView = lazyWithChunkRecovery(() => import('@/components/views/FilesView').then((m) => ({ default: m.FilesView })));
+const PlanView = lazyWithChunkRecovery(() => import('@/components/views/PlanView').then((m) => ({ default: m.PlanView })));
 
 const CONTEXT_PANEL_MIN_WIDTH = 380;
 const CONTEXT_PANEL_MAX_WIDTH = 1400;
@@ -2321,7 +2327,7 @@ export const ContextPanel: React.FC = () => {
   const activeNonChatContent = activeTab?.mode === 'context'
         ? <ContextPanelContent />
         : activeTab?.mode === 'plan'
-            ? <PlanView targetPath={activeTab.targetPath} />
+            ? <React.Suspense fallback={null}><PlanView targetPath={activeTab.targetPath} /></React.Suspense>
             : activeTab?.mode === 'preview'
                 ? <PreviewPane rawUrl={activeTab.targetPath ?? ''} onNavigate={(url) => openContextPreview(effectiveDirectory, url)} />
                 : (
@@ -2466,7 +2472,9 @@ export const ContextPanel: React.FC = () => {
       <div className={cn('relative min-h-0 flex-1 overflow-hidden', isResizing && 'pointer-events-none')}>
         {hasFileTabs ? (
           <div className={cn('absolute inset-0', isFileTabActive ? 'block' : 'hidden')}>
-            <FilesView mode="editor-only" />
+            <React.Suspense fallback={null}>
+              <FilesView mode="editor-only" />
+            </React.Suspense>
           </div>
         ) : null}
         {chatTabs.map((tab) => {
@@ -2522,16 +2530,18 @@ export const ContextPanel: React.FC = () => {
               activeTab?.id !== tab.id && 'hidden'
             )}
           >
-            <DiffView
-              hideStackedFileSidebar
-              stackedDefaultCollapsedAll
-              pinSelectedFileHeaderToTopOnNavigate
-              showOpenInEditorAction
-              diffScope={tab.stagedDiff ? 'staged' : 'working'}
-              onDiffScopeChange={handleDiffScopeChange}
-              targetFilePath={tab.targetPath}
-              flushContent
-            />
+            <React.Suspense fallback={null}>
+              <DiffView
+                hideStackedFileSidebar
+                stackedDefaultCollapsedAll
+                pinSelectedFileHeaderToTopOnNavigate
+                showOpenInEditorAction
+                diffScope={tab.stagedDiff ? 'staged' : 'working'}
+                onDiffScopeChange={handleDiffScopeChange}
+                targetFilePath={tab.targetPath}
+                flushContent
+              />
+            </React.Suspense>
           </div>
         ))}
         {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff' ? activeNonChatContent : null}
