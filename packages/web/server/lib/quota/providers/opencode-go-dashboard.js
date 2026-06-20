@@ -39,7 +39,7 @@ const asNonEmpty = (value) => {
  * Resolve workspace ID + auth cookie from (in priority order) environment
  * variables, an explicit config path, and the known config file locations.
  *
- * @returns {{ workspaceId: string, authCookie: string, source: string } | null}
+ * @returns {{ workspaceId: string, authCookie: string, source: 'env' | 'file' } | null}
  */
 export const resolveDashboardConfig = () => {
   const envWorkspaceId = asNonEmpty(process.env.OPENCODE_GO_WORKSPACE_ID);
@@ -63,7 +63,9 @@ export const resolveDashboardConfig = () => {
     const workspaceId = asNonEmpty(data.workspaceId);
     const authCookie = asNonEmpty(data.authCookie);
     if (workspaceId && authCookie) {
-      return { workspaceId, authCookie, source: filePath };
+      // Report a coarse source only; never leak the absolute config path
+      // (which contains the OS username / home dir) to API clients.
+      return { workspaceId, authCookie, source: 'file' };
     }
   }
 
