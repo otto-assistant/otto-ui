@@ -1,8 +1,12 @@
 
 import React from 'react';
 import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
-import { PatchDiff } from '@pierre/diffs/react';
+import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { cn } from '@/lib/utils';
+
+// The Pierre diff renderer is heavy; load it only when a tool diff actually
+// renders. Until the chunk arrives, DiffPreview shows its plain-text fallback.
+const PatchDiff = lazyWithChunkRecovery(() => import('@pierre/diffs/react').then((m) => ({ default: m.PatchDiff })));
 import { SimpleMarkdownRenderer } from '../../MarkdownRenderer';
 import { getToolMetadata, stripAnsi } from '@/lib/toolHelpers';
 import type { ToolPart as ToolPartType, ToolState as ToolStateUnion } from '@opencode-ai/sdk/v2';
@@ -1609,12 +1613,14 @@ const DiffPreview: React.FC<DiffPreviewProps> = React.memo(({ diff, pierreTheme,
     return (
         <div className="typography-code px-1 pb-1 pt-0">
             <DiffPreviewErrorBoundary resetKey={diff} fallback={fallback}>
-                <PatchDiff
-                    patch={diff}
-                    metrics={TOOL_DIFF_METRICS}
-                    options={options}
-                    className="block w-full"
-                />
+                <React.Suspense fallback={fallback}>
+                    <PatchDiff
+                        patch={diff}
+                        metrics={TOOL_DIFF_METRICS}
+                        options={options}
+                        className="block w-full"
+                    />
+                </React.Suspense>
             </DiffPreviewErrorBoundary>
         </div>
     );

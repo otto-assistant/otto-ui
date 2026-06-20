@@ -8,7 +8,6 @@ import { json } from '@codemirror/lang-json';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
 import { markdown } from '@codemirror/lang-markdown';
-import { languages } from '@codemirror/language-data';
 import { python } from '@codemirror/lang-python';
 
 import { Language, LanguageDescription, StreamLanguage, HighlightStyle, syntaxHighlighting } from '@codemirror/language';
@@ -59,19 +58,15 @@ export function codeBlockLanguageResolver(info: string): Language | LanguageDesc
     case 'leex':
       return html().language;
     default:
-      return LanguageDescription.matchLanguageName(languages, normalized, true);
+      // Obscure fence languages fall back to unhighlighted in the sync path
+      // (composer / markdown editor). The heavy @codemirror/language-data
+      // registry is no longer pulled into this hot path; full file highlighting
+      // for any extension is still available via loadLanguageByExtension below.
+      return null;
   }
 }
 
 const normalizeFileName = (filePath: string) => filePath.split('/').pop()?.toLowerCase() ?? '';
-
-const matchLanguageDescriptionForFile = (filePath: string): LanguageDescription | null => {
-  const filename = normalizeFileName(filePath);
-  if (!filename) {
-    return null;
-  }
-  return LanguageDescription.matchFilename(languages, filename);
-};
 
 const markdownHighlight = () => syntaxHighlighting(HighlightStyle.define([
   { tag: [t.heading1, t.heading2, t.heading3, t.heading4, t.heading5, t.heading6], fontWeight: '600' },
@@ -166,7 +161,14 @@ export function languageByExtension(filePath: string): Extension | null {
 }
 
 export async function loadLanguageByExtension(filePath: string): Promise<Extension | null> {
-  const description = matchLanguageDescriptionForFile(filePath);
+  const filename = normalizeFileName(filePath);
+  if (!filename) {
+    return null;
+  }
+  // Load the full language registry on demand (only when opening a file whose
+  // extension isn't one of the statically-bundled common languages).
+  const { languages } = await import('@codemirror/language-data');
+  const description = LanguageDescription.matchFilename(languages, filename);
   if (!description) {
     return null;
   }
