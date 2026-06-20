@@ -9,13 +9,11 @@ import { RightSidebar } from './RightSidebar';
 import { ProjectContextPanel, RightSidebarTabs } from './RightSidebarTabs';
 import { ContextPanel } from './ContextPanel';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
-import { CommandPalette } from '../ui/CommandPalette';
 import { HelpDialog } from '../ui/HelpDialog';
 import { OpenCodeStatusDialog } from '../ui/OpenCodeStatusDialog';
 import { SessionSidebar } from '@/components/session/SessionSidebar';
 import { SessionDialogs } from '@/components/session/SessionDialogs';
 import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
-import { MultiRunLauncher } from '@/components/multirun';
 import { DrawerProvider } from '@/contexts/DrawerContext';
 
 import { useUIStore } from '@/stores/useUIStore';
@@ -42,6 +40,12 @@ const DiagramView = lazyWithChunkRecovery(() => import('@/components/views/Diagr
 const SettingsView = lazyWithChunkRecovery(() => import('@/components/views/SettingsView').then(m => ({ default: m.SettingsView })));
 const SettingsWindow = lazyWithChunkRecovery(() => import('@/components/views/SettingsWindow').then(m => ({ default: m.SettingsWindow })));
 const MultiRunWindow = lazyWithChunkRecovery(() => import('@/components/views/MultiRunWindow').then(m => ({ default: m.MultiRunWindow })));
+// The command palette (Cmd/Ctrl-K) and the multi-run launcher are occasional
+// overlays toggled via store state by keyboard-shortcut / menu handlers that
+// live outside these components, so they can load on first open instead of at
+// app start.
+const CommandPalette = lazyWithChunkRecovery(() => import('../ui/CommandPalette').then(m => ({ default: m.CommandPalette })));
+const MultiRunLauncher = lazyWithChunkRecovery(() => import('@/components/multirun').then(m => ({ default: m.MultiRunLauncher })));
 
 export const MainLayout: React.FC = () => {
     const RIGHT_SIDEBAR_AUTO_CLOSE_WIDTH = 1140;
@@ -61,6 +65,13 @@ export const MainLayout: React.FC = () => {
     const isMultiRunLauncherOpen = useUIStore((state) => state.isMultiRunLauncherOpen);
     const setMultiRunLauncherOpen = useUIStore((state) => state.setMultiRunLauncherOpen);
     const multiRunLauncherPrefillPrompt = useUIStore((state) => state.multiRunLauncherPrefillPrompt);
+    const isCommandPaletteOpen = useUIStore((state) => state.isCommandPaletteOpen);
+    // Mount the command palette lazily on first open, then keep it mounted so
+    // its open/close animation and re-open are instant.
+    const [commandPaletteMounted, setCommandPaletteMounted] = React.useState(false);
+    React.useEffect(() => {
+        if (isCommandPaletteOpen) setCommandPaletteMounted(true);
+    }, [isCommandPaletteOpen]);
     const { isMobile, isTablet } = useDeviceInfo();
     const rightSidebarAutoClosedRef = React.useRef(false);
     const bottomTerminalAutoClosedRef = React.useRef(false);
@@ -394,7 +405,11 @@ export const MainLayout: React.FC = () => {
                     'bg-background'
                 )}
             >
-                <CommandPalette />
+                {commandPaletteMounted && (
+                    <React.Suspense fallback={null}>
+                        <CommandPalette />
+                    </React.Suspense>
+                )}
                 <HelpDialog />
                 <OpenCodeStatusDialog />
                 <SessionDialogs />
@@ -454,11 +469,13 @@ export const MainLayout: React.FC = () => {
                             {isMultiRunLauncherOpen && (
                                 <div className="absolute inset-0 z-10 bg-background">
                                     <ErrorBoundary>
-                                        <MultiRunLauncher
-                                            initialPrompt={multiRunLauncherPrefillPrompt}
-                                            onCreated={() => setMultiRunLauncherOpen(false)}
-                                            onCancel={() => setMultiRunLauncherOpen(false)}
-                                        />
+                                        <React.Suspense fallback={null}>
+                                            <MultiRunLauncher
+                                                initialPrompt={multiRunLauncherPrefillPrompt}
+                                                onCreated={() => setMultiRunLauncherOpen(false)}
+                                                onCancel={() => setMultiRunLauncherOpen(false)}
+                                            />
+                                        </React.Suspense>
                                     </ErrorBoundary>
                                 </div>
                             )}

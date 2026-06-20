@@ -76,7 +76,20 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },
   optimizeDeps: {
-    include: ['@opencode-ai/sdk/v2'],
+    // Pre-bundle the eager critical-path deps so the browser doesn't pay a
+    // discovery + reload round when it first imports them. Deliberately omit
+    // the now-lazy heavy deps (CodeMirror, @pierre/diffs, shiki) — forcing
+    // those into the startup pre-bundle would slow cold start for code that
+    // isn't needed until a file/diff is opened.
+    include: [
+      '@opencode-ai/sdk/v2',
+      'react',
+      'react-dom',
+      'react-dom/client',
+      'react/jsx-runtime',
+      'zustand',
+      '@base-ui/react',
+    ],
   },
   server: {
     port: 5173,
@@ -84,7 +97,13 @@ export default defineConfig({
     // browser's first request hits warm transforms instead of paying the
     // per-module transform cost serially through the request waterfall.
     warmup: {
-      clientFiles: ['./src/main.tsx'],
+      clientFiles: [
+        './src/main.tsx',
+        '../ui/src/main.tsx',
+        '../ui/src/App.tsx',
+        '../ui/src/components/layout/MainLayout.tsx',
+        '../ui/src/components/chat/ChatContainer.tsx',
+      ],
     },
     proxy: {
       '/auth': {
