@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { isModuleCliExecution } from './cli-entry.js';
+import { createTasksCommand } from './cli-tasks.js';
 import { cloudflareTunnelProviderCapabilities } from '../server/lib/tunnels/providers/cloudflare.js';
 import { createRemoteClientAuthRuntime } from '../server/lib/client-auth/remote-clients.js';
 import {
@@ -73,6 +74,7 @@ const DEFAULT_TUNNEL_PROVIDER_CAPABILITIES = [cloudflareTunnelProviderCapabiliti
 
 let onCancelCleanup = null;
 let activeCommandOptions = null;
+let tasksCommandRunner = null;
 let foregroundServerActive = false;
 let foregroundShutdown = null;
 
@@ -753,6 +755,19 @@ function parseArgs(argv = process.argv.slice(2)) {
     foreground: false,
     lan: false,
     apiOnly: false,
+    project: undefined,
+    task: undefined,
+    prompt: undefined,
+    model: undefined,
+    agent: undefined,
+    variant: undefined,
+    timezone: undefined,
+    schedule: undefined,
+    at: [],
+    weekdays: undefined,
+    cron: undefined,
+    date: undefined,
+    enabledFlag: undefined,
   };
 
   const removedFlagErrors = [];
@@ -853,6 +868,87 @@ function parseArgs(argv = process.argv.slice(2)) {
         options.profile = typeof value === 'string' ? value : options.profile;
         break;
       }
+      case 'project': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.project = typeof value === 'string' ? value : options.project;
+        break;
+      }
+      case 'task': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.task = typeof value === 'string' ? value : options.task;
+        break;
+      }
+      case 'prompt': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.prompt = typeof value === 'string' ? value : options.prompt;
+        break;
+      }
+      case 'model': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.model = typeof value === 'string' ? value : options.model;
+        break;
+      }
+      case 'agent': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.agent = typeof value === 'string' ? value : options.agent;
+        break;
+      }
+      case 'variant': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.variant = typeof value === 'string' ? value : options.variant;
+        break;
+      }
+      case 'timezone':
+      case 'tz': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.timezone = typeof value === 'string' ? value : options.timezone;
+        break;
+      }
+      case 'schedule': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.schedule = typeof value === 'string' ? value : options.schedule;
+        break;
+      }
+      case 'at': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        if (typeof value === 'string' && value.trim().length > 0) {
+          options.at.push(value.trim());
+        }
+        break;
+      }
+      case 'weekdays': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.weekdays = typeof value === 'string' ? value : options.weekdays;
+        break;
+      }
+      case 'cron': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.cron = typeof value === 'string' ? value : options.cron;
+        break;
+      }
+      case 'date': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.date = typeof value === 'string' ? value : options.date;
+        break;
+      }
+      case 'enabled':
+        options.enabledFlag = true;
+        break;
+      case 'disabled':
+        options.enabledFlag = false;
+        break;
       case 'name': {
         const { value, nextIndex } = consumeValue(i, inlineValue);
         i = nextIndex;
@@ -1001,7 +1097,11 @@ function parseArgs(argv = process.argv.slice(2)) {
   }
 
   const command = positional[0] || 'serve';
-  const subcommand = command === 'tunnel' ? (positional[1] || 'help') : null;
+  const subcommand = command === 'tunnel'
+    ? (positional[1] || 'help')
+    : command === 'tasks'
+      ? (positional[1] || 'list')
+      : null;
   const tunnelAction = command === 'tunnel' ? (positional[2] || null) : null;
   const startupAction = command === 'startup' ? (positional[1] || 'status') : null;
 
@@ -1038,6 +1138,7 @@ COMMANDS:
   restart        Stop and start the server
   status         Show server status
   tunnel         Tunnel lifecycle commands
+  tasks          Manage scheduled tasks
   startup        Manage launch at system startup
   logs           Tail OpenChamber logs
   connect-url    Generate URL/QR for connecting another client
@@ -1222,6 +1323,75 @@ EXAMPLES:
 `);
 }
 
+function showTasksHelp() {
+  console.log(`
+ OpenChamber Scheduled Tasks
+
+USAGE:
+  openchamber tasks <SUBCOMMAND> [OPTIONS]
+
+DESCRIPTION:
+  Manage per-project scheduled tasks on a running OpenChamber instance.
+  Talks to the local instance API, so a server must be running
+  (start one with \`openchamber serve\`).
+
+SUBCOMMANDS:
+  list        List scheduled tasks (all projects, or one with --project)
+  show        Show full details for a single task
+  status      Show global scheduled-tasks status (enabled/running counts)
+  run         Run a task immediately
+  enable      Enable a task
+  disable     Disable a task
+  create      Create a new scheduled task
+  delete      Delete a task
+
+SELECTION OPTIONS:
+  --project <id|path|label>  Target project (id, absolute path, or label)
+  --task <id|name>           Target task (id, id prefix, or name)
+  -p, --port <port>          Target a specific running instance port
+  --force                    Skip the delete confirmation prompt
+
+CREATE OPTIONS:
+  --name <name>              Task name (required)
+  --prompt <text>            Prompt to run (required)
+  --provider <id>            Model provider id (required)
+  --model <id>               Model id (required)
+  --agent <name>             Agent to use (optional)
+  --variant <name>           Model variant (optional)
+  --schedule <kind>          daily | weekly | once | cron (required)
+  --at <HH:mm>               Run time(s); repeatable or comma-separated
+  --weekdays <list>          Weekly days: 0-6 (0=Sun) or mon,tue,...
+  --date <YYYY-MM-DD>        Date for a one-time (once) schedule
+  --cron "<expr>"            Cron expression for cron schedule
+  --tz, --timezone <zone>    IANA timezone (default: server local)
+  --disabled                 Create the task disabled
+
+OUTPUT OPTIONS:
+  --json                     Output machine-readable JSON
+  -q, --quiet                Concise machine-friendly lines
+  --plain                    Disable colors and decorations
+
+EXAMPLES:
+  openchamber tasks list
+  openchamber tasks list --project my-app --json
+  openchamber tasks show --project my-app --task "Nightly cleanup"
+  openchamber tasks status
+  openchamber tasks run --project my-app --task nightly
+  openchamber tasks enable --project my-app --task nightly
+  openchamber tasks disable --project my-app --task nightly
+  openchamber tasks create --project my-app --name "Daily digest" \\
+    --schedule daily --at 09:00 --provider anthropic --model claude-sonnet-4 \\
+    --prompt "/digest summarize yesterday"
+  openchamber tasks create --project my-app --name "Weekday standup" \\
+    --schedule weekly --weekdays mon,tue,wed,thu,fri --at 08:30 \\
+    --provider anthropic --model claude-sonnet-4 --prompt "Prepare standup notes"
+  openchamber tasks create --project my-app --name "Cron job" \\
+    --schedule cron --cron "0 */6 * * *" --provider openai --model gpt-5 \\
+    --prompt "Health check"
+  openchamber tasks delete --project my-app --task nightly --force
+`);
+}
+
 function generateCompletionScript(shell) {
   const normalized = typeof shell === 'string' ? shell.trim().toLowerCase() : '';
 
@@ -1234,7 +1404,7 @@ _openchamber_tunnel() {
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
 
-  commands="serve stop restart status tunnel logs update"
+  commands="serve stop restart status tunnel tasks logs update"
   tunnel_commands="help providers ready doctor status start stop profile completion"
   profile_commands="list show add remove"
   common_flags="--port --foreground --no-daemon --json --all --help --version --plain --quiet"
@@ -1349,6 +1519,7 @@ complete -c openchamber -n '__fish_use_subcommand' -a 'stop' -d 'Stop running in
 complete -c openchamber -n '__fish_use_subcommand' -a 'restart' -d 'Stop and start the server'
 complete -c openchamber -n '__fish_use_subcommand' -a 'status' -d 'Show server status'
 complete -c openchamber -n '__fish_use_subcommand' -a 'tunnel' -d 'Tunnel lifecycle commands'
+complete -c openchamber -n '__fish_use_subcommand' -a 'tasks' -d 'Manage scheduled tasks'
 complete -c openchamber -n '__fish_use_subcommand' -a 'logs' -d 'Tail logs'
 complete -c openchamber -n '__fish_use_subcommand' -a 'update' -d 'Check for updates'
 
@@ -5449,6 +5620,31 @@ const commands = {
     clackOutro(normalized === 'status' ? 'status complete' : `${normalized} complete`);
   },
 
+  async tasks(options, subcommand) {
+    if (!tasksCommandRunner) {
+      tasksCommandRunner = createTasksCommand({
+        requestJson,
+        resolveInstance: async (opts) => resolveTargetInstance({ options: opts, allowAutoStart: false }),
+        io: {
+          isJsonMode,
+          isQuietMode,
+          shouldRenderHumanOutput,
+          canPrompt,
+          printJson,
+          intro: clackIntro,
+          outro: clackOutro,
+          logStatus,
+          confirm: clackConfirm,
+          isCancel: clackIsCancel,
+          cancel: clackCancel,
+        },
+        EXIT_CODE,
+        CliError: TunnelCliError,
+      });
+    }
+    return tasksCommandRunner(options, subcommand);
+  },
+
   async update(options = {}) {
     const showOutput = shouldRenderHumanOutput(options);
     const updateSpin = createSpinner(options);
@@ -5609,6 +5805,8 @@ async function main() {
       showStartupHelp();
     } else if (command === 'connect-url') {
       showConnectUrlHelp();
+    } else if (command === 'tasks') {
+      showTasksHelp();
     } else {
       showHelp();
     }
@@ -5620,13 +5818,18 @@ async function main() {
     return;
   }
 
+  if (command === 'tasks') {
+    await commands.tasks(options, subcommand);
+    return;
+  }
+
   if (command === 'startup') {
     await commands.startup(options, startupAction);
     return;
   }
 
   if (!commands[command]) {
-    const knownCommands = ['serve', 'stop', 'restart', 'status', 'tunnel', 'startup', 'logs', 'update'];
+    const knownCommands = ['serve', 'stop', 'restart', 'status', 'tunnel', 'tasks', 'startup', 'logs', 'update'];
     const suggestion = findClosestMatch(command, knownCommands);
     const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
     if (isJsonMode(options)) {
