@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { createMessengerOpencodeBridge, questionContexts } from './messenger-opencode-bridge.js';
+import { createMessengerOpencodeBridge, questionContexts, approvalContexts } from './messenger-opencode-bridge.js';
 import { createMessengerSyncRouter, resolveMessengerTarget } from './messenger-sync.js';
 
 /**
@@ -1356,6 +1356,10 @@ describe('pending interaction reconciliation (missed SSE recovery)', () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     calls = [];
+    // The approval context map is module-level (one bridge in production); clear
+    // it so leftover contexts from a previous test can't trip the live-approval
+    // dedupe when ids are reused across tests.
+    approvalContexts.clear();
     globalThis.fetch = vi.fn(async (url, init = {}) => {
       const u = String(url);
       calls.push({ url: u, method: init.method ?? 'GET', body: init.body ?? null });
@@ -1435,6 +1439,52 @@ describe('pending interaction reconciliation (missed SSE recovery)', () => {
     bridge.ensureSubscribed();
     for (let i = 0; i < 8; i += 1) await flush();
     expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/messages')).length).toBe(1);
+  });
+
+  it('does not re-surface a still-live approval after a prune/reconcile cycle', async () => {
+    // The pending-permission list flips: it briefly omits the request (which
+    // prunes the in-memory dedupe id) and then lists it again while it is still
+    // pending. This is the exact shape that used to spawn a brand-new
+    // Approve/Deny message on every reconcile cycle.
+    let pendingPermissionList = [
+      { id: 'req-flip', sessionID: 'ses-1', permission: 'bash', patterns: [], always: [], metadata: {} },
+    ];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      const u = String(url);
+      calls.push({ url: u, method: init.method ?? 'GET', body: init.body ?? null });
+      if (u.includes('/permission') && !u.includes('/reply')) {
+        return { ok: true, status: 200, text: async () => '[]', json: async () => pendingPermissionList };
+      }
+      if (u.includes('/question')) {
+        return { ok: true, status: 200, text: async () => '[]', json: async () => [] };
+      }
+      return { ok: true, status: 200, text: async () => '', json: async () => ({ id: 'discord-msg-1' }) };
+    });
+
+    const hub = makeHubWithStatus();
+    const bridge = makeBridge({ globalEventHub: hub, store: makeBoundStore() });
+    const messageCount = () =>
+      calls.filter((c) => c.method === 'POST' && c.url.includes('/messages')).length;
+
+    // Initial reconcile surfaces the permission once and records its context.
+    bridge.ensureSubscribed();
+    for (let i = 0; i < 8; i += 1) await flush();
+    expect(messageCount()).toBe(1);
+    expect([...bridge.approvalContexts.values()].some((v) => v.requestID === 'req-flip')).toBe(true);
+
+    // Snapshot momentarily drops the request → reconcile would prune its id.
+    pendingPermissionList = [];
+    hub._emitStatus({ type: 'connect' });
+    for (let i = 0; i < 8; i += 1) await flush();
+
+    // Request reappears while still pending → must NOT post a duplicate.
+    pendingPermissionList = [
+      { id: 'req-flip', sessionID: 'ses-1', permission: 'bash', patterns: [], always: [], metadata: {} },
+    ];
+    hub._emitStatus({ type: 'connect' });
+    for (let i = 0; i < 8; i += 1) await flush();
+
+    expect(messageCount()).toBe(1);
   });
 });
 
