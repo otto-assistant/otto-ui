@@ -240,10 +240,16 @@ describe('resolveTaskRef', () => {
     { id: 'task_2', name: 'Weekly report' },
   ];
 
-  it('matches by id, name, and id prefix', () => {
+  it('matches by id, name, id prefix, and name substring', () => {
     expect(resolveTaskRef(tasks, 'task_1').id).toBe('task_1');
     expect(resolveTaskRef(tasks, 'nightly cleanup').id).toBe('task_1');
     expect(resolveTaskRef(tasks, 'task_2').id).toBe('task_2');
+    expect(resolveTaskRef(tasks, 'nightly').id).toBe('task_1');
+  });
+
+  it('throws when a name substring is ambiguous', () => {
+    const many = [{ id: 'a', name: 'Report daily' }, { id: 'b', name: 'Report weekly' }];
+    expect(() => resolveTaskRef(many, 'report')).toThrow(/ambiguous/);
   });
 
   it('throws on no match', () => {

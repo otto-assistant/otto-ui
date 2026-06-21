@@ -5630,6 +5630,7 @@ const commands = {
           isQuietMode,
           shouldRenderHumanOutput,
           canPrompt,
+          createSpinner,
           printJson,
           intro: clackIntro,
           outro: clackOutro,

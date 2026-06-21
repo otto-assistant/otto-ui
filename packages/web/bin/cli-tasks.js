@@ -18,6 +18,11 @@ const SCHEDULE_KINDS = ['daily', 'weekly', 'once', 'cron'];
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+// The run endpoint executes the task synchronously before responding, so the
+// request can take far longer than the default API timeout. Allow generous
+// headroom (slightly above the server's 30m max run duration).
+const RUN_REQUEST_TIMEOUT_MS = 31 * 60 * 1000;
+
 // 0 = Sunday … 6 = Saturday (matches schedule.weekdays storage contract).
 const WEEKDAY_TOKENS = {
   sun: 0, sunday: 0,
@@ -270,6 +275,16 @@ const resolveTaskRef = (tasks, ref) => {
     return byIdPrefix;
   }
 
+  const byNameSubstring = matchUnique(
+    list,
+    (task) => typeof task?.name === 'string' && task.name.toLowerCase().includes(lower),
+    'Task',
+    value,
+  );
+  if (byNameSubstring) {
+    return byNameSubstring;
+  }
+
   throw new Error(`No task matches "${value}". Run \`openchamber tasks list\` to see task ids.`);
 };
 
@@ -372,6 +387,7 @@ const createTasksCommand = (deps) => {
     isQuietMode,
     shouldRenderHumanOutput,
     canPrompt,
+    createSpinner,
     printJson,
     intro,
     outro,
@@ -560,25 +576,33 @@ const createTasksCommand = (deps) => {
     const tasks = await fetchTasks(port, project.id);
     const task = resolveTask(tasks, options.task);
 
-    const { response, body } = await requestJson(
-      port,
-      `/api/projects/${encodeURIComponent(project.id)}/scheduled-tasks/${encodeURIComponent(task.id)}/run`,
-      { method: 'POST' },
-    );
+    const spin = createSpinner ? createSpinner(options) : null;
+    spin?.start(`Running ${asTrimmedString(task.name) || task.id}...`);
+
+    let response;
+    let body;
+    try {
+      ({ response, body } = await requestJson(
+        port,
+        `/api/projects/${encodeURIComponent(project.id)}/scheduled-tasks/${encodeURIComponent(task.id)}/run`,
+        { method: 'POST', timeoutMs: RUN_REQUEST_TIMEOUT_MS },
+      ));
+    } catch (error) {
+      spin?.error('Run failed');
+      throw new CliError(error instanceof Error ? error.message : String(error), EXIT_CODE.NETWORK_RUNTIME_ERROR);
+    }
 
     if (!response.ok) {
+      spin?.error('Run failed');
       const exitCode = response.status === 409
         ? EXIT_CODE.GENERAL_ERROR
         : response.status === 404
           ? EXIT_CODE.USAGE_ERROR
           : EXIT_CODE.NETWORK_RUNTIME_ERROR;
-      if (isJsonMode(options)) {
-        printJson({ status: 'error', error: { message: apiError(body, response, 'Task run failed') }, task: { id: task.id } });
-        throw new CliError(apiError(body, response, 'Task run failed'), exitCode);
-      }
       fail(apiError(body, response, 'Task run failed'), exitCode);
     }
 
+    spin?.stop('Run complete');
     const sessionId = asTrimmedString(body?.sessionId);
     if (isJsonMode(options)) {
       printJson({ ok: true, task: body?.task || { id: task.id }, sessionId: sessionId || undefined });
@@ -589,7 +613,7 @@ const createTasksCommand = (deps) => {
       return;
     }
     intro('Run Scheduled Task');
-    logStatus('success', `started ${asTrimmedString(task.name) || task.id}`, sessionId ? `session ${sessionId}` : undefined);
+    logStatus('success', `ran ${asTrimmedString(task.name) || task.id}`, sessionId ? `session ${sessionId}` : undefined);
     outro('run complete');
   };
 
