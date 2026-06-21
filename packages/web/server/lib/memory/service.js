@@ -140,13 +140,6 @@ function requireRecords(adapter) {
   return adapter.records;
 }
 
-export async function getRecordsAvailability(id, { workingDirectory }) {
-  const adapter = requireAdapter(id);
-  const records = requireRecords(adapter);
-  if (!records.available) return { ok: true };
-  return records.available({ workingDirectory });
-}
-
 export async function listRecords(id, { workingDirectory, project, query }) {
   const adapter = requireAdapter(id);
   const records = requireRecords(adapter);

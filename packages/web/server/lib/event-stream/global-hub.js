@@ -160,7 +160,6 @@ export function createGlobalMessageStreamHub({
      * approval button clicks.
      */
     publishEvent(eventType, data) {
-      const payload = { type: eventType, eventType, data };
       for (const subscriber of Array.from(eventSubscribers)) {
         notifySubscriber('event', subscriber, { envelope: {}, payload: { type: eventType, ...data } });
       }

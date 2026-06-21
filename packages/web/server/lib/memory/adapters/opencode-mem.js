@@ -226,8 +226,13 @@ export const opencodeMemAdapter = {
     if (typeof raw !== 'string') {
       throw new Error('Configuration must be a JSONC string');
     }
-    // Validate it parses before writing.
-    parseJsonc(raw, [], { allowTrailingComma: true });
+    // Validate it parses before writing. `parseJsonc` is best-effort and never
+    // throws; it reports syntax problems through the errors array instead.
+    const parseErrors = [];
+    parseJsonc(raw, parseErrors, { allowTrailingComma: true });
+    if (parseErrors.length > 0) {
+      throw new Error('Configuration is not valid JSONC');
+    }
     fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
     fs.writeFileSync(CONFIG_FILE, raw, 'utf8');
     return { path: CONFIG_FILE };

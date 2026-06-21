@@ -61,6 +61,11 @@ export function runCommand(command, args, options = {}) {
       resolve({ code: code ?? 0, stdout, stderr });
     });
 
+    // Writing to a child that exited early emits EPIPE on stdin; absorb it so
+    // it can't escalate to an uncaught exception (close/error handlers above
+    // still settle the promise).
+    child.stdin?.on('error', () => {});
+
     if (input !== undefined && child.stdin) {
       child.stdin.write(input);
       child.stdin.end();

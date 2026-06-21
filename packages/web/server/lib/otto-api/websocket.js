@@ -6,16 +6,6 @@ export const OTTO_EVENTS_WS_PATH = '/ws/otto/events';
 export const OTTO_EVENTS_WS_HEARTBEAT_MS = 30_000;
 export const OTTO_EVENTS_REPLAY_LIMIT = 100;
 
-export const OTTO_UI_EVENT_TYPES = Object.freeze([
-  'agent.activity',
-  'task.create',
-  'task.update',
-  'message.new',
-  'memory.change',
-  'persona.update',
-  'schedule.trigger',
-]);
-
 let hubBroadcastFn = null;
 
 export function broadcast(eventType, data) {

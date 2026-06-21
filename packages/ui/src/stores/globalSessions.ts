@@ -73,29 +73,6 @@ const unwrapSessionList = (
     return result.data as GlobalSessionRecord[];
 };
 
-export const readNextCursor = (response: unknown): number | null => {
-    return toNumber(readResponseHeader(response, "x-next-cursor"));
-};
-
-export const isMissingGlobalSessionsEndpointError = (error: unknown): boolean => {
-    if (!error || typeof error !== "object") {
-        return false;
-    }
-
-    const value = error as {
-        status?: number;
-        response?: { status?: number };
-        cause?: { status?: number; response?: { status?: number } };
-    };
-
-    const status = value.status
-        ?? value.response?.status
-        ?? value.cause?.status
-        ?? value.cause?.response?.status;
-
-    return status === 404;
-};
-
 /** Optional first-page seed used to skip the initial round-trip when an
  *  out-of-band prefetch (e.g. from `index.html`) has already fetched it. */
 export type InitialSessionPage = {
