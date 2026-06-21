@@ -68,3 +68,29 @@ confirmation) when interactive. See `openchamber tasks --help` for full usage.
   `--cron`, and `--tz`/`--timezone`.
 - `enable`/`disable` re-send the full existing task with the flipped `enabled`
   flag because `PUT` upserts validate the whole task payload.
+
+## Discord surface
+
+The Discord `/schedule` command exposes the same per-project scheduler with full
+CRUD management for the project bound to the channel/thread:
+
+- `/schedule <when> [model=p/m] [agent=name] <prompt>` — create (UTC ISO date or
+  5-field cron)
+- `/schedule list` — list tasks
+- `/schedule show <id>` — show one task's details
+- `/schedule enable <id>` / `/schedule disable <id>` — toggle a task
+- `/schedule run <id>` — run a task immediately
+- `/schedule delete <id>` — delete a task
+
+Wiring:
+- Slash command definition: `packages/web/server/lib/otto-api/discord-commands.js`
+- Command handler: `packages/web/server/lib/otto-api/messenger-commands.js` (`schedule` case)
+- Bridge operations (`scheduleTask`, `listSchedules`, `getSchedule`,
+  `setScheduleEnabled`, `runSchedule`, `deleteSchedule`, `describeSchedule`):
+  `packages/web/server/lib/otto-api/messenger-opencode-bridge.js`
+- Tests: `packages/web/server/lib/otto-api/messenger-opencode-bridge.test.js`
+  (run with `bun test`; excluded from the Node vitest config)
+
+`setScheduleEnabled` re-sends the full task with the flipped `enabled` flag, and
+`runSchedule` delegates to `scheduledTasksRuntime.runNow`; both guard against an
+unbound project, a missing task, and an unavailable runtime.

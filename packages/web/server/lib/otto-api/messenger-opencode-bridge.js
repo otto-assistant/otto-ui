@@ -3224,6 +3224,76 @@ export function createMessengerOpencodeBridge({
         }
       },
 
+      async getSchedule(id) {
+        if (!projectConfigRuntime) return null;
+        let projectDir = stored?.projectPath ?? null;
+        if (!projectDir) {
+          const auto = await autoResolveProject({ type, token, channelId, threadId }).catch(() => null);
+          projectDir = auto?.projectPath ?? null;
+        }
+        const projectId = await resolveProjectIdForPath(projectDir);
+        if (!projectId) return null;
+        const tasks = await projectConfigRuntime.listScheduledTasks(projectId);
+        return tasks.find((t) => t.id === id) ?? null;
+      },
+
+      async setScheduleEnabled(id, enabled) {
+        if (!projectConfigRuntime) {
+          return { ok: false, error: 'the project scheduler is not available on this server.' };
+        }
+        let projectDir = stored?.projectPath ?? null;
+        if (!projectDir) {
+          const auto = await autoResolveProject({ type, token, channelId, threadId }).catch(() => null);
+          projectDir = auto?.projectPath ?? null;
+        }
+        const projectId = await resolveProjectIdForPath(projectDir);
+        if (!projectId) {
+          return { ok: false, error: 'no project bound to this conversation — send a message first to bind one.' };
+        }
+        try {
+          const tasks = await projectConfigRuntime.listScheduledTasks(projectId);
+          const existing = tasks.find((t) => t.id === id);
+          if (!existing) return { ok: false, notFound: true };
+          if (existing.enabled === enabled) return { ok: true, changed: false, task: existing };
+          // The PUT upsert validates the whole task, so re-send it intact with
+          // only `enabled` flipped.
+          const result = await projectConfigRuntime.upsertScheduledTask(projectId, { ...existing, enabled });
+          await scheduledTasksRuntime?.syncProject?.(projectId);
+          const fresh = (await projectConfigRuntime.listScheduledTasks(projectId)).find((t) => t.id === id) ?? result.task;
+          return { ok: true, changed: true, task: fresh };
+        } catch (err) {
+          return { ok: false, error: err?.message ?? 'failed to update the scheduled task' };
+        }
+      },
+
+      async runSchedule(id) {
+        if (!projectConfigRuntime) {
+          return { ok: false, error: 'the project scheduler is not available on this server.' };
+        }
+        if (!scheduledTasksRuntime?.runNow) {
+          return { ok: false, error: 'the scheduler runtime is not available on this server.' };
+        }
+        let projectDir = stored?.projectPath ?? null;
+        if (!projectDir) {
+          const auto = await autoResolveProject({ type, token, channelId, threadId }).catch(() => null);
+          projectDir = auto?.projectPath ?? null;
+        }
+        const projectId = await resolveProjectIdForPath(projectDir);
+        if (!projectId) {
+          return { ok: false, error: 'no project bound to this conversation — send a message first to bind one.' };
+        }
+        const tasks = await projectConfigRuntime.listScheduledTasks(projectId);
+        const existing = tasks.find((t) => t.id === id);
+        if (!existing) return { ok: false, notFound: true };
+        if (!existing.enabled) return { ok: false, disabled: true, task: existing };
+        try {
+          const result = await scheduledTasksRuntime.runNow(projectId, id);
+          return { ...result, task: result?.task ?? existing };
+        } catch (err) {
+          return { ok: false, error: err?.message ?? 'failed to run the scheduled task' };
+        }
+      },
+
       describeSchedule,
 
       async mergeWorktree() {

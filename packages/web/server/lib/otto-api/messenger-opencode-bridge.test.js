@@ -924,7 +924,7 @@ describe('/schedule — project scheduler integration', () => {
     vi.restoreAllMocks();
   });
 
-  function makeScheduleBridge({ upserted, deleted, synced }) {
+  function makeScheduleBridge({ upserted, deleted, synced, ran }) {
     return makeBridge({
       store: {
         ...makeFakeStore(),
@@ -974,6 +974,10 @@ describe('/schedule — project scheduler integration', () => {
       },
       scheduledTasksRuntime: {
         syncProject: async (projectId) => synced.push(projectId),
+        runNow: async (projectId, taskId) => {
+          ran?.push({ projectId, taskId });
+          return { ok: true, status: 'success', sessionID: 'ses-run', task: { id: taskId, name: 'Run the weekly tests' } };
+        },
       },
     });
   }
@@ -1059,6 +1063,95 @@ describe('/schedule — project scheduler integration', () => {
     expect(del.reply).toContain('Deleted');
     expect(deleted).toEqual([{ projectId: 'proj-alpha', taskId: 'task-1' }]);
     expect(synced).toEqual(['proj-alpha']);
+  });
+
+  it('shows full details for a single task', async () => {
+    const bridge = makeScheduleBridge({ upserted: [], deleted: [], synced: [] });
+
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'show task-1',
+    });
+
+    expect(result.reply).toContain('task-1');
+    expect(result.reply).toContain('Run the weekly tests');
+    expect(result.reply).toContain('cron `0 9 * * 1`');
+    expect(result.reply).toContain('anthropic/claude-sonnet-4');
+    expect(result.reply).toContain('enabled');
+  });
+
+  it('disables a task by re-sending it with enabled=false', async () => {
+    const upserted = [];
+    const synced = [];
+    const bridge = makeScheduleBridge({ upserted, deleted: [], synced });
+
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'disable task-1',
+    });
+
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0].task.enabled).toBe(false);
+    expect(upserted[0].task.execution).toMatchObject({ providerID: 'anthropic', modelID: 'claude-sonnet-4' });
+    expect(synced).toEqual(['proj-alpha']);
+    expect(result.reply).toContain('Disabled');
+  });
+
+  it('reports when a task is already enabled without re-writing it', async () => {
+    const upserted = [];
+    const bridge = makeScheduleBridge({ upserted, deleted: [], synced: [] });
+
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'enable task-1',
+    });
+
+    expect(upserted).toHaveLength(0);
+    expect(result.reply).toContain('already enabled');
+  });
+
+  it('runs a task immediately through the scheduler runtime', async () => {
+    const ran = [];
+    const bridge = makeScheduleBridge({ upserted: [], deleted: [], synced: [], ran });
+
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'run task-1',
+    });
+
+    expect(ran).toEqual([{ projectId: 'proj-alpha', taskId: 'task-1' }]);
+    expect(result.reply).toContain('Running');
+    expect(result.reply).toContain('ses-run');
+  });
+
+  it('refuses to run a disabled task', async () => {
+    const upserted = [];
+    const ran = [];
+    const bridge = makeScheduleBridge({ upserted, deleted: [], synced: [], ran });
+
+    // Disable first so the echoed list reports enabled=false, then attempt run.
+    await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'disable task-1',
+    });
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'run task-1',
+    });
+
+    expect(ran).toHaveLength(0);
+    expect(result.reply).toContain('disabled');
+  });
+
+  it('reports a missing task id for management subcommands', async () => {
+    const bridge = makeScheduleBridge({ upserted: [], deleted: [], synced: [] });
+
+    const result = await bridge.runCommand({
+      type: 'discord', token: 'bot-token', channelId: 'chan-1',
+      commandName: 'schedule', args: 'enable nope',
+    });
+
+    expect(result.reply).toContain('No scheduled task');
   });
 });
 

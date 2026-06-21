@@ -140,9 +140,9 @@ const COMMAND_HELP = [
   },
   {
     name: 'schedule',
-    usage: '/schedule <when> [model=p/m] [agent=name] <prompt> | list | delete <id>',
+    usage: '/schedule <when> [model=p/m] [agent=name] <prompt> | list | show <id> | enable <id> | disable <id> | run <id> | delete <id>',
     summary:
-      'Schedule a prompt in the project scheduler (synced with the web UI) — `when` is a UTC ISO date (2026-03-01T09:00) or cron (`0 9 * * 1`, UTC). Each run starts a fresh session in the project.',
+      'Manage project scheduled tasks (synced with the web UI). Create with a UTC ISO date (2026-03-01T09:00) or cron (`0 9 * * 1`, UTC); list, show, enable/disable, run now, or delete by id. Each run starts a fresh session in the project.',
   },
 ];
 
@@ -829,7 +829,7 @@ export async function executeMessengerCommand({
           lines.push(`\`${t.id}\` — **${t.name}** — ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : ''} — _${status}_`);
           lines.push(`> ${(t.execution?.prompt ?? '').split('\n')[0].slice(0, 120)}`);
         }
-        lines.push('', 'Remove with `/schedule delete <id>`.');
+        lines.push('', 'Manage: `/schedule show <id>` · `/schedule enable|disable <id>` · `/schedule run <id>` · `/schedule delete <id>`.');
         return { reply: lines.join('\n') };
       }
 
@@ -837,6 +837,68 @@ export async function executeMessengerCommand({
       if (deleteMatch) {
         const removed = await bridgeOps.deleteSchedule(deleteMatch[1]);
         return { reply: removed ? `🗑 Deleted scheduled task \`${deleteMatch[1]}\`.` : `✗ No scheduled task \`${deleteMatch[1]}\`.` };
+      }
+
+      const showMatch = argsText.match(/^show\s+(\S+)$/);
+      if (showMatch) {
+        if (!bridgeOps.getSchedule) {
+          return { reply: '✗ `/schedule show` is not available on this surface.' };
+        }
+        const t = await bridgeOps.getSchedule(showMatch[1]);
+        if (!t) return { reply: `✗ No scheduled task \`${showMatch[1]}\`.` };
+        const nextRunAt = t.state?.nextRunAt;
+        const lastRunAt = t.state?.lastRunAt;
+        const reply = [
+          `**${t.name}** — \`${t.id}\``,
+          `Schedule: ${bridgeOps.describeSchedule ? bridgeOps.describeSchedule(t) : ''}`,
+          `Status: ${t.enabled ? 'enabled' : 'disabled'}${t.state?.lastStatus ? ` · last ${t.state.lastStatus}` : ''}`,
+          `Model: \`${t.execution?.providerID}/${t.execution?.modelID}\`${t.execution?.agent ? ` · agent \`${t.execution.agent}\`` : ''}`,
+          `Next run: ${nextRunAt ? new Date(nextRunAt).toISOString() : 'n/a'}${lastRunAt ? ` · last run ${new Date(lastRunAt).toISOString()}` : ''}`,
+          t.state?.lastError ? `Last error: ${String(t.state.lastError).slice(0, 200)}` : '',
+          '',
+          `> ${(t.execution?.prompt ?? '').split('\n')[0].slice(0, 200)}`,
+        ].filter(Boolean).join('\n');
+        return { reply };
+      }
+
+      const toggleMatch = argsText.match(/^(enable|disable)\s+(\S+)$/);
+      if (toggleMatch) {
+        if (!bridgeOps.setScheduleEnabled) {
+          return { reply: `✗ \`/schedule ${toggleMatch[1]}\` is not available on this surface.` };
+        }
+        const enabled = toggleMatch[1] === 'enable';
+        const id = toggleMatch[2];
+        const r = await bridgeOps.setScheduleEnabled(id, enabled);
+        if (r.notFound) return { reply: `✗ No scheduled task \`${id}\`.` };
+        if (!r.ok) return { reply: `✗ Could not ${toggleMatch[1]}: ${r.error ?? 'unknown error'}` };
+        const t = r.task;
+        if (!r.changed) return { reply: `${enabled ? '✓' : '⏸'} Task \`${id}\` is already ${enabled ? 'enabled' : 'disabled'}.` };
+        const nextRunAt = t?.state?.nextRunAt;
+        return {
+          reply: enabled
+            ? `▶ Enabled \`${id}\` — **${t?.name ?? ''}**${nextRunAt ? ` · next run ${new Date(nextRunAt).toISOString()}` : ''}.`
+            : `⏸ Disabled \`${id}\` — **${t?.name ?? ''}**. It will not run until re-enabled.`,
+        };
+      }
+
+      const runMatch = argsText.match(/^run\s+(\S+)$/);
+      if (runMatch) {
+        if (!bridgeOps.runSchedule) {
+          return { reply: '✗ `/schedule run` is not available on this surface.' };
+        }
+        const id = runMatch[1];
+        const r = await bridgeOps.runSchedule(id);
+        if (r.notFound) return { reply: `✗ No scheduled task \`${id}\`.` };
+        if (r.disabled) return { reply: `✗ Task \`${id}\` is disabled — enable it first with \`/schedule enable ${id}\`.` };
+        if (r.running) return { reply: `⏳ Task \`${id}\` is already running.` };
+        if (r.queued) return { reply: `⏳ Task \`${id}\` is already queued.` };
+        if (!r.ok) return { reply: `✗ Could not run \`${id}\`: ${r.error ?? 'unknown error'}` };
+        return {
+          reply: [
+            `▶ Running \`${id}\` — **${r.task?.name ?? ''}** now.`,
+            r.sessionID ? `Started session \`${r.sessionID}\` — results stream into Discord and the web UI.` : 'Results stream into Discord and the web UI.',
+          ].filter(Boolean).join('\n'),
+        };
       }
 
       // Grammar: <when> [model=p/m] [agent=name] <prompt…>
