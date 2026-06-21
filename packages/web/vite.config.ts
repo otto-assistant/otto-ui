@@ -8,6 +8,12 @@ import { themeStoragePlugin } from '../../vite-theme-plugin';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, 'package.json'), 'utf-8'));
+// Point the `@opencode-ai/sdk/v2` alias at the browser-safe v2 client in this
+// package's own node_modules. The SDK is a direct dependency of this package,
+// so bun links it locally regardless of the workspace hoist layout — unlike the
+// previous `../../node_modules/...` path, which only worked when the SDK was
+// hoisted to the repo root.
+const opencodeV2Client = path.resolve(__dirname, 'node_modules/@opencode-ai/sdk/dist/v2/client.js');
 const pwaDevEnabled = process.env.OPENCHAMBER_DISABLE_PWA_DEV !== '1';
 const reactScanToggle = (process.env.VITE_ENABLE_REACT_SCAN ?? '').toLowerCase();
 const enableReactScan = reactScanToggle === '1' || reactScanToggle === 'true' || reactScanToggle === 'on' || reactScanToggle === 'yes';
@@ -61,7 +67,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: [
-      { find: '@opencode-ai/sdk/v2', replacement: path.resolve(__dirname, '../../node_modules/@opencode-ai/sdk/dist/v2/client.js') },
+      { find: '@opencode-ai/sdk/v2', replacement: opencodeV2Client },
       { find: '@openchamber/ui', replacement: path.resolve(__dirname, '../ui/src') },
       { find: '@web', replacement: path.resolve(__dirname, './src') },
       { find: '@', replacement: path.resolve(__dirname, '../ui/src') },
