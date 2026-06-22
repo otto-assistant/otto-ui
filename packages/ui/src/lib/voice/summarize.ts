@@ -92,23 +92,6 @@ export async function summarizeText(
 /**
  * Check if text should be summarized based on settings
  */
-export function shouldSummarize(
-    text: string,
-    context: 'message' | 'voice'
-): boolean {
-    const store = useConfigStore.getState();
-    
-    const isEnabled = context === 'message' 
-        ? store.summarizeMessageTTS 
-        : store.summarizeVoiceConversation;
-    
-    if (!isEnabled) {
-        return false;
-    }
-    
-    return text.length > store.summarizeCharacterThreshold;
-}
-
 /**
  * Client-side text sanitization for TTS output.
  * Removes markdown, URLs, file paths, and other non-speakable content.

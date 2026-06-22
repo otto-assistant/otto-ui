@@ -10,7 +10,6 @@ import type { ChildStoreManager } from "./child-store"
 import { getSessionMaterializationStatus } from "./materialization"
 import type { State } from "./types"
 
-let _sdk: OpencodeClient | null = null
 let _childStores: ChildStoreManager | null = null
 let _directory: string = ""
 let _registerSessionDirectory: ((sessionID: string, directory: string) => void) | null = null
@@ -22,7 +21,7 @@ export function setSyncRefs(
   directory: string,
   registerSessionDirectory?: (sessionID: string, directory: string) => void,
 ) {
-  _sdk = sdk
+  void sdk
   _childStores = childStores
   _directory = directory
   if (registerSessionDirectory) {
@@ -37,18 +36,9 @@ export function registerSessionDirectory(sessionID: string, directory: string) {
   _registerSessionDirectory?.(sessionID, directory)
 }
 
-export function getSyncSDK(): OpencodeClient {
-  if (!_sdk) throw new Error("SDK not initialized — is SyncProvider mounted?")
-  return _sdk
-}
-
 export function getSyncChildStores(): ChildStoreManager {
   if (!_childStores) throw new Error("ChildStoreManager not initialized — is SyncProvider mounted?")
   return _childStores
-}
-
-export function getSyncDirectory(): string {
-  return _directory
 }
 
 /** Read current directory's child store state. Returns undefined if not bootstrapped. */
@@ -127,7 +117,3 @@ export function getSyncPermissions(sessionId: string, directory?: string) {
   return getDirectoryState(directory)?.permission[sessionId] ?? []
 }
 
-/** Read questions for a session from current directory's child store */
-export function getSyncQuestions(sessionId: string, directory?: string) {
-  return getDirectoryState(directory)?.question[sessionId] ?? []
-}

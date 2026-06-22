@@ -1771,6 +1771,56 @@ describe('session.error — clean, de-duplicated, no false "done"', () => {
   });
 });
 
+describe('duplicate session.idle — single "done" footer (abort/force-stop)', () => {
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('posts exactly one done footer when OpenCode emits session.idle twice', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body });
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-d' ? { sessionId: 'ses-d', projectPath: '/p' } : null,
+      },
+    });
+
+    await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-d', threadId: null, text: 'hi',
+    });
+
+    // Force-stop / abort settles the turn, but OpenCode emits session.idle more
+    // than once afterwards. The second idle must not post a bogus "done · …".
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.idle', properties: { sessionID: 'ses-d' } },
+    });
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.idle', properties: { sessionID: 'ses-d' } },
+    });
+    for (let i = 0; i < 5; i++) await flush();
+
+    const doneFooters = calls
+      .filter((c) => c.method === 'POST' && c.url.includes('/channels/chan-d/messages'))
+      .map((c) => JSON.parse(c.body).content)
+      .filter((p) => p.includes('done ·'));
+
+    expect(doneFooters).toHaveLength(1);
+  });
+});
+
 describe('getSurfaceModelInfo — concrete model fallback', () => {
   let originalFetch;
   beforeEach(() => {

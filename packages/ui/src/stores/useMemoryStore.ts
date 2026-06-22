@@ -402,7 +402,3 @@ export const useMemoryStore = create<MemoryStoreState>()(
     { name: 'MemoryStore' },
   ),
 );
-
-// Leaf selector: ids of active backends (for dynamic settings nav visibility).
-export const selectActiveMemoryBackendIds = (state: MemoryStoreState): string[] =>
-  state.status?.activeBackends ?? [];

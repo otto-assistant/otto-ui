@@ -55,8 +55,7 @@ Before editing, classify every endpoint or capability involved:
 
 5. **Do not hardcode local runtime URLs**
    - Do not infer `localhost`, server ports, or `/api` origins in shared UI.
-   - Use `getRuntimeUrlResolver()` at call time.
-   - Do not use the exported `runtimeUrl` singleton for new code because it can capture stale resolver state.
+   - Use `getRuntimeUrlResolver()` at call time, since a captured resolver reference can hold stale state across runtime switches.
 
 6. **Treat runtime auth as transport state**
    - HTTP auth is owned by `runtime-auth` and `runtimeFetch`; callers pass route paths and let transport attach `Authorization` only for the active runtime service URL.
@@ -218,7 +217,7 @@ Before finalizing a UI/API decoupling change:
 
 `packages/ui/src/lib/runtime-fetch.ts` rewrites `/api`, `/auth`, and `/health` through the active runtime URL resolver and injects runtime auth. Its key contract is preserving SDK-created `Request` objects, including method, body, headers, query, and signal. For ordinary HTTP calls, pass route paths directly to `runtimeFetch`; do not pre-resolve them with `getRuntimeUrlResolver()` first.
 
-`packages/ui/src/lib/runtime-url.ts` owns HTTP, auth, health, raw-file, SSE, WebSocket, and authenticated browser URL construction. `getRuntimeUrlResolver()` is the call-time source for browser-consumed URLs like iframe `src`, large/raw image `src`, download/open links, SSE URLs, and WebSocket URLs. `runtimeUrl` is not safe for new code that must survive runtime switches.
+`packages/ui/src/lib/runtime-url.ts` owns HTTP, auth, health, raw-file, SSE, WebSocket, and authenticated browser URL construction. `getRuntimeUrlResolver()` is the call-time source for browser-consumed URLs like iframe `src`, large/raw image `src`, download/open links, SSE URLs, and WebSocket URLs. Always resolve at call time so URLs survive runtime switches.
 
 `packages/ui/src/lib/runtime-auth.ts` owns bearer-token state and short-lived URL-token minting. `runtimeFetch` merges `Authorization` unless a caller already supplied one. Runtime URL helpers add scoped `oc_url_token` where headers are impossible; they must never expose long-lived client bearer tokens in URLs.
 

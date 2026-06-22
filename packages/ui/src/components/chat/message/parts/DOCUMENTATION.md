@@ -34,7 +34,6 @@ Use this doc when you ask an agent to change tool/header/description behavior.
     - `isExpandableTool`
     - `isStaticTool`
     - `isStandaloneTool`
-    - `getStaticGroupToolName`
   - If a tool should switch between static vs expandable, change it here.
 
 - `ReasoningPart.tsx`

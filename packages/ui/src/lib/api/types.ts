@@ -13,12 +13,6 @@ export interface RuntimeDescriptor {
   label?: string;
 }
 
-export interface ApiError {
-  message: string;
-  code?: string;
-  cause?: unknown;
-}
-
 export interface Subscription {
 
   close: () => void;
@@ -251,29 +245,18 @@ export interface CheckoutCommitResponse {
   success: boolean;
 }
 
-export interface CherryPickRequest {
-  hash: string;
-}
 export interface CherryPickResponse {
   success: boolean;
   conflict?: boolean;
   conflictFiles?: string[];
 }
 
-export interface RevertCommitRequest {
-  hash: string;
-}
 export interface RevertCommitResponse {
   success: boolean;
   conflict?: boolean;
   conflictFiles?: string[];
 }
 
-export interface ResetToCommitRequest {
-  hash: string;
-  mode: 'soft' | 'mixed' | 'hard';
-  force?: boolean;
-}
 export interface ResetToCommitResponse {
   success: boolean;
 }
