@@ -2252,8 +2252,10 @@ export function createMessengerOpencodeBridge({
     const ctx = sessionContexts.get(sessionId);
     if (!ctx) return;
     // A new turn is producing output — clear any prior error state so its
-    // session.idle posts a proper "done" footer again.
+    // session.idle posts a proper "done" footer again, and re-arm idle
+    // settling so this turn's session.idle is processed (not deduped).
     ctx.errored = false;
+    ctx.idleSettled = false;
     const partId = part?.id;
     const partType = part?.type;
     // Re-resolve per part (cheap SQLite lookup) so `/verbosity` changes and
@@ -2447,6 +2449,18 @@ export function createMessengerOpencodeBridge({
         if (defaultCtx) await handleGlobalEvent(normalized);
         return;
       }
+      // Dedupe duplicate session.idle events. OpenCode emits session.idle more
+      // than once after a turn settles — notably on abort / force-stop (UI Stop
+      // button or `/abort`), which is what produced two "done · …" footers
+      // (the second showing a bogus sub-second duration because startedAt was
+      // reset for the next turn below). Only the first idle settles a turn; the
+      // flag resets when the next turn produces output (emitPart) or a new
+      // prompt is sent, so a genuine follow-up turn still gets its own footer.
+      if (ctx.idleSettled) {
+        stopTypingPulse(ctx);
+        return;
+      }
+      ctx.idleSettled = true;
       // The turn already surfaced an error — OpenCode still emits idle (often
       // more than once) afterwards. Skip the misleading "done · 1ms" footer but
       // still settle the turn (clear busy, flush todos, drain the queue). The
@@ -3803,8 +3817,10 @@ export function createMessengerOpencodeBridge({
       sessionContexts.set(sessionId, ctx);
     }
     const ctx = sessionContexts.get(sessionId);
-    // New turn — clear any prior error state so its idle posts a real footer.
+    // New turn — clear any prior error state so its idle posts a real footer,
+    // and re-arm idle settling so this turn's session.idle isn't deduped.
     ctx.errored = false;
+    ctx.idleSettled = false;
     // Re-resolve verbosity each turn so a mid-session `/verbosity` change (or a
     // UI default change) takes effect on the next prompt.
     ctx.verbosity = resolveVerbosity({ type, token, channelId, threadId: effectiveThreadId });
