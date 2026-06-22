@@ -1088,26 +1088,6 @@ export const useGitAllBranches = () => {
   });
 };
 
-export const useGitBranchMap = (directories: string[]) => {
-  const cacheRef = React.useRef<Map<string, string | null>>(new Map());
-  return useGitStore((state) => {
-    const prev = cacheRef.current;
-    let same = prev.size === directories.length;
-    if (same) {
-      for (const dir of directories) {
-        if (prev.get(dir) !== (state.directories.get(dir)?.status?.current ?? null)) { same = false; break; }
-      }
-    }
-    if (same) return prev;
-    const result = new Map<string, string | null>();
-    for (const dir of directories) {
-      result.set(dir, state.directories.get(dir)?.status?.current ?? null);
-    }
-    cacheRef.current = result;
-    return result;
-  });
-};
-
 export const useGitRepoStatusMap = (directories: string[]) => {
   const cacheRef = React.useRef<Map<string, { isGitRepo: boolean | null; branch: string | null }>>(new Map());
   return useGitStore((state) => {
@@ -1152,9 +1132,3 @@ export const useGitLoadingBranches = (directory: string | null) => {
   });
 };
 
-export const useGitLoadingIdentity = (directory: string | null) => {
-  return useGitStore((state) => {
-    if (!directory) return false;
-    return state.directories.get(directory)?.isLoadingIdentity ?? false;
-  });
-};
