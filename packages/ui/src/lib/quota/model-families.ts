@@ -25,21 +25,6 @@ export function getDisplayModelName(modelName: string): string {
   return modelName;
 }
 
-/**
- * Get the auth source label from a model name prefix.
- * e.g., "gemini/..." -> "Gemini"
- *       "antigravity/..." -> "Antigravity"
- */
-export function getAuthSourceLabel(modelName: string): string | null {
-  const slashIndex = modelName.indexOf('/');
-  if (slashIndex === -1) return null;
-  
-  const prefix = modelName.substring(0, slashIndex);
-  if (prefix === 'gemini') return 'Gemini';
-  if (prefix === 'antigravity') return 'Antigravity';
-  return null;
-}
-
 const GOOGLE_MODEL_FAMILIES: ModelFamily[] = [
   {
     id: 'gemini-auth',
@@ -94,30 +79,6 @@ export function groupModelsByFamily(
       groups.set(familyId, []);
     }
     groups.get(familyId)!.push(modelName);
-  }
-
-  return groups;
-}
-
-/**
- * Group models by family with custom getter function (for UsagePage.tsx)
- */
-export function groupModelsByFamilyWithGetter<T>(
-  models: T[],
-  getModelName: (model: T) => string,
-  providerId: QuotaProviderId
-): Map<string | null, T[]> {
-  const groups = new Map<string | null, T[]>();
-
-  for (const model of models) {
-    const modelName = getModelName(model);
-    const family = getModelFamily(modelName, providerId);
-    const familyId = family?.id ?? null;
-
-    if (!groups.has(familyId)) {
-      groups.set(familyId, []);
-    }
-    groups.get(familyId)!.push(model);
   }
 
   return groups;

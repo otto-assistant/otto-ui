@@ -1183,11 +1183,6 @@ const fetchWebSettings = async (): Promise<DesktopSettings | null> => {
   return _settingsInflight;
 };
 
-/** Invalidate cached settings (call after a successful PUT) */
-export const invalidateSettingsCache = (): void => {
-  _settingsCache = null;
-};
-
 export const syncDesktopSettings = async (): Promise<void> => {
   if (typeof window === 'undefined') {
     return;

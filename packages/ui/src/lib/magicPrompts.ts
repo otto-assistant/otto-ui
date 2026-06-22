@@ -951,11 +951,6 @@ export const fetchMagicPromptOverrides = async (): Promise<Record<string, string
   return inFlightOverridesRequest;
 };
 
-export const invalidateMagicPromptOverridesCache = () => {
-  cachedOverrides = null;
-  inFlightOverridesRequest = null;
-};
-
 export const getMagicPromptDefinition = (id: MagicPromptId): MagicPromptDefinition => {
   const definition = MAGIC_PROMPT_DEFINITION_BY_ID.get(id);
   if (!definition) {
