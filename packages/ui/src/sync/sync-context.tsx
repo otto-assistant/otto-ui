@@ -9,7 +9,7 @@ import { createEventPipeline } from "./event-pipeline"
 import { isVSCodeRuntime } from "@/lib/desktop"
 import { isMobileSurfaceRuntime } from "@/lib/runtimeSurface"
 import { reduceGlobalEvent, applyGlobalProject, applyDirectoryEvent } from "./event-reducer"
-import { useGlobalSyncStore, type GlobalSyncStore } from "./global-sync-store"
+import { useGlobalSyncStore } from "./global-sync-store"
 import { ChildStoreManager, type DirectoryStore } from "./child-store"
 import {
   aggregateLiveSessions,
@@ -2226,17 +2226,6 @@ export function useDirectoryStore(
 export function useDirectorySync<T>(selector: (state: State) => T, directory?: string): T {
   const store = useDirectoryStore(directory)
   return useStore(store, selector)
-}
-
-/** Get the revert messageID for a session (if reverted) */
-export function useSessionRevertMessageID(sessionID: string, directory?: string): string | undefined {
-  return useDirectorySync(
-    useCallback((state: State) => {
-      const session = state.session.find((s) => s.id === sessionID)
-      return (session as { revert?: { messageID?: string } } | undefined)?.revert?.messageID
-    }, [sessionID]),
-    directory,
-  )
 }
 
 /** Get session messages for a specific session */

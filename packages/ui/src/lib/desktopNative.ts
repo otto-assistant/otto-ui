@@ -76,9 +76,4 @@ export const getDesktopAppVersion = async (): Promise<string | null> => {
   }
 };
 
-export const readDesktopFile = async (
-  path: string,
-): Promise<{ mime: string; base64: string; size?: number }> => {
-  return invokeDesktopCommand('desktop_read_file', { path });
-};
 

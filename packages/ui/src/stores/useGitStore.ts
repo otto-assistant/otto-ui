@@ -1053,13 +1053,6 @@ export const useIsGitRepo = (directory: string | null) => {
   });
 };
 
-export const useGitFileCount = (directory: string | null) => {
-  return useGitStore((state) => {
-    if (!directory) return 0;
-    return state.directories.get(directory)?.status?.files?.length ?? 0;
-  });
-};
-
 export const useGitBranchLabel = (directory: string | null) => {
   return useGitStore((state) => {
     if (!directory) return null;

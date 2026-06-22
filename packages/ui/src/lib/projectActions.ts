@@ -1,8 +1,4 @@
 import type {
-  OpenChamberProjectAction,
-  OpenChamberProjectActionPlatform,
-} from '@/lib/openchamberConfig';
-import type {
   DesktopSshInstance,
   DesktopSshPortForward,
 } from '@/lib/desktopSsh';

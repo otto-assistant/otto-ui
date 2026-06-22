@@ -177,9 +177,9 @@ export const refreshRuntimeUrlAuthToken = async (apiBaseUrl?: string | null): Pr
 // the refetch), a single scheduler refreshes it just before the skew window —
 // but only while at least one consumer is active, so we never poll
 // /auth/url-token in the background when nothing needs the token.
-let urlAuthConsumerCount = 0;
+const urlAuthConsumerCount = 0;
 let urlAuthRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-let urlAuthApiBaseUrl: string | null = null;
+const urlAuthApiBaseUrl: string | null = null;
 const urlAuthListeners = new Set<() => void>();
 const URL_AUTH_PROACTIVE_BUFFER_MS = 5_000;
 

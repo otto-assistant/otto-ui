@@ -1,7 +1,3 @@
-import type { Session, Message, Part } from "@opencode-ai/sdk/v2";
-import type { PermissionRequest, PermissionResponse } from "@/types/permission";
-import type { QuestionRequest } from "@/types/question";
-
 export type SessionWorktreeAttachment = {
   worktreeRoot: string | null;
   cwd: string | null;
@@ -30,13 +26,6 @@ export interface AttachedFile {
 export type EditPermissionMode = 'allow' | 'ask' | 'deny' | 'full';
 
 export type MessageStreamPhase = 'streaming' | 'cooldown' | 'completed';
-
-export interface MessageStreamLifecycle {
-    phase: MessageStreamPhase;
-    startedAt: number;
-    lastUpdateAt: number;
-    completedAt?: number;
-}
 
 export interface SessionMemoryState {
     viewportAnchor: number;
@@ -113,7 +102,6 @@ export const getMemoryLimits = () => {
     };
 };
 
-export const DEFAULT_ACTIVE_SESSION_WINDOW = DEFAULT_MESSAGE_LIMIT;
 export const MEMORY_LIMITS = DEFAULT_MEMORY_LIMITS;
 
 /** Synthetic context parts to attach when sending initial message */

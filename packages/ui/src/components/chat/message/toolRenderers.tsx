@@ -543,18 +543,6 @@ export interface UnifiedDiffHunk {
     lines: UnifiedDiffLine[];
 }
 
-export interface SideBySideDiffLine {
-    leftLine: { type: 'context' | 'removed' | 'empty'; lineNumber: number | null; content: string };
-    rightLine: { type: 'context' | 'added' | 'empty'; lineNumber: number | null; content: string };
-}
-
-export interface SideBySideDiffHunk {
-    file: string;
-    oldStart: number;
-    newStart: number;
-    lines: SideBySideDiffLine[];
-}
-
 export const parseDiffToUnified = (diffText: string): UnifiedDiffHunk[] => {
     const lines = diffText.split('\n');
     let currentFile = '';

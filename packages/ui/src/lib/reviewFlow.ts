@@ -5,7 +5,6 @@ import { flattenAssistantTextParts } from '@/lib/messages/messageText';
 import {
   getOriginalSessionID,
   getReviewSessionID,
-  getSessionMetadata,
   isReviewSession,
   withoutReviewSessionLink,
   withReviewSessionLink,
