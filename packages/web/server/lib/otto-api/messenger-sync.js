@@ -340,6 +340,7 @@ export function createMessengerSyncRouter({
                   return {
                     model: settings?.defaultModel ?? null,
                     agent: settings?.defaultAgent ?? null,
+                    variant: settings?.defaultVariant ?? null,
                   };
                 } catch {
                   return { model: null, agent: null };

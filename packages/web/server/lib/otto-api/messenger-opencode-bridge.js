@@ -105,6 +105,53 @@ function slugify(s) {
     .replace(/^-+|-+$/g, '');
 }
 
+/**
+ * Turn an OpenCode `session.error` payload into a short, human-readable line.
+ *
+ * OpenCode errors arrive in several shapes (`{ message }`, `{ data: { message } }`,
+ * `{ cause: { failures: [...] } }`, or a bare object). Dumping the raw JSON to a
+ * chat surface is hostile — it gets truncated mid-string and exposes internals.
+ * In particular, Drizzle/SQLite write failures carry a giant SQL query with bind
+ * placeholders that is meaningless to a chat user, so we collapse those to a
+ * single friendly sentence.
+ */
+function formatSessionError(raw) {
+  if (!raw) return 'OpenCode session error';
+  if (typeof raw === 'string') return raw.trim() || 'OpenCode session error';
+
+  let msg =
+    (typeof raw.message === 'string' && raw.message) ||
+    (typeof raw.data?.message === 'string' && raw.data.message) ||
+    (typeof raw.error?.message === 'string' && raw.error.message) ||
+    '';
+  if (!msg && raw.cause && typeof raw.cause === 'object') {
+    const c = raw.cause;
+    const failures = Array.isArray(c.failures) ? c.failures : Array.isArray(c) ? c : null;
+    if (failures && failures.length > 0) {
+      const first = failures[0];
+      msg = first?.error?.message ?? first?.message ?? first?.error ?? '';
+    }
+  }
+  if (!msg) {
+    try {
+      msg = JSON.stringify(raw);
+    } catch {
+      msg = String(raw);
+    }
+  }
+  msg = String(msg).trim();
+
+  // Collapse noisy DB write failures (huge SQL + bind placeholders) into one
+  // clear sentence instead of a truncated query dump.
+  if (/DrizzleQueryError|Failed query:|\binsert into\b|\bon conflict\b/i.test(msg)) {
+    return 'OpenCode could not save the message (database write error). The turn was not recorded — please try again.';
+  }
+
+  // Otherwise keep the first line and drop any stack-trace tail.
+  const firstLine = msg.split('\n')[0].trim();
+  return firstLine || 'OpenCode session error';
+}
+
 function pickProjectForName(projects, name) {
   if (!name) return null;
   const wanted = slugify(name);
@@ -542,7 +589,7 @@ export function createMessengerOpencodeBridge({
   }
 
   async function resolveGlobalDefaults() {
-    if (!getGlobalDefaults) return { model: null, agent: null };
+    if (!getGlobalDefaults) return { model: null, agent: null, variant: null };
     try {
       const d = await getGlobalDefaults();
       const model =
@@ -550,9 +597,10 @@ export function createMessengerOpencodeBridge({
           ? d.model.trim()
           : null;
       const agent = typeof d?.agent === 'string' && d.agent.trim() ? d.agent.trim() : null;
-      return { model, agent };
+      const variant = typeof d?.variant === 'string' && d.variant.trim() ? d.variant.trim() : null;
+      return { model, agent, variant };
     } catch {
-      return { model: null, agent: null };
+      return { model: null, agent: null, variant: null };
     }
   }
 
@@ -2203,6 +2251,9 @@ export function createMessengerOpencodeBridge({
   async function emitPart(sessionId, part) {
     const ctx = sessionContexts.get(sessionId);
     if (!ctx) return;
+    // A new turn is producing output — clear any prior error state so its
+    // session.idle posts a proper "done" footer again.
+    ctx.errored = false;
     const partId = part?.id;
     const partType = part?.type;
     // Re-resolve per part (cheap SQLite lookup) so `/verbosity` changes and
@@ -2396,6 +2447,19 @@ export function createMessengerOpencodeBridge({
         if (defaultCtx) await handleGlobalEvent(normalized);
         return;
       }
+      // The turn already surfaced an error — OpenCode still emits idle (often
+      // more than once) afterwards. Skip the misleading "done · 1ms" footer but
+      // still settle the turn (clear busy, flush todos, drain the queue). The
+      // errored flag stays set until the next turn produces output.
+      if (ctx.errored) {
+        stopTypingPulse(ctx);
+        finishTodoMessageForSession(ctx, sessionId);
+        ctx.sentPartIds.clear();
+        ctx.startedAt = Date.now();
+        busySessions.delete(sessionId);
+        void drainSurfaceQueue(ctx);
+        return;
+      }
       stopTypingPulse(ctx);
       const ms = Date.now() - ctx.startedAt;
       const duration = ms < 1000 ? ms + 'ms' : Math.round(ms / 100) / 10 + 's';
@@ -2503,23 +2567,23 @@ export function createMessengerOpencodeBridge({
         return;
       }
       stopTypingPulse(ctx);
-      const err = (() => {
-        const raw = props?.error;
-        if (!raw) return 'OpenCode session error';
-        if (typeof raw === 'string') return raw;
-        if (typeof raw?.message === 'string' && raw.message) return raw.message;
-        if (typeof raw?.cause === 'object' && raw.cause) {
-          const c = raw.cause;
-          const failures = c.failures ?? c;
-          if (Array.isArray(failures) && failures.length > 0) {
-            const first = failures[0];
-            const errMsg = first?.error?.message ?? first?.message ?? first?.error ?? '';
-            if (errMsg) return String(errMsg).slice(0, 200);
-          }
-        }
-        try { return JSON.stringify(raw).slice(0, 200); } catch { return String(raw).slice(0, 200); }
-      })();
-      void postToSurface(ctx, `✗ session error: ${escapeMd(clipBlock(err, 300))}`);
+      // Mark the turn as errored so the trailing session.idle doesn't tack on a
+      // misleading "done · …" footer. The flag clears when the next turn starts
+      // producing output (see emitPart) or a new prompt is sent.
+      ctx.errored = true;
+      const errText = formatSessionError(props?.error);
+      const now = Date.now();
+      // OpenCode emits one session.error per failed write (message + each part),
+      // so the same fault can arrive several times in a row. Collapse repeats so
+      // the surface isn't spammed with three identical lines.
+      if (ctx.lastErrorText === errText && now - (ctx.lastErrorAt ?? 0) < 30000) {
+        ctx.sentPartIds.clear();
+        return;
+      }
+      ctx.lastErrorText = errText;
+      ctx.lastErrorAt = now;
+      ctx.lastError = errText;
+      void postToSurface(ctx, `✗ ${escapeMd(clipBlock(errText, 280))}`);
       ctx.sentPartIds.clear();
       return;
     }
@@ -3739,6 +3803,8 @@ export function createMessengerOpencodeBridge({
       sessionContexts.set(sessionId, ctx);
     }
     const ctx = sessionContexts.get(sessionId);
+    // New turn — clear any prior error state so its idle posts a real footer.
+    ctx.errored = false;
     // Re-resolve verbosity each turn so a mid-session `/verbosity` change (or a
     // UI default change) takes effect on the next prompt.
     ctx.verbosity = resolveVerbosity({ type, token, channelId, threadId: effectiveThreadId });
@@ -3824,7 +3890,10 @@ export function createMessengerOpencodeBridge({
       // the messenger doesn't silently run on some unexpected provider default.
       if (!modelOverride || !agentOverride) {
         const globals = await resolveGlobalDefaults();
-        modelOverride = modelOverride ?? globals.model ?? null;
+        if (!modelOverride && globals.model) {
+          modelOverride = globals.model;
+          variantOverride = globals.variant ?? null;
+        }
         agentOverride = agentOverride ?? globals.agent ?? null;
       }
     } catch {
@@ -4280,23 +4349,31 @@ export function createMessengerOpencodeBridge({
     let model = null;
     let variant = null;
     let source = null;
+    let sessionId = null;
+    let sessionProjectPath = null;
     try {
       const hash = tokenHash(token);
       const stableKey = targetKey({ type, channelId, threadId });
       const row = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
       let projectPath = row?.projectPath ?? null;
       let projectLabel = row?.projectLabel ?? null;
+      sessionId = row?.sessionId || null;
+      sessionProjectPath = row?.projectPath ?? null;
       if (row?.modelOverride) {
         model = row.modelOverride;
         variant = row.variantOverride ?? null;
         source = 'this conversation';
       }
-      if (!model && stableKey !== String(channelId)) {
+      if ((!model || !sessionId) && stableKey !== String(channelId)) {
         const parent = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: String(channelId) });
-        if (parent?.modelOverride) {
+        if (!model && parent?.modelOverride) {
           model = parent.modelOverride;
           variant = parent.variantOverride ?? null;
           source = 'this conversation';
+        }
+        if (!sessionId && parent?.sessionId) {
+          sessionId = parent.sessionId;
+          sessionProjectPath = parent.projectPath ?? sessionProjectPath;
         }
         if (!projectPath) {
           projectPath = parent?.projectPath ?? null;
@@ -4318,10 +4395,88 @@ export function createMessengerOpencodeBridge({
       const globals = await resolveGlobalDefaults();
       if (globals.model) {
         model = globals.model;
+        variant = globals.variant ?? null;
         source = 'OpenChamber default';
       }
     }
+    // Nothing configured at any layer — show the concrete model the bound
+    // session is actually running (OpenCode's own pick) instead of a vague
+    // "OpenCode default". Read it from the live session, same source the
+    // session-idle footer uses.
+    if (!model && sessionId) {
+      const live = await fetchSessionModel(sessionId, sessionProjectPath);
+      if (live?.model) {
+        model = live.model;
+        variant = live.variant ?? null;
+        source = 'session';
+      }
+    }
     return { model, variant, source };
+  }
+
+  /** `{ providerID, id|modelID, variant? }` → `{ model: 'provider/model', variant }`. */
+  function toModelRef(src, modelIdKey) {
+    if (!src || typeof src !== 'object') return null;
+    const providerId = src.providerID ?? src.providerId ?? '';
+    const modelId = src[modelIdKey] ?? '';
+    if (!providerId || !modelId) return null;
+    const variant = typeof src.variant === 'string' && src.variant.trim() ? src.variant.trim() : null;
+    return { model: `${providerId}/${modelId}`, variant };
+  }
+
+  /**
+   * Read the concrete model (and reasoning variant, when present) a session is
+   * actually running. Tries the session object's `model` first, then falls back
+   * to the latest assistant message's model (OpenCode 1.4+ nests it under
+   * `model`, older builds carry flat `providerID`/`modelID`). Returns null when
+   * the session has no model yet or the fetch fails.
+   */
+  async function fetchSessionModel(sessionId, projectPath) {
+    if (!sessionId) return null;
+    const dir = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
+    try {
+      const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}${dir}`);
+      if (r.ok) {
+        const d = await r.json().catch(() => null);
+        const ref = toModelRef(d?.model, 'id');
+        if (ref) return ref;
+      }
+    } catch {
+      // fall through to the message scan
+    }
+    try {
+      const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/message${dir}`);
+      if (!r.ok) return null;
+      const d = await r.json().catch(() => null);
+      const list = Array.isArray(d) ? d : Array.isArray(d?.data) ? d.data : [];
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const info = list[i]?.info ?? list[i];
+        if (!info || info.role !== 'assistant') continue;
+        const ref = toModelRef(info.model, 'id') ?? toModelRef(info, 'modelID');
+        if (ref) return ref;
+      }
+    } catch {
+      // best-effort
+    }
+    return null;
+  }
+
+  /**
+   * Set the OpenChamber-wide default model + thinking-effort (Settings →
+   * Defaults) — the "whole system" scope of the `/model` wizard. Writes the
+   * same `defaultModel` / `defaultVariant` settings the web chat reads. Pass an
+   * empty/null variant to clear the effort.
+   */
+  async function setGlobalDefaultModel({ model, variant = null }) {
+    if (typeof persistSettings !== 'function') {
+      return { ok: false, error: 'settings are read-only on this server' };
+    }
+    try {
+      await persistSettings({ defaultModel: model ?? '', defaultVariant: variant ?? '' });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message ?? 'failed to save the default model' };
+    }
   }
 
   /**
@@ -4364,6 +4519,7 @@ export function createMessengerOpencodeBridge({
     getFavoriteModels,
     getSurfaceModelInfo,
     setSurfaceModel,
+    setGlobalDefaultModel,
     resendLastMessage,
     statusSnapshot,
     isEnabled,

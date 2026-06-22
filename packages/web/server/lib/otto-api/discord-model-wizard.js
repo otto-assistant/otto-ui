@@ -7,6 +7,7 @@ import {
   buildPagedOptions,
   stringSelect,
   buttonRow,
+  botHashFor,
   createWizardStore,
 } from './discord-wizard-shared.js';
 
@@ -20,13 +21,14 @@ import {
  *          → pick model
  *          → pick thinking-effort (only when the model exposes reasoning
  *            variants; skipped otherwise)
+ *          → pick scope (this conversation / this project / whole system)
  *          → confirmation + a "Send last message" button that replays the
  *            conversation's last prompt under the freshly-chosen model.
  *
- * The choice applies to the current conversation. Discord string-select menus
- * are capped at 25 options, so provider / model lists are paged via the shared
- * helpers. Wizard state is keyed by a short random hash embedded in each
- * component's `custom_id` and expires after {@link WIZARD_TTL_MS}.
+ * Discord string-select menus are capped at 25 options, so provider / model
+ * lists are paged via the shared helpers. Wizard state is keyed by a short
+ * random hash embedded in each component's `custom_id` and expires after
+ * {@link WIZARD_TTL_MS}.
  *
  * Kept free of gateway/WebSocket plumbing so it can be unit-tested in
  * isolation; the listener just delegates the matching interactions here.
@@ -38,6 +40,7 @@ export { WIZARD_TTL_MS, PAGE_SIZE, buildPagedOptions };
 const PROVIDER_PREFIX = 'otto-model-provider:';
 const MODEL_PREFIX = 'otto-model-model:';
 const EFFORT_PREFIX = 'otto-model-effort:';
+const SCOPE_PREFIX = 'otto-model-scope:';
 const RESEND_PREFIX = 'otto-model-resend:';
 
 const FAVORITES_ID = '__otto_favorites';
@@ -88,6 +91,7 @@ export function createDiscordModelWizard({ restCall, bridge }) {
       (customId.startsWith(PROVIDER_PREFIX) ||
         customId.startsWith(MODEL_PREFIX) ||
         customId.startsWith(EFFORT_PREFIX) ||
+        customId.startsWith(SCOPE_PREFIX) ||
         customId.startsWith(RESEND_PREFIX))
     );
   }
@@ -135,6 +139,15 @@ export function createDiscordModelWizard({ restCall, bridge }) {
       ...variants.map((v) => ({ label: v, value: v, description: `Thinking effort: ${v}`.slice(0, 100) })),
     ];
     return stringSelect(`${EFFORT_PREFIX}${hash}`, options, 'Select thinking effort');
+  }
+
+  function renderScopeSelect(hash) {
+    const options = [
+      { label: 'This conversation', value: 'conversation', description: 'Override for this thread/channel only' },
+      { label: 'This project', value: 'project', description: "Default for this conversation's project" },
+      { label: 'Whole system (default)', value: 'global', description: 'OpenChamber default model everywhere' },
+    ];
+    return stringSelect(`${SCOPE_PREFIX}${hash}`, options, 'Apply to…');
   }
 
   function currentLine(info) {
@@ -231,6 +244,9 @@ export function createDiscordModelWizard({ restCall, bridge }) {
     }
     if (customId.startsWith(EFFORT_PREFIX)) {
       return onEffortSelect(token, interaction, customId.slice(EFFORT_PREFIX.length));
+    }
+    if (customId.startsWith(SCOPE_PREFIX)) {
+      return onScopeSelect(token, interaction, customId.slice(SCOPE_PREFIX.length));
     }
     if (customId.startsWith(RESEND_PREFIX)) {
       return onResend(token, interaction, customId.slice(RESEND_PREFIX.length));
@@ -348,8 +364,9 @@ export function createDiscordModelWizard({ restCall, bridge }) {
       return;
     }
 
-    // No reasoning variants — apply straight away and offer the resend button.
-    await applyAndConfirm(wizard, hash, interaction, null);
+    // No reasoning variants — go straight to the scope picker.
+    wizard.selectedVariant = null;
+    await promptScope(wizard, hash, interaction);
   }
 
   async function onEffortSelect(token, interaction, hash) {
@@ -357,34 +374,77 @@ export function createDiscordModelWizard({ restCall, bridge }) {
     if (!wizard) return expired(token, interaction);
     const value = interaction.data?.values?.[0];
     if (!value) return;
-    const variant = value === EFFORT_NONE ? null : value;
-    await applyAndConfirm(wizard, hash, interaction, variant);
+    wizard.selectedVariant = value === EFFORT_NONE ? null : value;
+    await promptScope(wizard, hash, interaction);
   }
 
-  async function applyAndConfirm(wizard, hash, interaction, variant) {
-    wizard.selectedVariant = variant ?? null;
-    wizard.modelDisplay = wizard.selectedModelId;
+  async function promptScope(wizard, hash, interaction) {
     setWizard(hash, wizard);
+    const effortLine = wizard.selectedVariant ? ` · effort \`${wizard.selectedVariant}\`` : '';
+    await respond(wizard.token, interaction, {
+      type: 7,
+      data: {
+        content: `**Set model**\nModel: \`${wizard.selectedModelId}\`${effortLine}\nApply to:`,
+        flags: 64,
+        components: [renderScopeSelect(hash)],
+      },
+    });
+  }
+
+  async function onScopeSelect(token, interaction, hash) {
+    const wizard = getWizard(hash);
+    if (!wizard) return expired(token, interaction);
+    const scope = interaction.data?.values?.[0];
+    if (!scope) return;
+
+    const model = wizard.selectedModelId;
+    const variant = wizard.selectedVariant ?? null;
+    let scopeLabel = 'this conversation';
 
     try {
-      bridge?.setSurfaceModel?.({
-        type: 'discord',
-        token: wizard.token,
-        channelId: wizard.channelId,
-        threadId: null,
-        model: wizard.selectedModelId,
-        variant,
-      });
+      if (scope === 'global') {
+        const r = await bridge?.setGlobalDefaultModel?.({ model, variant });
+        scopeLabel = r?.ok === false ? 'this conversation (system default is read-only)' : 'the whole system';
+        if (r?.ok === false) {
+          bridge?.setSurfaceModel?.({ type: 'discord', token: wizard.token, channelId: wizard.channelId, threadId: null, model, variant });
+        }
+      } else if (scope === 'project') {
+        // Project scope needs the channel to resolve to a project; otherwise
+        // fall back to a conversation override so the choice still takes effect.
+        const binding = bridge?.store?.lookup?.({
+          type: 'discord',
+          botTokenHash: botHashFor(wizard.token),
+          targetKey: String(wizard.channelId),
+        });
+        if (binding?.projectPath) {
+          bridge?.store?.setProjectDefaults?.({
+            projectPath: binding.projectPath,
+            projectLabel: binding.projectLabel,
+            modelDefault: model,
+            variantDefault: variant,
+          });
+          scopeLabel = `project *${binding.projectLabel ?? binding.projectPath}*`;
+        } else {
+          bridge?.setSurfaceModel?.({ type: 'discord', token: wizard.token, channelId: wizard.channelId, threadId: null, model, variant });
+          scopeLabel = 'this conversation (no project bound yet)';
+        }
+      } else {
+        bridge?.setSurfaceModel?.({ type: 'discord', token: wizard.token, channelId: wizard.channelId, threadId: null, model, variant });
+        scopeLabel = 'this conversation';
+      }
     } catch {
       // best-effort — the reply still reflects the user's choice
     }
+
+    wizard.modelDisplay = model;
+    setWizard(hash, wizard);
 
     const effortLine = variant ? `\nThinking effort: \`${variant}\`` : '';
     await respond(wizard.token, interaction, {
       type: 7,
       data: {
         content:
-          `✓ Model for this conversation:\n\`${wizard.selectedModelId}\`${effortLine}\n\n` +
+          `✓ Model for ${scopeLabel}:\n\`${model}\`${effortLine}\n\n` +
           'Press **Send last message** to re-run your previous message with this model.',
         flags: 64,
         components: [

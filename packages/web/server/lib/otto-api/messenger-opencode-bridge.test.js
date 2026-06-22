@@ -1712,6 +1712,134 @@ describe('plain message supersedes an in-flight turn', () => {
   });
 });
 
+describe('session.error — clean, de-duplicated, no false "done"', () => {
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('posts one friendly DB-error line and suppresses the trailing done footer', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body });
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-e' ? { sessionId: 'ses-e', projectPath: '/p' } : null,
+      },
+    });
+
+    await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-e', threadId: null, text: 'hi',
+    });
+
+    const drizzle = {
+      name: 'UnknownError',
+      data: { message: 'EffectDrizzleQueryError: Failed query: insert into "message" ("id", "session_id") values (?, ?) on conflict' },
+    };
+    // OpenCode emits the same fault several times (message + each part).
+    for (const id of ['e1', 'e2', 'e3']) {
+      await bridge._handleGlobalEvent({
+        directory: '/p',
+        payload: { type: 'session.error', properties: { sessionID: 'ses-e', error: drizzle } },
+      });
+    }
+    // …then idles afterwards.
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.idle', properties: { sessionID: 'ses-e' } },
+    });
+    await flush();
+
+    const posted = calls
+      .filter((c) => c.method === 'POST' && c.url.includes('/channels/chan-e/messages'))
+      .map((c) => JSON.parse(c.body).content);
+
+    const errorLines = posted.filter((p) => p.startsWith('✗'));
+    expect(errorLines).toHaveLength(1); // de-duplicated
+    expect(errorLines[0]).toContain('database write error');
+    expect(errorLines[0]).not.toContain('insert into'); // raw SQL never leaks
+    expect(posted.some((p) => p.includes('done ·'))).toBe(false); // no false footer
+  });
+});
+
+describe('getSurfaceModelInfo — concrete model fallback', () => {
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('reports the bound session\'s actual model instead of "OpenCode default"', async () => {
+    globalThis.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/session/ses-x') && !u.includes('/message')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'ses-x', model: { providerID: 'anthropic', id: 'claude-x', variant: 'high' } }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-x' ? { sessionId: 'ses-x', projectPath: '/p' } : null,
+      },
+    });
+
+    const info = await bridge.getSurfaceModelInfo({ type: 'discord', token: 'bot-token', channelId: 'chan-x' });
+    expect(info).toEqual({ model: 'anthropic/claude-x', variant: 'high', source: 'session' });
+  });
+
+  it('falls back to the latest assistant message model when the session has none', async () => {
+    globalThis.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/session/ses-y/message')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { info: { role: 'user', id: 'm1' } },
+            { info: { role: 'assistant', id: 'm2', providerID: 'openai', modelID: 'gpt-x', variant: 'low' } },
+          ],
+          text: async () => '',
+        };
+      }
+      if (u.includes('/session/ses-y')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'ses-y' }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-y' ? { sessionId: 'ses-y', projectPath: '/p' } : null,
+      },
+    });
+
+    const info = await bridge.getSurfaceModelInfo({ type: 'discord', token: 'bot-token', channelId: 'chan-y' });
+    expect(info).toEqual({ model: 'openai/gpt-x', variant: 'low', source: 'session' });
+  });
+});
+
 describe('project ↔ channel lifecycle endpoints', () => {
   let originalFetch;
 
