@@ -4284,23 +4284,31 @@ export function createMessengerOpencodeBridge({
     let model = null;
     let variant = null;
     let source = null;
+    let sessionId = null;
+    let sessionProjectPath = null;
     try {
       const hash = tokenHash(token);
       const stableKey = targetKey({ type, channelId, threadId });
       const row = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
       let projectPath = row?.projectPath ?? null;
       let projectLabel = row?.projectLabel ?? null;
+      sessionId = row?.sessionId || null;
+      sessionProjectPath = row?.projectPath ?? null;
       if (row?.modelOverride) {
         model = row.modelOverride;
         variant = row.variantOverride ?? null;
         source = 'this conversation';
       }
-      if (!model && stableKey !== String(channelId)) {
+      if ((!model || !sessionId) && stableKey !== String(channelId)) {
         const parent = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: String(channelId) });
-        if (parent?.modelOverride) {
+        if (!model && parent?.modelOverride) {
           model = parent.modelOverride;
           variant = parent.variantOverride ?? null;
           source = 'this conversation';
+        }
+        if (!sessionId && parent?.sessionId) {
+          sessionId = parent.sessionId;
+          sessionProjectPath = parent.projectPath ?? sessionProjectPath;
         }
         if (!projectPath) {
           projectPath = parent?.projectPath ?? null;
@@ -4326,7 +4334,66 @@ export function createMessengerOpencodeBridge({
         source = 'OpenChamber default';
       }
     }
+    // Nothing configured at any layer — show the concrete model the bound
+    // session is actually running (OpenCode's own pick) instead of a vague
+    // "OpenCode default". Read it from the live session, same source the
+    // session-idle footer uses.
+    if (!model && sessionId) {
+      const live = await fetchSessionModel(sessionId, sessionProjectPath);
+      if (live?.model) {
+        model = live.model;
+        variant = live.variant ?? null;
+        source = 'session';
+      }
+    }
     return { model, variant, source };
+  }
+
+  /** `{ providerID, id|modelID, variant? }` → `{ model: 'provider/model', variant }`. */
+  function toModelRef(src, modelIdKey) {
+    if (!src || typeof src !== 'object') return null;
+    const providerId = src.providerID ?? src.providerId ?? '';
+    const modelId = src[modelIdKey] ?? '';
+    if (!providerId || !modelId) return null;
+    const variant = typeof src.variant === 'string' && src.variant.trim() ? src.variant.trim() : null;
+    return { model: `${providerId}/${modelId}`, variant };
+  }
+
+  /**
+   * Read the concrete model (and reasoning variant, when present) a session is
+   * actually running. Tries the session object's `model` first, then falls back
+   * to the latest assistant message's model (OpenCode 1.4+ nests it under
+   * `model`, older builds carry flat `providerID`/`modelID`). Returns null when
+   * the session has no model yet or the fetch fails.
+   */
+  async function fetchSessionModel(sessionId, projectPath) {
+    if (!sessionId) return null;
+    const dir = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
+    try {
+      const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}${dir}`);
+      if (r.ok) {
+        const d = await r.json().catch(() => null);
+        const ref = toModelRef(d?.model, 'id');
+        if (ref) return ref;
+      }
+    } catch {
+      // fall through to the message scan
+    }
+    try {
+      const r = await opencodeFetch(`/session/${encodeURIComponent(sessionId)}/message${dir}`);
+      if (!r.ok) return null;
+      const d = await r.json().catch(() => null);
+      const list = Array.isArray(d) ? d : Array.isArray(d?.data) ? d.data : [];
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const info = list[i]?.info ?? list[i];
+        if (!info || info.role !== 'assistant') continue;
+        const ref = toModelRef(info.model, 'id') ?? toModelRef(info, 'modelID');
+        if (ref) return ref;
+      }
+    } catch {
+      // best-effort
+    }
+    return null;
   }
 
   /**

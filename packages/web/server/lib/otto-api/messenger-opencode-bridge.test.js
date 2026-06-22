@@ -1712,6 +1712,75 @@ describe('plain message supersedes an in-flight turn', () => {
   });
 });
 
+describe('getSurfaceModelInfo — concrete model fallback', () => {
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('reports the bound session\'s actual model instead of "OpenCode default"', async () => {
+    globalThis.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/session/ses-x') && !u.includes('/message')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'ses-x', model: { providerID: 'anthropic', id: 'claude-x', variant: 'high' } }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-x' ? { sessionId: 'ses-x', projectPath: '/p' } : null,
+      },
+    });
+
+    const info = await bridge.getSurfaceModelInfo({ type: 'discord', token: 'bot-token', channelId: 'chan-x' });
+    expect(info).toEqual({ model: 'anthropic/claude-x', variant: 'high', source: 'session' });
+  });
+
+  it('falls back to the latest assistant message model when the session has none', async () => {
+    globalThis.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/session/ses-y/message')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { info: { role: 'user', id: 'm1' } },
+            { info: { role: 'assistant', id: 'm2', providerID: 'openai', modelID: 'gpt-x', variant: 'low' } },
+          ],
+          text: async () => '',
+        };
+      }
+      if (u.includes('/session/ses-y')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'ses-y' }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-y' ? { sessionId: 'ses-y', projectPath: '/p' } : null,
+      },
+    });
+
+    const info = await bridge.getSurfaceModelInfo({ type: 'discord', token: 'bot-token', channelId: 'chan-y' });
+    expect(info).toEqual({ model: 'openai/gpt-x', variant: 'low', source: 'session' });
+  });
+});
+
 describe('project ↔ channel lifecycle endpoints', () => {
   let originalFetch;
 
