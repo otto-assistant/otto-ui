@@ -66,7 +66,12 @@ export class MessengerBridgeStore {
     // /agent and /verbosity commands can scope a choice to a channel/topic
     // without touching the global OpenChamber settings. ALTER TABLE is run as
     // separate statements and ignored when the column already exists.
-    for (const col of ['model_override TEXT', 'agent_override TEXT', 'verbosity_override TEXT']) {
+    for (const col of [
+      'model_override TEXT',
+      'agent_override TEXT',
+      'verbosity_override TEXT',
+      'variant_override TEXT',
+    ]) {
       try {
         this.db.run(`ALTER TABLE messenger_session_bindings ADD COLUMN ${col}`);
       } catch {
@@ -99,6 +104,15 @@ export class MessengerBridgeStore {
         updated_at TEXT NOT NULL
       );
     `);
+    // Migrate older project-default tables that predate the verbosity/variant
+    // (thinking-effort) project scopes. Ignored when the column already exists.
+    for (const col of ['verbosity_default TEXT', 'variant_default TEXT']) {
+      try {
+        this.db.run(`ALTER TABLE messenger_project_defaults ADD COLUMN ${col}`);
+      } catch {
+        // ignore — column already exists
+      }
+    }
   }
 
   /** Raw key/value read from the global bridge settings table. */
@@ -146,6 +160,7 @@ export class MessengerBridgeStore {
       .prepare(
         `SELECT project_path AS projectPath, project_label AS projectLabel,
                 model_default AS modelDefault, agent_default AS agentDefault,
+                verbosity_default AS verbosityDefault, variant_default AS variantDefault,
                 updated_at AS updatedAt
            FROM messenger_project_defaults
           WHERE project_path = ?`,
@@ -155,28 +170,35 @@ export class MessengerBridgeStore {
   }
 
   /**
-   * Upsert project defaults. Pass `modelDefault: null` / `agentDefault: null`
-   * to clear that field; pass `undefined` to leave it untouched.
+   * Upsert project defaults. Pass `modelDefault: null` / `agentDefault: null` /
+   * `verbosityDefault: null` / `variantDefault: null` to clear that field; pass
+   * `undefined` to leave it untouched.
    */
-  setProjectDefaults({ projectPath, projectLabel, modelDefault, agentDefault }) {
+  setProjectDefaults({ projectPath, projectLabel, modelDefault, agentDefault, verbosityDefault, variantDefault }) {
     if (!projectPath) return;
     const now = new Date().toISOString();
     const existing = this.getProjectDefaults(projectPath);
     const nextModel = modelDefault === undefined ? existing?.modelDefault ?? null : modelDefault;
     const nextAgent = agentDefault === undefined ? existing?.agentDefault ?? null : agentDefault;
+    const nextVerbosity =
+      verbosityDefault === undefined ? existing?.verbosityDefault ?? null : verbosityDefault;
+    const nextVariant = variantDefault === undefined ? existing?.variantDefault ?? null : variantDefault;
     const nextLabel = projectLabel ?? existing?.projectLabel ?? null;
     this.db
       .prepare(
         `INSERT INTO messenger_project_defaults
-            (project_path, project_label, model_default, agent_default, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+            (project_path, project_label, model_default, agent_default,
+             verbosity_default, variant_default, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_path)
-         DO UPDATE SET project_label = excluded.project_label,
-                       model_default = excluded.model_default,
-                       agent_default = excluded.agent_default,
-                       updated_at    = excluded.updated_at`,
+         DO UPDATE SET project_label     = excluded.project_label,
+                       model_default     = excluded.model_default,
+                       agent_default     = excluded.agent_default,
+                       verbosity_default = excluded.verbosity_default,
+                       variant_default   = excluded.variant_default,
+                       updated_at        = excluded.updated_at`,
       )
-      .run(projectPath, nextLabel, nextModel, nextAgent, now);
+      .run(projectPath, nextLabel, nextModel, nextAgent, nextVerbosity, nextVariant, now);
   }
 
   /** List every project that has bridge defaults configured. */
@@ -185,6 +207,7 @@ export class MessengerBridgeStore {
       .prepare(
         `SELECT project_path AS projectPath, project_label AS projectLabel,
                 model_default AS modelDefault, agent_default AS agentDefault,
+                verbosity_default AS verbosityDefault, variant_default AS variantDefault,
                 updated_at AS updatedAt
            FROM messenger_project_defaults
           ORDER BY updated_at DESC`,
@@ -206,7 +229,8 @@ export class MessengerBridgeStore {
                 last_used_at AS lastUsedAt,
                 model_override AS modelOverride,
                 agent_override AS agentOverride,
-                verbosity_override AS verbosityOverride
+                verbosity_override AS verbosityOverride,
+                variant_override AS variantOverride
            FROM messenger_session_bindings
           WHERE type = ? AND bot_token_hash = ? AND target_key = ?`,
       )
@@ -218,7 +242,7 @@ export class MessengerBridgeStore {
    * Update per-surface preferences without touching the session binding.
    * Used by /model and /agent in-chat commands.
    */
-  setOverrides({ type, botTokenHash, targetKey, modelOverride, agentOverride, verbosityOverride }) {
+  setOverrides({ type, botTokenHash, targetKey, modelOverride, agentOverride, verbosityOverride, variantOverride }) {
     const sets = [];
     const params = [];
     if (modelOverride !== undefined) {
@@ -232,6 +256,10 @@ export class MessengerBridgeStore {
     if (verbosityOverride !== undefined) {
       sets.push('verbosity_override = ?');
       params.push(verbosityOverride ?? null);
+    }
+    if (variantOverride !== undefined) {
+      sets.push('variant_override = ?');
+      params.push(variantOverride ?? null);
     }
     if (sets.length === 0) return;
     params.push(type, botTokenHash, targetKey);

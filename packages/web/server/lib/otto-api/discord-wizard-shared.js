@@ -65,6 +65,23 @@ export function stringSelect(customId, options, placeholder) {
   };
 }
 
+/**
+ * A single-row action bar of buttons. Styles: 1=primary, 2=secondary,
+ * 3=success, 4=danger. Discord caps an action row at 5 buttons.
+ */
+export function buttonRow(buttons) {
+  return {
+    type: 1,
+    components: buttons.slice(0, 5).map((b) => ({
+      type: 2,
+      style: b.style ?? 1,
+      label: String(b.label ?? '').slice(0, 80),
+      custom_id: b.customId,
+      ...(b.emoji ? { emoji: b.emoji } : {}),
+    })),
+  };
+}
+
 /** Stable short hash of a bot token — used to scope per-surface store writes. */
 export function botHashFor(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 12);

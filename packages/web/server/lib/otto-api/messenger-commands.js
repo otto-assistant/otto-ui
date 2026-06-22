@@ -439,7 +439,7 @@ export async function executeMessengerCommand({
           };
         }
         if (value === 'reset' || value === 'clear') {
-          await surfaceMutators.setProjectDefaults({ modelDefault: null });
+          await surfaceMutators.setProjectDefaults({ modelDefault: null, variantDefault: null });
           return {
             reply: `✓ Project default model cleared for *${binding.projectLabel ?? binding.projectPath}*.`,
           };
@@ -450,22 +450,26 @@ export async function executeMessengerCommand({
               '✗ Use `/model default provider/model` (e.g. `/model default anthropic/claude-sonnet-4`).',
           };
         }
-        await surfaceMutators.setProjectDefaults({ modelDefault: value });
+        // A new model invalidates any saved thinking-effort (variants are
+        // model-specific), so clear it; the `/model` wizard re-sets effort.
+        await surfaceMutators.setProjectDefaults({ modelDefault: value, variantDefault: null });
         return {
           reply: `✓ Project default model set to \`${value}\` for *${binding.projectLabel ?? binding.projectPath}*. Every Discord session in this project uses it unless overridden.`,
         };
       }
       if (raw === 'reset' || raw === 'clear') {
-        await surfaceMutators.setOverrides({ modelOverride: null });
+        await surfaceMutators.setOverrides({ modelOverride: null, variantOverride: null });
         return { reply: '✓ Surface model override cleared — falling back to project default / OpenCode default.' };
       }
       if (!/^[^/]+\/[^/]+$/.test(raw)) {
         return {
           reply:
-            '✗ Use `/model provider/model` (e.g. `/model anthropic/claude-sonnet-4`), or `/model default provider/model` for project-wide. Run `/model` with no args to see the list.',
+            '✗ Use `/model provider/model` (e.g. `/model anthropic/claude-sonnet-4`), or `/model default provider/model` for project-wide. Run `/model` with no args to see the list. Use `/model` on Discord to also pick a thinking effort.',
         };
       }
-      await surfaceMutators.setOverrides({ modelOverride: raw });
+      // A new model invalidates any saved thinking-effort (variants are
+      // model-specific). The Discord `/model` wizard re-applies effort.
+      await surfaceMutators.setOverrides({ modelOverride: raw, variantOverride: null });
       return { reply: `✓ Model set to \`${raw}\` for this conversation.` };
     }
 
@@ -525,7 +529,10 @@ export async function executeMessengerCommand({
 
     case 'verbosity': {
       const effective =
-        binding?.verbosityOverride ?? binding?.verbosityDefault ?? 'normal';
+        binding?.verbosityOverride ??
+        binding?.projectDefaults?.verbosityDefault ??
+        binding?.verbosityDefault ??
+        'normal';
       if (!command.args) {
         const lines = [
           '**Output verbosity** — how much of each turn Otto mirrors back here',
@@ -537,10 +544,13 @@ export async function executeMessengerCommand({
         }
         lines.push('');
         lines.push(
-          'Set with `/verbosity verbose` (this conversation) or `/verbosity default verbose` (every channel/chat on this bot). `/verbosity reset` clears the conversation override.',
+          'Set with `/verbosity verbose` (this conversation), `/verbosity project verbose` (this project) or `/verbosity default verbose` (every channel/chat on this bot). `/verbosity reset` clears the conversation override.',
         );
         if (binding?.verbosityOverride) {
           lines.push('', `Conversation override: \`${binding.verbosityOverride}\``);
+        }
+        if (binding?.projectDefaults?.verbosityDefault) {
+          lines.push(`Project default: \`${binding.projectDefaults.verbosityDefault}\``);
         }
         if (binding?.verbosityDefault) {
           lines.push(`Messenger default: \`${binding.verbosityDefault}\``);
@@ -565,6 +575,33 @@ export async function executeMessengerCommand({
         await surfaceMutators.setVerbosityDefault(level);
         return {
           reply: `✓ Messenger default verbosity set to \`${level}\` — ${VERBOSITY_DESCRIPTIONS[level]}.`,
+        };
+      }
+
+      const projectMatch = raw.match(/^project\s+(.+)$/i);
+      if (projectMatch) {
+        const value = projectMatch[1].trim();
+        if (!binding?.projectPath) {
+          return {
+            reply:
+              '✗ This conversation has no project bound yet. Send a regular message first before setting project defaults.',
+          };
+        }
+        if (value === 'reset' || value === 'clear') {
+          await surfaceMutators.setProjectDefaults({ verbosityDefault: null });
+          return {
+            reply: `✓ Project default verbosity cleared for *${binding.projectLabel ?? binding.projectPath}*.`,
+          };
+        }
+        const level = parseVerbosityLevel(value);
+        if (!level) {
+          return {
+            reply: `✗ Unknown level. Use one of: ${VERBOSITY_LEVELS.map((l) => `\`${l}\``).join(', ')}.`,
+          };
+        }
+        await surfaceMutators.setProjectDefaults({ verbosityDefault: level });
+        return {
+          reply: `✓ Project default verbosity set to \`${level}\` for *${binding.projectLabel ?? binding.projectPath}* — ${VERBOSITY_DESCRIPTIONS[level]}.`,
         };
       }
 

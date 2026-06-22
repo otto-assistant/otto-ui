@@ -1646,6 +1646,72 @@ describe('/shell command — agent resolution (regression: empty agent 500s)', (
   });
 });
 
+describe('plain message supersedes an in-flight turn', () => {
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('aborts the running turn, defers the new prompt, then sends it on idle', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body });
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) =>
+          targetKey === 'chan-sup'
+            ? { sessionId: 'ses-sup', projectPath: '/p', projectLabel: 'P' }
+            : null,
+      },
+    });
+
+    const promptCalls = () =>
+      calls.filter((c) => c.method === 'POST' && c.url.includes('/session/ses-sup/prompt_async'));
+    const abortCalls = () =>
+      calls.filter((c) => c.method === 'POST' && c.url.includes('/session/ses-sup/abort'));
+
+    // First message → prompt sent, session now busy.
+    const first = await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-sup', threadId: null, text: 'first',
+    });
+    expect(first.ok).toBe(true);
+    expect(promptCalls()).toHaveLength(1);
+
+    // Second message while busy → abort fired, prompt deferred (not sent yet).
+    const second = await bridge.routeInbound({
+      type: 'discord', token: 'bot-token', channelId: 'chan-sup', threadId: null, text: 'second',
+    });
+    expect(second).toMatchObject({ ok: true, superseded: true });
+    expect(abortCalls()).toHaveLength(1);
+    expect(promptCalls()).toHaveLength(1); // still only the first prompt
+
+    // A short "stopped the current turn" notice is posted to the surface.
+    const notices = calls
+      .filter((c) => c.method === 'POST' && c.url.includes('/channels/chan-sup/messages'))
+      .map((c) => JSON.parse(c.body).content);
+    expect(notices.some((n) => /stopped the current turn/i.test(n))).toBe(true);
+
+    // The aborted turn settles → the deferred message is sent.
+    await bridge._handleGlobalEvent({
+      directory: '/p',
+      payload: { type: 'session.idle', properties: { sessionID: 'ses-sup' } },
+    });
+    await flush();
+
+    const sentBodies = promptCalls().map((c) => JSON.parse(c.body).parts[0].text);
+    expect(sentBodies).toContain('second');
+    expect(promptCalls()).toHaveLength(2);
+  });
+});
+
 describe('project ↔ channel lifecycle endpoints', () => {
   let originalFetch;
 
