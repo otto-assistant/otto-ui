@@ -123,6 +123,7 @@ export function createDiscordCommandWizards({ restCall, bridge }) {
 
     const scopeOptions = [
       { label: 'This conversation', value: 'surface', description: 'Override for this channel/thread only' },
+      { label: 'This project', value: 'project', description: "Default for this conversation's project" },
       { label: 'Whole system (default)', value: 'global', description: 'Default for every Discord conversation' },
     ];
     await respond(wizard.token, interaction, {
@@ -145,17 +146,34 @@ export function createDiscordCommandWizards({ restCall, bridge }) {
     let scopeLabel = 'this conversation';
     if (bridge?.store) {
       try {
+        const botTokenHash = botHashFor(wizard.token);
+        const targetKey = String(wizard.channelId);
+        // "This project" applies to every surface that lands in the channel's
+        // project. We can only do that when the channel already resolves to a
+        // project; otherwise fall back to a conversation override so the choice
+        // still takes effect immediately.
+        const binding =
+          scope === 'project'
+            ? bridge.store.lookup?.({ type: 'discord', botTokenHash, targetKey })
+            : null;
         if (scope === 'global') {
           bridge.store.setVerbosityDefault?.('discord', level);
           scopeLabel = 'every Discord conversation';
+        } else if (scope === 'project' && binding?.projectPath) {
+          bridge.store.setProjectDefaults?.({
+            projectPath: binding.projectPath,
+            projectLabel: binding.projectLabel,
+            verbosityDefault: level,
+          });
+          scopeLabel = `project *${binding.projectLabel ?? binding.projectPath}*`;
         } else {
           bridge.store.setOverrides?.({
             type: 'discord',
-            botTokenHash: botHashFor(wizard.token),
-            targetKey: String(wizard.channelId),
+            botTokenHash,
+            targetKey,
             verbosityOverride: level,
           });
-          scopeLabel = 'this conversation';
+          scopeLabel = scope === 'project' ? 'this conversation (no project bound yet)' : 'this conversation';
         }
       } catch {
         // best-effort — still confirm the user's choice below

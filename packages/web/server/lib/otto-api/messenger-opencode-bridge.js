@@ -587,6 +587,65 @@ export function createMessengerOpencodeBridge({
     return `${type}:${channelId}:${threadId ?? ''}`;
   }
 
+  // --- supersede support ---------------------------------------------------
+  // A plain (non-/queue) message cancels any in-flight turn and runs straight
+  // away — /queue is the opt-in "wait your turn" path. Because OpenCode's abort
+  // settles asynchronously (session.idle / session.error over SSE), we stash
+  // the superseding send here and fire it only once the aborted turn settles,
+  // so its idle event can't clear `busySessions` out from under the new turn.
+  /** @type {Map<string, () => Promise<unknown>>} */
+  const pendingSupersede = new Map();
+  const SUPERSEDE_FALLBACK_MS = 8000;
+
+  /** Run (and clear) a stashed superseding send for a session, if any. */
+  function runSupersede(sessionId, ctx) {
+    const resume = pendingSupersede.get(sessionId);
+    if (!resume) return false;
+    pendingSupersede.delete(sessionId);
+    if (ctx) {
+      ctx.sentPartIds.clear();
+      ctx.startedAt = Date.now();
+    }
+    busySessions.delete(sessionId);
+    void resume();
+    return true;
+  }
+
+  /**
+   * Safety net for the supersede path: if OpenCode never emits idle/error for
+   * the aborted turn, run the stashed send anyway after a short grace period so
+   * the user's new message is never stranded.
+   */
+  function scheduleSupersedeFallback(sessionId) {
+    const timer = setTimeout(() => {
+      if (pendingSupersede.has(sessionId)) {
+        runSupersede(sessionId, sessionContexts.get(sessionId));
+      }
+    }, SUPERSEDE_FALLBACK_MS);
+    timer.unref?.();
+  }
+
+  // Last user prompt per surface, so the `/model` wizard's "Send last message"
+  // button can replay it under the freshly-chosen model. Keyed by the same
+  // token-scoped surface key the bindings use (thread id when in a thread, else
+  // channel id) so the wizard — which runs in the conversation channel — finds
+  // it regardless of how the thread was spawned. Bounded.
+  /** @type {Map<string, string>} */
+  const lastPromptBySurface = new Map();
+  const LAST_PROMPT_CACHE_MAX = 500;
+  function lastPromptKey({ type, token, channelId, threadId }) {
+    return `${tokenHash(token)}:${targetKey({ type, channelId, threadId: threadId ?? null })}`;
+  }
+  function rememberLastPrompt(surface, text) {
+    if (!text || typeof text !== 'string') return;
+    const key = lastPromptKey(surface);
+    if (!lastPromptBySurface.has(key) && lastPromptBySurface.size >= LAST_PROMPT_CACHE_MAX) {
+      const oldest = lastPromptBySurface.keys().next().value;
+      if (oldest !== undefined) lastPromptBySurface.delete(oldest);
+    }
+    lastPromptBySurface.set(key, text);
+  }
+
   // messageID → role ('user' | 'assistant'). OpenCode's `message.part.updated`
   // events do NOT carry the message role — it lives on the separate
   // `message.updated` event (`properties.info.role`). We cache it here so the
@@ -877,7 +936,7 @@ export function createMessengerOpencodeBridge({
     return data?.id ?? data?.sessionID ?? data?.session_id ?? data;
   }
 
-  async function sendOpencodePrompt({ sessionId, projectPath, text, modelOverride, agentOverride, extraParts = [] }) {
+  async function sendOpencodePrompt({ sessionId, projectPath, text, modelOverride, agentOverride, variantOverride, extraParts = [] }) {
     const params = projectPath ? `?directory=${encodeURIComponent(projectPath)}` : '';
     const parts = [{ type: 'text', text }];
     for (const part of extraParts) {
@@ -887,6 +946,11 @@ export function createMessengerOpencodeBridge({
     if (modelOverride && /^[^/]+\/[^/]+$/.test(modelOverride)) {
       const [providerID, ...rest] = modelOverride.split('/');
       body.model = { providerID, modelID: rest.join('/') };
+      // Thinking-effort: OpenCode reads the reasoning variant off `model.variant`
+      // (same field the web chat sends). Only attach it when a model is set.
+      if (variantOverride && typeof variantOverride === 'string') {
+        body.model.variant = variantOverride;
+      }
     }
     if (agentOverride) body.agent = agentOverride;
     const r = await opencodeFetch(
@@ -1876,7 +1940,8 @@ export function createMessengerOpencodeBridge({
   /**
    * Resolve the effective verbosity for a surface at render time.
    * Resolution order: surface override (`/verbosity X`) → parent-channel
-   * override (for thread follow-ups) → per-messenger UI default → `normal`.
+   * override (for thread follow-ups) → per-project default → per-messenger UI
+   * default → `normal`.
    */
   function resolveVerbosity({ type, token, channelId, threadId }) {
     const hash = tokenHash(token);
@@ -1884,6 +1949,7 @@ export function createMessengerOpencodeBridge({
     let level = null;
     try {
       const row = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      let projectPath = row?.projectPath ?? null;
       level = row?.verbosityOverride ?? null;
       if (!level && stableKey !== String(channelId)) {
         const parent = bridgeStore.lookup({
@@ -1892,6 +1958,12 @@ export function createMessengerOpencodeBridge({
           targetKey: String(channelId),
         });
         level = parent?.verbosityOverride ?? null;
+        if (!projectPath) projectPath = parent?.projectPath ?? null;
+      }
+      // Per-project default — the layer the user can set once and have apply to
+      // every Discord surface that lands in this project.
+      if (!level && projectPath) {
+        level = bridgeStore.getProjectDefaults?.(projectPath)?.verbosityDefault ?? null;
       }
       if (!level) level = bridgeStore.getVerbosityDefault?.(type) ?? null;
     } catch {
@@ -2312,6 +2384,12 @@ export function createMessengerOpencodeBridge({
     }
     if (type === 'session.idle') {
       const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      // A plain message superseded this turn — the abort just settled. Skip the
+      // "done" footer / queue drain and fire the stashed new message instead.
+      if (sessionId && pendingSupersede.has(sessionId)) {
+        runSupersede(sessionId, sessionContexts.get(sessionId));
+        return;
+      }
       const ctx = sessionId ? sessionContexts.get(sessionId) : null;
       if (!ctx) {
         const defaultCtx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
@@ -2411,6 +2489,12 @@ export function createMessengerOpencodeBridge({
     }
     if (type === 'session.error') {
       const sessionId = props?.sessionID ?? props?.sessionId ?? null;
+      // A plain message superseded this turn — the abort settled as an error.
+      // Fire the stashed new message instead of surfacing the abort as a fault.
+      if (sessionId && pendingSupersede.has(sessionId)) {
+        runSupersede(sessionId, sessionContexts.get(sessionId));
+        return;
+      }
       if (sessionId) busySessions.delete(sessionId);
       const ctx = sessionId ? sessionContexts.get(sessionId) : null;
       if (!ctx) {
@@ -3287,6 +3371,7 @@ export function createMessengerOpencodeBridge({
         projectLabel: stored?.projectLabel ?? null,
         modelOverride: stored?.modelOverride ?? null,
         agentOverride: stored?.agentOverride ?? null,
+        variantOverride: stored?.variantOverride ?? null,
         verbosityOverride: stored?.verbosityOverride ?? null,
         verbosityDefault: bridgeStore.getVerbosityDefault?.(type) ?? null,
         projectDefaults,
@@ -3596,6 +3681,14 @@ export function createMessengerOpencodeBridge({
     // carries the project's MEMORY.md as persistent context. The scheduling
     // instructions ride along so the agent can self-serve reminders /
     // recurring tasks via the local API when the user asks.
+    // Remember the user's raw prompt (before any project-memory / scheduling
+    // context is prepended) so the `/model` wizard's "Send last message" button
+    // can replay it under a freshly-chosen model.
+    rememberLastPrompt(
+      { type, token, channelId, threadId: effectiveThreadId },
+      text,
+    );
+
     if (sessionCreated) {
       const contextBlocks = [];
       const memory = await readProjectMemory(effectiveProjectPath);
@@ -3682,11 +3775,18 @@ export function createMessengerOpencodeBridge({
     //   4. OpenCode default   — nothing set, server picks
     let modelOverride = pinnedModel ?? null;
     let agentOverride = pinnedAgent ?? null;
+    // Thinking-effort (model variant). Only meaningful alongside a surface- or
+    // project-set model, so it's resolved from the SAME source that supplied the
+    // model and never inherited across a different model layer.
+    let variantOverride = null;
     try {
       const hash = tokenHash(token);
       const stableKey = targetKey({ type, channelId, threadId: effectiveThreadId });
       const surfaceRow = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
-      modelOverride = modelOverride ?? surfaceRow?.modelOverride ?? null;
+      if (!modelOverride && surfaceRow?.modelOverride) {
+        modelOverride = surfaceRow.modelOverride;
+        variantOverride = surfaceRow.variantOverride ?? null;
+      }
       agentOverride = agentOverride ?? surfaceRow?.agentOverride ?? null;
 
       // Parent channel fallback (Discord follow-ups in a thread carry a
@@ -3698,7 +3798,10 @@ export function createMessengerOpencodeBridge({
           targetKey: String(channelId),
         });
         if (parent) {
-          modelOverride = modelOverride ?? parent.modelOverride ?? null;
+          if (!modelOverride && parent.modelOverride) {
+            modelOverride = parent.modelOverride;
+            variantOverride = parent.variantOverride ?? null;
+          }
           agentOverride = agentOverride ?? parent.agentOverride ?? null;
         }
       }
@@ -3708,7 +3811,10 @@ export function createMessengerOpencodeBridge({
       if ((!modelOverride || !agentOverride) && effectiveProjectPath) {
         const pd = bridgeStore.getProjectDefaults?.(effectiveProjectPath);
         if (pd) {
-          modelOverride = modelOverride ?? pd.modelDefault ?? null;
+          if (!modelOverride && pd.modelDefault) {
+            modelOverride = pd.modelDefault;
+            variantOverride = pd.variantDefault ?? null;
+          }
           agentOverride = agentOverride ?? pd.agentDefault ?? null;
         }
       }
@@ -3725,31 +3831,54 @@ export function createMessengerOpencodeBridge({
       // ignore — overrides are optional
     }
 
-    try {
-      await sendOpencodePrompt({
+    const sendPrompt = async () => {
+      try {
+        await sendOpencodePrompt({
+          sessionId,
+          projectPath: effectiveProjectPath,
+          text,
+          modelOverride,
+          agentOverride,
+          variantOverride,
+          extraParts: extraFileParts,
+        });
+      } catch (err) {
+        const errMsg = err?.message ?? 'prompt failed';
+        stopTypingPulse(ctx);
+        await postToSurface(ctx, `⚠ Otto could not reach OpenCode: ${escapeMd(clipBlock(errMsg, 300))}`);
+        return { ok: false, sessionId, threadId: effectiveThreadId, error: errMsg };
+      }
+
+      broadcastEvent?.('messenger.bridge.inbound', {
+        type,
+        channelId,
+        threadId: effectiveThreadId,
         sessionId,
-        projectPath: effectiveProjectPath,
         text,
-        modelOverride,
-        agentOverride,
-        extraParts: extraFileParts,
       });
-    } catch (err) {
-      const errMsg = err?.message ?? 'prompt failed';
-      stopTypingPulse(ctx);
-      await postToSurface(ctx, `⚠ Otto could not reach OpenCode: ${escapeMd(clipBlock(errMsg, 300))}`);
-      return { ok: false, sessionId, threadId: effectiveThreadId, error: errMsg };
+
+      return { ok: true, sessionId, threadId: effectiveThreadId };
+    };
+
+    // A plain message (not /queue'd) supersedes any in-flight turn: cancel the
+    // current work and run this one as soon as the aborted turn settles. /queue
+    // is the opt-in path for "wait for the current response to finish".
+    if (busySessions.has(sessionId)) {
+      pendingSupersede.set(sessionId, sendPrompt);
+      void postToSurface(ctx, '⏹ _Stopped the current turn to run your new message._');
+      const aborted = await opencodeAdapter
+        .abortSession(sessionId, effectiveProjectPath ?? undefined)
+        .catch(() => ({ ok: false }));
+      if (!aborted?.ok) {
+        // Abort failed — don't strand the message; run it right away.
+        pendingSupersede.delete(sessionId);
+        return sendPrompt();
+      }
+      scheduleSupersedeFallback(sessionId);
+      return { ok: true, sessionId, threadId: effectiveThreadId, superseded: true };
     }
 
-    broadcastEvent?.('messenger.bridge.inbound', {
-      type,
-      channelId,
-      threadId: effectiveThreadId,
-      sessionId,
-      text,
-    });
-
-    return { ok: true, sessionId, threadId: effectiveThreadId };
+    return sendPrompt();
   }
 
   function statusSnapshot({ type, token } = {}) {
@@ -4115,6 +4244,116 @@ export function createMessengerOpencodeBridge({
     }
   }
 
+  /**
+   * The user's UI favourite models (Settings → favourite models), used by the
+   * `/model` wizard's "⭐ Favourites" pseudo-provider. Returns an array of
+   * `{ providerID, modelID }`; empty when none are configured or unavailable.
+   */
+  async function getFavoriteModels() {
+    if (typeof readSettings !== 'function') return [];
+    try {
+      const settings = await readSettings();
+      const list = Array.isArray(settings?.favoriteModels) ? settings.favoriteModels : [];
+      const out = [];
+      const seen = new Set();
+      for (const m of list) {
+        const providerID = typeof m?.providerID === 'string' ? m.providerID.trim() : '';
+        const modelID = typeof m?.modelID === 'string' ? m.modelID.trim() : '';
+        if (!providerID || !modelID) continue;
+        const key = `${providerID}/${modelID}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ providerID, modelID });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Resolve the effective model + thinking-effort (variant) for a surface, the
+   * same way {@link routeInbound} does, so the `/model` wizard can show what's
+   * currently in effect before the user changes it.
+   */
+  async function getSurfaceModelInfo({ type, token, channelId, threadId = null }) {
+    let model = null;
+    let variant = null;
+    let source = null;
+    try {
+      const hash = tokenHash(token);
+      const stableKey = targetKey({ type, channelId, threadId });
+      const row = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: stableKey });
+      let projectPath = row?.projectPath ?? null;
+      let projectLabel = row?.projectLabel ?? null;
+      if (row?.modelOverride) {
+        model = row.modelOverride;
+        variant = row.variantOverride ?? null;
+        source = 'this conversation';
+      }
+      if (!model && stableKey !== String(channelId)) {
+        const parent = bridgeStore.lookup({ type, botTokenHash: hash, targetKey: String(channelId) });
+        if (parent?.modelOverride) {
+          model = parent.modelOverride;
+          variant = parent.variantOverride ?? null;
+          source = 'this conversation';
+        }
+        if (!projectPath) {
+          projectPath = parent?.projectPath ?? null;
+          projectLabel = parent?.projectLabel ?? null;
+        }
+      }
+      if (!model && projectPath) {
+        const pd = bridgeStore.getProjectDefaults?.(projectPath);
+        if (pd?.modelDefault) {
+          model = pd.modelDefault;
+          variant = pd.variantDefault ?? null;
+          source = `project default (${projectLabel ?? projectPath})`;
+        }
+      }
+    } catch {
+      // best-effort
+    }
+    if (!model) {
+      const globals = await resolveGlobalDefaults();
+      if (globals.model) {
+        model = globals.model;
+        source = 'OpenChamber default';
+      }
+    }
+    return { model, variant, source };
+  }
+
+  /**
+   * Persist a conversation-scoped model + thinking-effort choice (the `/model`
+   * wizard applies to the current conversation). Pass `variant: null` to clear
+   * the effort.
+   */
+  function setSurfaceModel({ type, token, channelId, threadId = null, model, variant = null }) {
+    bridgeStore.setOverrides({
+      type,
+      botTokenHash: tokenHash(token),
+      targetKey: targetKey({ type, channelId, threadId }),
+      modelOverride: model ?? null,
+      variantOverride: variant ?? null,
+    });
+  }
+
+  /**
+   * Replay the surface's last user prompt (used by the `/model` wizard's "Send
+   * last message" button). Goes through {@link routeInbound} so the new model /
+   * effort apply and any in-flight turn is superseded.
+   */
+  async function resendLastMessage({ type, token, channelId, threadId = null, from = null }) {
+    const key = lastPromptKey({ type, token, channelId, threadId });
+    const text = lastPromptBySurface.get(key) ?? null;
+    if (!text) return { ok: false, error: 'no previous message to resend' };
+    const result = await routeInbound({ type, token, channelId, threadId, text, from });
+    return result?.ok
+      ? { ok: true, text }
+      : { ok: false, error: result?.error ?? 'send failed' };
+  }
+
   return {
     routeInbound,
     runCommand,
@@ -4122,6 +4361,10 @@ export function createMessengerOpencodeBridge({
     /** List configured OpenCode agents (for the Discord `/agent` picker). */
     listAgents: () => opencodeAdapter.listAgents(),
     fetchProviders,
+    getFavoriteModels,
+    getSurfaceModelInfo,
+    setSurfaceModel,
+    resendLastMessage,
     statusSnapshot,
     isEnabled,
     ensureSubscribed,

@@ -27,7 +27,7 @@ function makeHarness({ agents = [], skills = [] } = {}) {
     },
   };
   const wizards = createDiscordCommandWizards({ restCall, bridge });
-  return { wizards, calls, overrides, verbosityDefaults, projectDefaults, routed };
+  return { wizards, bridge, calls, overrides, verbosityDefaults, projectDefaults, routed };
 }
 
 function customIdOf(call) {
@@ -51,7 +51,7 @@ describe('verbosity wizard', () => {
 
     await wizards.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['verbose'] } }, levelCustomId);
     const scopeCustomId = customIdOf(calls.at(-1));
-    expect(optionValues(calls.at(-1))).toEqual(['surface', 'global']);
+    expect(optionValues(calls.at(-1))).toEqual(['surface', 'project', 'global']);
 
     await wizards.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['surface'] } }, scopeCustomId);
     expect(overrides).toEqual([
@@ -69,6 +69,21 @@ describe('verbosity wizard', () => {
     const scopeCustomId = customIdOf(calls.at(-1));
     await wizards.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['global'] } }, scopeCustomId);
     expect(verbosityDefaults).toEqual([{ type: 'discord', level: 'quiet' }]);
+    expect(overrides).toHaveLength(0);
+  });
+
+  it('level → "project" scope writes a project default when a project is bound', async () => {
+    const { wizards, bridge, calls, overrides, projectDefaults } = makeHarness();
+    // The project scope needs the channel to resolve to a project binding.
+    bridge.store.lookup = () => ({ projectPath: '/proj', projectLabel: 'Proj' });
+    await wizards.startVerbosity(state, interaction);
+    const levelCustomId = customIdOf(calls.at(-1));
+    await wizards.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['verbose'] } }, levelCustomId);
+    const scopeCustomId = customIdOf(calls.at(-1));
+    await wizards.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['project'] } }, scopeCustomId);
+    expect(projectDefaults).toEqual([
+      { projectPath: '/proj', projectLabel: 'Proj', verbosityDefault: 'verbose' },
+    ]);
     expect(overrides).toHaveLength(0);
   });
 });

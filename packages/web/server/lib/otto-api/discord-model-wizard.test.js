@@ -67,30 +67,35 @@ describe('modelsOf', () => {
   });
 });
 
-/** A restCall recorder + a bridge stub backed by a fake store. */
-function makeHarness(providers) {
+/** A restCall recorder + a bridge stub. */
+function makeHarness(providers, { favorites = [], current = null } = {}) {
   const calls = [];
   const restCall = async (token, method, path, body) => {
     calls.push({ token, method, path, body });
     return { ok: true, status: 200, body: {} };
   };
-  const overrides = [];
-  const projectDefaults = [];
+  const setModels = [];
+  const resends = [];
   const bridge = {
     fetchProviders: async () => ({ all: providers, connected: providers.map((p) => p.id) }),
-    store: {
-      setOverrides: (o) => overrides.push(o),
-      setProjectDefaults: (o) => projectDefaults.push(o),
-      lookup: () => null,
+    getFavoriteModels: async () => favorites,
+    getSurfaceModelInfo: async () => current,
+    setSurfaceModel: (o) => setModels.push(o),
+    resendLastMessage: async (o) => {
+      resends.push(o);
+      return { ok: true, text: 'previous message' };
     },
   };
   const wizard = createDiscordModelWizard({ restCall, bridge });
-  return { wizard, calls, overrides, projectDefaults };
+  return { wizard, calls, setModels, resends };
 }
 
 function lastSelectValues(call) {
   const select = call.body?.data?.components?.[0]?.components?.[0];
   return select?.options?.map((o) => o.value) ?? [];
+}
+function lastCustomId(call) {
+  return call.body?.data?.components?.[0]?.components?.[0]?.custom_id;
 }
 
 describe('createDiscordModelWizard flow', () => {
@@ -98,39 +103,82 @@ describe('createDiscordModelWizard flow', () => {
   const manyModels = Array.from({ length: 40 }, (_, i) => ({ id: `m${i}`, name: `m${i}` }));
   const providers = [{ id: 'anthropic', name: 'Anthropic', models: manyModels }];
 
-  it('paginates the model list and records a channel override on selection', async () => {
-    const { wizard, calls, overrides } = makeHarness(providers);
+  it('shows the current model, paginates models, and applies a conversation override', async () => {
+    const { wizard, calls, setModels } = makeHarness(providers, {
+      current: { model: 'anthropic/m1', variant: null, source: 'this conversation' },
+    });
 
-    // /model → provider select shown
+    // /model → provider select shown with the current model line
     await wizard.start(state, { id: 'i1', token: 't1', channel_id: 'chan', application_id: 'app' });
     const providerSelect = calls.at(-1);
-    const provCustomId = providerSelect.body.data.components[0].components[0].custom_id;
+    expect(providerSelect.body.data.content).toContain('anthropic/m1');
+    const provCustomId = lastCustomId(providerSelect);
     expect(wizard.ownsComponent(provCustomId)).toBe(true);
 
     // pick the provider → first page of models (23 + "More ▶")
     await wizard.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['anthropic'] } }, provCustomId);
     const modelPage0 = calls.at(-1);
-    const modelCustomId = modelPage0.body.data.components[0].components[0].custom_id;
+    const modelCustomId = lastCustomId(modelPage0);
     expect(lastSelectValues(modelPage0)).toContain('m0');
     expect(lastSelectValues(modelPage0)).toContain('__otto_next');
     expect(lastSelectValues(modelPage0)).not.toContain(`m${PAGE_SIZE}`);
 
     // page forward → second page reveals models past the first 23
     await wizard.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['__otto_next'] } }, modelCustomId);
-    const modelPage1 = calls.at(-1);
-    expect(lastSelectValues(modelPage1)).toContain(`m${PAGE_SIZE}`);
-    expect(lastSelectValues(modelPage1)).toContain('__otto_prev');
+    expect(lastSelectValues(calls.at(-1))).toContain(`m${PAGE_SIZE}`);
+    expect(lastSelectValues(calls.at(-1))).toContain('__otto_prev');
 
-    // pick a model from page 2 → scope select
+    // pick a model with no variants → applies immediately + resend button
     await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['m30'] } }, modelCustomId);
-    const scopeSelect = calls.at(-1);
-    const scopeCustomId = scopeSelect.body.data.components[0].components[0].custom_id;
-
-    // choose channel scope → override stored as provider/model
-    await wizard.handleComponent(state, { id: 'i5', token: 't5', data: { values: ['channel'] } }, scopeCustomId);
-    expect(overrides).toHaveLength(1);
-    expect(overrides[0]).toMatchObject({ type: 'discord', targetKey: 'chan', modelOverride: 'anthropic/m30' });
+    expect(setModels).toHaveLength(1);
+    expect(setModels[0]).toMatchObject({ type: 'discord', channelId: 'chan', model: 'anthropic/m30', variant: null });
     const final = calls.at(-1);
     expect(final.body.data.content).toContain('anthropic/m30');
+    const button = final.body.data.components[0].components[0];
+    expect(button.type).toBe(2);
+    expect(wizard.ownsComponent(button.custom_id)).toBe(true);
+  });
+
+  it('asks for thinking effort when the model has variants and stores it', async () => {
+    const withVariants = [
+      { id: 'gpt', name: 'GPT', models: [{ id: 'o3', name: 'o3', variants: { low: {}, high: {} } }] },
+    ];
+    const { wizard, calls, setModels } = makeHarness(withVariants);
+    await wizard.start(state, { id: 'i1', token: 't1', channel_id: 'chan', application_id: 'app' });
+    const provCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['gpt'] } }, provCustomId);
+    const modelCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['o3'] } }, modelCustomId);
+    const effortSelect = calls.at(-1);
+    expect(effortSelect.body.data.content).toContain('thinking effort');
+    const effortCustomId = lastCustomId(effortSelect);
+    expect(lastSelectValues(effortSelect)).toEqual(['__otto_effort_none', 'low', 'high']);
+
+    await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['high'] } }, effortCustomId);
+    expect(setModels).toHaveLength(1);
+    expect(setModels[0]).toMatchObject({ model: 'gpt/o3', variant: 'high' });
+  });
+
+  it('adds a ⭐ Favourites pseudo-provider and replays the last message via the button', async () => {
+    const { wizard, calls, setModels, resends } = makeHarness(providers, {
+      favorites: [{ providerID: 'anthropic', modelID: 'm5' }],
+    });
+    await wizard.start(state, { id: 'i1', token: 't1', channel_id: 'chan', application_id: 'app' });
+    const provSelect = calls.at(-1);
+    expect(lastSelectValues(provSelect)).toContain('__otto_favorites');
+    const provCustomId = lastCustomId(provSelect);
+
+    await wizard.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['__otto_favorites'] } }, provCustomId);
+    const modelSelect = calls.at(-1);
+    expect(lastSelectValues(modelSelect)).toEqual(['anthropic/m5']);
+    const modelCustomId = lastCustomId(modelSelect);
+
+    await wizard.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['anthropic/m5'] } }, modelCustomId);
+    expect(setModels[0]).toMatchObject({ model: 'anthropic/m5', variant: null });
+    const buttonCustomId = lastCustomId(calls.at(-1));
+
+    await wizard.handleComponent(state, { id: 'i4', token: 't4', data: {} }, buttonCustomId);
+    expect(resends).toHaveLength(1);
+    expect(resends[0]).toMatchObject({ type: 'discord', channelId: 'chan' });
   });
 });
