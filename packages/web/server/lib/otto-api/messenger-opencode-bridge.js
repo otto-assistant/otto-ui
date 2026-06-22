@@ -542,7 +542,7 @@ export function createMessengerOpencodeBridge({
   }
 
   async function resolveGlobalDefaults() {
-    if (!getGlobalDefaults) return { model: null, agent: null };
+    if (!getGlobalDefaults) return { model: null, agent: null, variant: null };
     try {
       const d = await getGlobalDefaults();
       const model =
@@ -550,9 +550,10 @@ export function createMessengerOpencodeBridge({
           ? d.model.trim()
           : null;
       const agent = typeof d?.agent === 'string' && d.agent.trim() ? d.agent.trim() : null;
-      return { model, agent };
+      const variant = typeof d?.variant === 'string' && d.variant.trim() ? d.variant.trim() : null;
+      return { model, agent, variant };
     } catch {
-      return { model: null, agent: null };
+      return { model: null, agent: null, variant: null };
     }
   }
 
@@ -3824,7 +3825,10 @@ export function createMessengerOpencodeBridge({
       // the messenger doesn't silently run on some unexpected provider default.
       if (!modelOverride || !agentOverride) {
         const globals = await resolveGlobalDefaults();
-        modelOverride = modelOverride ?? globals.model ?? null;
+        if (!modelOverride && globals.model) {
+          modelOverride = globals.model;
+          variantOverride = globals.variant ?? null;
+        }
         agentOverride = agentOverride ?? globals.agent ?? null;
       }
     } catch {
@@ -4318,10 +4322,29 @@ export function createMessengerOpencodeBridge({
       const globals = await resolveGlobalDefaults();
       if (globals.model) {
         model = globals.model;
+        variant = globals.variant ?? null;
         source = 'OpenChamber default';
       }
     }
     return { model, variant, source };
+  }
+
+  /**
+   * Set the OpenChamber-wide default model + thinking-effort (Settings →
+   * Defaults) — the "whole system" scope of the `/model` wizard. Writes the
+   * same `defaultModel` / `defaultVariant` settings the web chat reads. Pass an
+   * empty/null variant to clear the effort.
+   */
+  async function setGlobalDefaultModel({ model, variant = null }) {
+    if (typeof persistSettings !== 'function') {
+      return { ok: false, error: 'settings are read-only on this server' };
+    }
+    try {
+      await persistSettings({ defaultModel: model ?? '', defaultVariant: variant ?? '' });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message ?? 'failed to save the default model' };
+    }
   }
 
   /**
@@ -4364,6 +4387,7 @@ export function createMessengerOpencodeBridge({
     getFavoriteModels,
     getSurfaceModelInfo,
     setSurfaceModel,
+    setGlobalDefaultModel,
     resendLastMessage,
     statusSnapshot,
     isEnabled,

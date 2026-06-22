@@ -68,26 +68,36 @@ describe('modelsOf', () => {
 });
 
 /** A restCall recorder + a bridge stub. */
-function makeHarness(providers, { favorites = [], current = null } = {}) {
+function makeHarness(providers, { favorites = [], current = null, binding = null } = {}) {
   const calls = [];
   const restCall = async (token, method, path, body) => {
     calls.push({ token, method, path, body });
     return { ok: true, status: 200, body: {} };
   };
   const setModels = [];
+  const projectDefaults = [];
+  const globalDefaults = [];
   const resends = [];
   const bridge = {
     fetchProviders: async () => ({ all: providers, connected: providers.map((p) => p.id) }),
     getFavoriteModels: async () => favorites,
     getSurfaceModelInfo: async () => current,
     setSurfaceModel: (o) => setModels.push(o),
+    setGlobalDefaultModel: async (o) => {
+      globalDefaults.push(o);
+      return { ok: true };
+    },
+    store: {
+      lookup: () => binding,
+      setProjectDefaults: (o) => projectDefaults.push(o),
+    },
     resendLastMessage: async (o) => {
       resends.push(o);
       return { ok: true, text: 'previous message' };
     },
   };
   const wizard = createDiscordModelWizard({ restCall, bridge });
-  return { wizard, calls, setModels, resends };
+  return { wizard, calls, setModels, projectDefaults, globalDefaults, resends };
 }
 
 function lastSelectValues(call) {
@@ -128,8 +138,14 @@ describe('createDiscordModelWizard flow', () => {
     expect(lastSelectValues(calls.at(-1))).toContain(`m${PAGE_SIZE}`);
     expect(lastSelectValues(calls.at(-1))).toContain('__otto_prev');
 
-    // pick a model with no variants → applies immediately + resend button
+    // pick a model with no variants → scope picker (conversation/project/system)
     await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['m30'] } }, modelCustomId);
+    const scopeSelect = calls.at(-1);
+    expect(lastSelectValues(scopeSelect)).toEqual(['conversation', 'project', 'global']);
+    const scopeCustomId = lastCustomId(scopeSelect);
+
+    // choose "this conversation" → surface override stored + resend button
+    await wizard.handleComponent(state, { id: 'i5', token: 't5', data: { values: ['conversation'] } }, scopeCustomId);
     expect(setModels).toHaveLength(1);
     expect(setModels[0]).toMatchObject({ type: 'discord', channelId: 'chan', model: 'anthropic/m30', variant: null });
     const final = calls.at(-1);
@@ -139,7 +155,7 @@ describe('createDiscordModelWizard flow', () => {
     expect(wizard.ownsComponent(button.custom_id)).toBe(true);
   });
 
-  it('asks for thinking effort when the model has variants and stores it', async () => {
+  it('asks for thinking effort when the model has variants, then scope', async () => {
     const withVariants = [
       { id: 'gpt', name: 'GPT', models: [{ id: 'o3', name: 'o3', variants: { low: {}, high: {} } }] },
     ];
@@ -155,8 +171,41 @@ describe('createDiscordModelWizard flow', () => {
     expect(lastSelectValues(effortSelect)).toEqual(['__otto_effort_none', 'low', 'high']);
 
     await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['high'] } }, effortCustomId);
+    const scopeCustomId = lastCustomId(calls.at(-1));
+    expect(lastSelectValues(calls.at(-1))).toEqual(['conversation', 'project', 'global']);
+
+    await wizard.handleComponent(state, { id: 'i5', token: 't5', data: { values: ['conversation'] } }, scopeCustomId);
     expect(setModels).toHaveLength(1);
     expect(setModels[0]).toMatchObject({ model: 'gpt/o3', variant: 'high' });
+  });
+
+  it('project scope writes a project default when a project is bound', async () => {
+    const { wizard, calls, projectDefaults } = makeHarness(providers, {
+      binding: { projectPath: '/proj', projectLabel: 'Proj' },
+    });
+    await wizard.start(state, { id: 'i1', token: 't1', channel_id: 'chan', application_id: 'app' });
+    const provCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['anthropic'] } }, provCustomId);
+    const modelCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['m0'] } }, modelCustomId);
+    const scopeCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['project'] } }, scopeCustomId);
+    expect(projectDefaults).toEqual([
+      { projectPath: '/proj', projectLabel: 'Proj', modelDefault: 'anthropic/m0', variantDefault: null },
+    ]);
+  });
+
+  it('whole-system scope writes the OpenChamber default model', async () => {
+    const { wizard, calls, globalDefaults } = makeHarness(providers);
+    await wizard.start(state, { id: 'i1', token: 't1', channel_id: 'chan', application_id: 'app' });
+    const provCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i2', token: 't2', data: { values: ['anthropic'] } }, provCustomId);
+    const modelCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['m0'] } }, modelCustomId);
+    const scopeCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['global'] } }, scopeCustomId);
+    expect(globalDefaults).toEqual([{ model: 'anthropic/m0', variant: null }]);
+    expect(calls.at(-1).body.data.content).toContain('whole system');
   });
 
   it('adds a ⭐ Favourites pseudo-provider and replays the last message via the button', async () => {
@@ -174,10 +223,12 @@ describe('createDiscordModelWizard flow', () => {
     const modelCustomId = lastCustomId(modelSelect);
 
     await wizard.handleComponent(state, { id: 'i3', token: 't3', data: { values: ['anthropic/m5'] } }, modelCustomId);
+    const scopeCustomId = lastCustomId(calls.at(-1));
+    await wizard.handleComponent(state, { id: 'i4', token: 't4', data: { values: ['conversation'] } }, scopeCustomId);
     expect(setModels[0]).toMatchObject({ model: 'anthropic/m5', variant: null });
     const buttonCustomId = lastCustomId(calls.at(-1));
 
-    await wizard.handleComponent(state, { id: 'i4', token: 't4', data: {} }, buttonCustomId);
+    await wizard.handleComponent(state, { id: 'i5', token: 't5', data: {} }, buttonCustomId);
     expect(resends).toHaveLength(1);
     expect(resends[0]).toMatchObject({ type: 'discord', channelId: 'chan' });
   });
