@@ -56,6 +56,7 @@ export function getNodePath(pathSegments: string[]): string {
   }
   return result;
 }
+
 let nodeCount = 0;
 
 function buildTreeNode(

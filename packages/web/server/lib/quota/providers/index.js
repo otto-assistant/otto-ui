@@ -14,7 +14,6 @@ import * as cursor from './cursor.js';
 import * as google from './google/index.js';
 import * as kimi from './kimi.js';
 import * as nanogpt from './nanogpt.js';
-import * as openai from './openai.js';
 import * as openrouter from './openrouter.js';
 import * as zai from './zai.js';
 import * as zhipuaiCodingPlan from './zhipuai-coding-plan.js';
@@ -164,21 +163,3 @@ export const fetchQuotaForProvider = async (providerId) => {
     });
   }
 };
-
-export const fetchClaudeQuota = claude.fetchQuota;
-export const fetchOpenaiQuota = openai.fetchQuota;
-export const fetchGoogleQuota = google.fetchGoogleQuota;
-export const fetchCodexQuota = codex.fetchQuota;
-export const fetchCursorQuota = cursor.fetchQuota;
-export const fetchCopilotQuota = copilot.fetchQuota;
-export const fetchCopilotAddonQuota = copilot.fetchQuotaAddon;
-export const fetchKimiQuota = kimi.fetchQuota;
-export const fetchOpenRouterQuota = openrouter.fetchQuota;
-export const fetchZaiQuota = zai.fetchQuota;
-export const fetchZhipuaiCodingPlanQuota = zhipuaiCodingPlan.fetchQuota;
-export const fetchNanoGptQuota = nanogpt.fetchQuota;
-export const fetchMinimaxCodingPlanQuota = minimaxCodingPlan.fetchQuota;
-export const fetchMinimaxCnCodingPlanQuota = minimaxCnCodingPlan.fetchQuota;
-export const fetchOllamaCloudQuota = ollamaCloud.fetchQuota;
-export const fetchWaferQuota = wafer.fetchQuota;
-export const fetchZhipuaiQuota = zhipuaiCodingPlan.fetchQuota;

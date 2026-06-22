@@ -18,7 +18,6 @@ export const DedicatedMobileAppProvider: React.FC<{
 }> = ({ actions, children }) => (
   <DedicatedMobileAppContext.Provider value={actions}>{children}</DedicatedMobileAppContext.Provider>
 );
-
 /**
  * Returns the dedicated mobile app's surface-opening actions, or null when
  * not inside the dedicated mobile root. Components living in shared chat /
