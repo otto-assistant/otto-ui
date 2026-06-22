@@ -5,7 +5,6 @@ import { flattenAssistantTextParts } from '@/lib/messages/messageText';
 import {
   getOriginalSessionID,
   getReviewSessionID,
-  getSessionMetadata,
   isReviewSession,
   withoutReviewSessionLink,
   withReviewSessionLink,
@@ -286,5 +285,3 @@ export const getReviewTransferDirection = (session: Session | null | undefined):
   if (getReviewSessionID(session)) return 'original-to-review';
   return null;
 };
-
-export const readSessionReviewMetadata = (session: Session | null | undefined) => getSessionMetadata(session);
