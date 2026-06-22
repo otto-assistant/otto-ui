@@ -720,24 +720,6 @@ export async function checkoutBranch(directory: string, branch: string): Promise
 }
 
 /**
- * Detach HEAD at current commit
- * This allows the current branch to be used in a worktree
- */
-export async function detachHead(directory: string): Promise<{ success: boolean; commit: string }> {
-  // Get current HEAD commit
-  const headResult = await execGit(['rev-parse', 'HEAD'], directory);
-  if (headResult.exitCode !== 0) {
-    return { success: false, commit: '' };
-  }
-  
-  const commit = headResult.stdout.trim();
-  
-  // Checkout the commit directly to detach HEAD
-  const result = await execGit(['checkout', '--detach', 'HEAD'], directory);
-  return { success: result.exitCode === 0, commit };
-}
-
-/**
  * Get the current HEAD branch name (null if detached)
  */
 export async function getCurrentBranch(directory: string): Promise<string | null> {
@@ -2051,43 +2033,6 @@ export async function removeWorktree(directory: string, input: RemoveGitWorktree
   clearWorktreeBootstrapState(matchedEntry.worktree);
 
   return true;
-}
-
-/**
- * Get branches that are available for worktree checkout
- * (branches not already checked out in any worktree)
- */
-export async function getAvailableBranchesForWorktree(directory: string): Promise<GitBranchDetails[]> {
-  const [branches, worktrees] = await Promise.all([
-    getGitBranches(directory),
-    listGitWorktrees(directory),
-  ]);
-
-  // Get set of branches already checked out in worktrees
-  const checkedOutBranches = new Set<string>();
-  for (const wt of worktrees) {
-    if (wt.branch) {
-      checkedOutBranches.add(wt.branch.replace(/^refs\/heads\//, ''));
-    }
-  }
-
-  // Filter out branches that are already checked out
-  const availableBranches: GitBranchDetails[] = [];
-  for (const name of branches.all) {
-    // Skip remote branches for worktree creation
-    if (name.startsWith('remotes/')) {
-      continue;
-    }
-    
-    if (!checkedOutBranches.has(name)) {
-      const details = branches.branches[name];
-      if (details) {
-        availableBranches.push(details);
-      }
-    }
-  }
-
-  return availableBranches;
 }
 
 // ============== Diff Operations ==============

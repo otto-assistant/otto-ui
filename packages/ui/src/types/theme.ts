@@ -284,8 +284,3 @@ export interface AccessibilityIssue {
   context: string;
 }
 
-export interface AccessibilityReport {
-  wcagAA: boolean;
-  wcagAAA: boolean;
-  issues: AccessibilityIssue[];
-}

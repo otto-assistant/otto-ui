@@ -36,15 +36,6 @@ export const isDesktopWindowFullscreen = async (): Promise<boolean> => {
   }
 };
 
-export const onDesktopWindowResized = (handler: () => void): (() => void) => {
-  if (typeof window === 'undefined') {
-    return () => {};
-  }
-
-  window.addEventListener('resize', handler);
-  return () => window.removeEventListener('resize', handler);
-};
-
 export const setDesktopWindowTitle = async (title: string): Promise<void> => {
   if (!isDesktopShell()) {
     return;
@@ -91,18 +82,3 @@ export const readDesktopFile = async (
   return invokeDesktopCommand('desktop_read_file', { path });
 };
 
-export const readDesktopFileAsDataUrl = async (path: string): Promise<string> => {
-  const result = await readDesktopFile(path);
-  return `data:${result.mime || 'application/octet-stream'};base64,${result.base64}`;
-};
-
-export const listenDesktopNativeDragDrop = async (
-  handler: (event: unknown) => void,
-): Promise<(() => void) | null> => {
-  if (!isDesktopShell() || typeof window === 'undefined') {
-    return null;
-  }
-
-  void handler;
-  return null;
-};

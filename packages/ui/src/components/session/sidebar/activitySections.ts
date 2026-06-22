@@ -42,5 +42,3 @@ export const deriveRecentSessions = (
   });
   return sortSessionsByUpdated(recent);
 };
-
-export const getSessionUpdatedAtMs = getSessionUpdatedAt;

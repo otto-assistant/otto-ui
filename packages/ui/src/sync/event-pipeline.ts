@@ -23,8 +23,6 @@ export type QueuedEvent = {
   payload: Event
 }
 
-export type FlushHandler = (events: QueuedEvent[]) => void
-
 const FLUSH_FRAME_MS = 33
 const BACKPRESSURE_FLUSH_FRAME_MS = 200
 const BACKPRESSURE_MODE_MS = 10_000

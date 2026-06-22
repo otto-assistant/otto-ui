@@ -1209,8 +1209,6 @@ export type McpRemoteConfig = {
   enabled?: boolean;
 };
 
-export type McpConfigPayload = McpLocalConfig | McpRemoteConfig;
-
 export type McpConfigEntry = {
   name: string;
   scope?: AgentScope | null;

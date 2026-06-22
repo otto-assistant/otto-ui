@@ -536,7 +536,4 @@ export const MergedReasoningPart = React.memo(({
     );
 });
 
-// eslint-disable-next-line react-refresh/only-export-components
-export const formatReasoningText = (text: string): string => cleanReasoningText(text);
-
 export default ReasoningPart;

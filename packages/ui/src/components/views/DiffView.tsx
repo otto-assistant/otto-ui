@@ -1695,21 +1695,3 @@ export const DiffView: React.FC<DiffViewProps> = ({
     );
 };
 
-// eslint-disable-next-line react-refresh/only-export-components
-export const useDiffFileCount = (): number => {
-    const { git } = useRuntimeAPIs();
-    const effectiveDirectory = useEffectiveDirectory();
-
-    const setActiveDirectory = useGitStore((state) => state.setActiveDirectory);
-    const ensureStatus = useGitStore((state) => state.ensureStatus);
-    const fileCount = useGitFileCount(effectiveDirectory ?? null);
-
-    React.useEffect(() => {
-        if (effectiveDirectory) {
-            setActiveDirectory(effectiveDirectory);
-            void ensureStatus(effectiveDirectory, git);
-        }
-    }, [effectiveDirectory, setActiveDirectory, ensureStatus, git]);
-
-    return fileCount;
-};

@@ -67,17 +67,3 @@ export const SIDEBAR_SECTIONS: SidebarSectionConfig[] = [
         icon: "settings-3",
     },
 ];
-
-const sidebarSectionLabels = {} as Record<SidebarSection, string>;
-const sidebarSectionDescriptions = {} as Record<SidebarSection, string>;
-const sidebarSectionConfigMap = {} as Record<SidebarSection, SidebarSectionConfig>;
-
-SIDEBAR_SECTIONS.forEach((section) => {
-    sidebarSectionLabels[section.id] = section.label;
-    sidebarSectionDescriptions[section.id] = section.description;
-    sidebarSectionConfigMap[section.id] = section;
-});
-
-export const SIDEBAR_SECTION_LABELS = sidebarSectionLabels;
-export const SIDEBAR_SECTION_DESCRIPTIONS = sidebarSectionDescriptions;
-export const SIDEBAR_SECTION_CONFIG_MAP = sidebarSectionConfigMap;
