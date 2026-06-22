@@ -24,10 +24,8 @@ import {
   type MessengerType,
   type MessengerConnection,
   type MessengerVerbosity,
-  type SyncMode,
   type MessengerDiagnosisCheck,
   type MessengerInboundMessage,
-  type MessengerApproval,
 } from '@/stores/useMessengerStore';
 import { useOttoEventsStore, type OttoUiRealtimeEvent } from '@/stores/useOttoEventsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -61,28 +59,18 @@ const MESSENGER_META: Record<MessengerType, MessengerMeta> = {
         >
           discord.com/developers <RiExternalLinkLine className="size-3" />
         </a>{' '}
-        → New Application → Bot tab → Reset Token. Make sure the{' '}
-        <em>Message Content</em> intent is enabled if you want Otto to read replies.
+        → Bot → Reset Token. Enable the <em>Message Content</em> intent so Otto can read replies.
       </>
     ),
     targetLabel: 'Channel ID',
     targetPlaceholder: 'e.g. 1234567890123456789',
     targetHelp: (
       <>
-        In Discord, open <em>Settings → Advanced → Developer Mode</em>, then right-click the target
-        text channel and choose <strong>"Copy Channel ID"</strong>. Your bot must already be a
-        member of that server and have <em>View Channel</em> + <em>Send Messages</em> permission —
-        if not, use the invite link above first.
+        Enable Developer Mode, then right-click a text channel → <strong>Copy Channel ID</strong>.
       </>
     ),
   },
 };
-
-const SYNC_MODES: { id: SyncMode; label: string; desc: string }[] = [
-  { id: 'full', label: 'Full Sync', desc: 'Projects as channels, sessions as threads, all messages' },
-  { id: 'notifications', label: 'Notifications', desc: 'Task completions, schedule triggers, errors' },
-  { id: 'off', label: 'Off', desc: 'Connected but no automatic sync' },
-];
 
 const VERBOSITY_OPTIONS: { id: MessengerVerbosity; label: string; desc: string }[] = [
   { id: 'quiet', label: 'Quiet', desc: 'Final answer only — hides reasoning and tool activity' },
@@ -364,11 +352,8 @@ function DiscordListenerPanel({
           either the bot has no channel access, or MESSAGE_CONTENT is off. */}
       {connected && (conn.discordListenerTotalRawMessages ?? 0) === 0 && (
         <div className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground leading-snug">
-          Gateway connected — IDENTIFY accepted. Post a message in a channel the bot can see to
-          confirm end-to-end. If nothing arrives:
-          (1) the bot must have <em>View Channel</em> on that channel,
-          (2) <em>Message Content</em> intent must be enabled in the Developer Portal, then
-          restart the listener for the new intent to apply.
+          Connected. If messages don't arrive, give the bot <em>View Channel</em> access and enable
+          the <em>Message Content</em> intent, then restart the listener.
         </div>
       )}
 
@@ -381,11 +366,7 @@ function DiscordListenerPanel({
 
       {!running ? (
         <div className="text-[11px] text-muted-foreground leading-snug">
-          Start the listener so Otto can answer messages sent to the bot. Otto opens a
-          Discord Gateway WebSocket and listens to <code className="bg-muted px-1 rounded">MESSAGE_CREATE</code>{' '}
-          and <code className="bg-muted px-1 rounded">INTERACTION_CREATE</code> (button clicks). You'll need to{' '}
-          enable <em>Message Content Intent</em> in the Developer Portal for the bot to see the body of
-          non-mention messages.
+          Start the listener so Otto can answer messages sent to the bot.
         </div>
       ) : inbound.length === 0 ? (
         <div className="text-[11px] text-muted-foreground italic">
@@ -561,128 +542,6 @@ function DiscordDiagnosePanel({
   );
 }
 
-function ApprovalsPanel({
-  type,
-  approvals,
-  onSendDemo,
-}: {
-  type: MessengerType;
-  approvals: MessengerApproval[];
-  onSendDemo: () => Promise<MessengerApproval | null>;
-}) {
-  const subscribeToEvents = useOttoEventsStore((s) => s.subscribeToEvents);
-  const ingestApprovalDecision = useMessengerStore((s) => s.ingestApprovalDecision);
-  const [sending, setSending] = useState(false);
-
-  useEffect(() => {
-    const handler = (event: OttoUiRealtimeEvent) => {
-      if (event.eventType !== 'messenger.discord.approval') return;
-      const d = event.data as
-        | {
-            approvalId: string;
-            decision: 'approve' | 'approve-always' | 'deny';
-            by?: { username?: string | null; firstName?: string | null; displayName?: string | null };
-          }
-        | undefined;
-      if (!d?.approvalId || !d.decision) return;
-      const byName =
-        d.by?.displayName || d.by?.firstName || d.by?.username || null;
-      ingestApprovalDecision(d.approvalId, d.decision, byName);
-    };
-    return subscribeToEvents(handler);
-  }, [type, subscribeToEvents, ingestApprovalDecision]);
-
-  return (
-    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
-          <RiCheckLine className="size-3.5 text-primary" />
-          Approve actions
-          <span className="text-[10px] font-normal text-muted-foreground">
-            ({approvals.filter((a) => !a.decision && !a.error).length} pending)
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={async () => {
-            setSending(true);
-            try {
-              await onSendDemo();
-            } finally {
-              setSending(false);
-            }
-          }}
-          disabled={sending}
-          className="inline-flex items-center gap-1 rounded bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20 disabled:opacity-50"
-        >
-          {sending ? <RiLoader4Line className="size-3.5 animate-spin" /> : <RiSendPlaneLine className="size-3.5" />}
-          Send approval request
-        </button>
-      </div>
-      <div className="text-[11px] text-muted-foreground leading-snug">
-        Otto can post a message with Approve / Deny buttons. When you (or someone in the chat)
-        click a button, the listener pipes the decision back here in real time.
-      </div>
-      {approvals.length === 0 ? (
-        <div className="text-[11px] text-muted-foreground italic">
-          No approval requests sent yet. Click "Send approval request" to try it.
-        </div>
-      ) : (
-        <ul className="space-y-1">
-          {approvals.slice(0, 5).map((a) => (
-            <li
-              key={a.id}
-              className="rounded bg-background border border-border px-2 py-1.5 text-[11px] space-y-0.5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span
-                  className={cn(
-                    'font-medium',
-                    a.decision && a.decision !== 'deny'
-                      ? 'text-green-600 dark:text-green-400'
-                      : a.decision === 'deny'
-                        ? 'text-destructive'
-                        : a.error
-                          ? 'text-destructive'
-                          : 'text-yellow-600 dark:text-yellow-400',
-                  )}
-                >
-                  {a.decision
-                    ? a.decision === 'deny'
-                      ? `✗ Denied by ${a.decidedBy ?? 'user'}`
-                      : a.decision === 'approve-always'
-                        ? `✓ Always allowed by ${a.decidedBy ?? 'user'}`
-                        : `✓ Approved by ${a.decidedBy ?? 'user'}`
-                    : a.error
-                      ? '✗ Failed to send'
-                      : '⏳ Waiting for response'}
-                </span>
-                <span className="text-[9px] text-muted-foreground shrink-0">
-                  {formatRelative(a.decidedAt ?? a.sentAt)}
-                </span>
-              </div>
-              <div className="text-muted-foreground break-words">
-                {a.permissionTool && (
-                  <span className="inline-block px-1 py-0.5 mr-1 rounded bg-muted text-[9px] font-mono text-foreground/70 uppercase">
-                    {a.permissionTool}
-                  </span>
-                )}
-                {a.prompt}
-              </div>
-              {a.permissionContext && (
-                <pre className="text-[9px] font-mono text-muted-foreground bg-muted/50 rounded px-1.5 py-1 mt-0.5 overflow-hidden max-h-12 leading-snug">
-                  {a.permissionContext}
-                </pre>
-              )}
-              {a.error && <div className="text-destructive">{a.error}</div>}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 function BridgePanel({
   conn,
   type,
@@ -739,13 +598,8 @@ function BridgePanel({
         </label>
       </div>
       <div className="text-[11px] text-muted-foreground leading-snug">
-        When on, every non-command message posted to a channel is forwarded to an OpenCode
-        session in the matching project's directory. The bridge{' '}
-        <strong>auto-resolves project ↔ channel</strong> by slug-matching the channel name
-        against your project labels — no manual mapping needed. OpenCode's streaming response
-        is edited back into the same channel, so the conversation is shared with the web UI.
-        (Manual mapping is still available below if you want a specific override; restart the
-        listener after toggling.)
+        Forwards channel messages to an OpenCode session in the matching project and streams the
+        reply back, so the conversation is shared with the web UI.
       </div>
       {!bridgeStatus.enabled && (
         <div className="text-[10px] text-yellow-700 dark:text-yellow-400">
@@ -753,9 +607,7 @@ function BridgePanel({
         </div>
       )}
 
-      {/* Output verbosity — how much of each OpenCode turn is mirrored back.
-          Mirrors the in-chat `/verbosity` command; the per-conversation
-          `/verbosity <level>` override always wins over this default. */}
+      {/* Output verbosity — how much of each OpenCode turn is mirrored back. */}
       <div className="space-y-1.5 border-t border-border/60 pt-2">
         <div className="text-[11px] font-medium text-foreground">Output verbosity</div>
         <div className="flex gap-1">
@@ -778,12 +630,7 @@ function BridgePanel({
           ))}
         </div>
         <div className="text-[10px] text-muted-foreground leading-snug">
-          {VERBOSITY_OPTIONS.find((o) => o.id === currentVerbosity)?.desc}. Change it from
-          Discord too with{' '}
-          <code className="bg-muted px-1 rounded">/verbosity {currentVerbosity}</code> (this
-          conversation) or <code className="bg-muted px-1 rounded">/verbosity default verbose</code>{' '}
-          (everywhere). At <strong>Verbose</strong>, commands, diffs, outputs and reasoning are
-          posted in full, formatted for reading.
+          {VERBOSITY_OPTIONS.find((o) => o.id === currentVerbosity)?.desc}.
         </div>
       </div>
 
@@ -812,26 +659,6 @@ function BridgePanel({
           {active.length === 1 ? '' : 's'} streaming…
         </div>
       )}
-    </div>
-  );
-}
-
-function ScheduledPromptsHint() {
-  // Scheduling lives in OpenChamber's per-project scheduler (sidebar →
-  // Scheduled tasks) — the Discord /schedule command writes into the same
-  // store, so there is no separate messenger scheduler to manage here.
-  return (
-    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-1">
-      <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
-        <RiRefreshLine className="size-3.5 text-primary" />
-        Scheduled prompts
-      </div>
-      <div className="text-[11px] text-muted-foreground leading-snug">
-        Discord <code className="bg-muted px-1 rounded">/schedule</code> creates tasks in the
-        project scheduler — the same one as the sidebar&apos;s <span className="text-foreground">Scheduled tasks</span> dialog,
-        so tasks stay in sync across Discord, the web UI and the agent.
-        Example: <code className="bg-muted px-1 rounded">/schedule 0 9 * * 1 Run the weekly tests</code>.
-      </div>
     </div>
   );
 }
@@ -946,8 +773,6 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   const discordHistory = useMessengerStore((s) => s.discordHistory);
   const loadDiscordHistory = useMessengerStore((s) => s.loadDiscordHistory);
   const saveDiscordConfig = useMessengerStore((s) => s.saveDiscordConfig);
-  const sendApprovalRequest = useMessengerStore((s) => s.sendApprovalRequest);
-  const approvals = useMessengerStore((s) => s.approvals);
   const projects = useProjectsStore((s) => s.projects);
   const projectMappings = useMessengerStore((s) => s.projectMappings);
   const setProjectMapping = useMessengerStore((s) => s.setProjectMapping);
@@ -972,9 +797,16 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
   // Auto-save Discord config to server-side settings.json on mount so that
   // the server-side auto-start on reboot picks it up. Runs when the
   // ConnectionCard first renders (user visits Messenger settings page).
+  //
+  // Also re-verify the saved token so the working status reflects reality on
+  // open. The persisted store resets `status` to 'disconnected' on every reload
+  // (the token is the only durable signal), which otherwise made the page show
+  // the integration as "not working" until the user manually clicked Verify.
   useEffect(() => {
-    if (conn.botToken) {
-      saveDiscordConfig();
+    if (!conn.botToken) return;
+    saveDiscordConfig();
+    if (conn.status !== 'connected' && conn.status !== 'connecting') {
+      testConnection('discord');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1279,11 +1111,8 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
           {!conn.discordGuildId ? (
             <>
               <div className="text-[11px] text-muted-foreground leading-snug">
-                Paste the Discord <strong>server ID</strong> (right-click the server name in the
-                channel list → "Copy Server ID" with Developer Mode on) to let Otto sync to every
-                channel + thread on that server. With this set,{' '}
-                <strong>Sync now</strong> will find-or-create one channel per Otto project under
-                an optional category and start a thread per project for details.
+                Right-click the server name → <strong>Copy Server ID</strong> to sync a channel per
+                project across the whole server.
               </div>
               <div className="flex gap-2">
                 <input
@@ -1507,8 +1336,7 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
         <div className="space-y-2">
           <div className="text-xs font-medium text-foreground">Your Discord user ID (optional)</div>
           <div className="text-[11px] text-muted-foreground leading-snug">
-            Threads Otto opens from the web UI are auto-joined by this user, so they show up under the
-            channel for you. Enable Developer Mode, then right-click your name → "Copy User ID".
+            Auto-joins web-created threads so they show up for you. Right-click your name → Copy User ID.
           </div>
           <input
             type="text"
@@ -1626,70 +1454,6 @@ function ConnectionCard({ conn }: { conn: MessengerConnection }) {
       {conn.lastSyncChannels && conn.lastSyncChannels.length > 0 && (
         <DiscordSyncResults channels={conn.lastSyncChannels} guildName={conn.guildName} />
       )}
-
-      {/* Scheduled prompts — one-time or recurring sends into Discord/projects. */}
-      {hasToken && (hasTarget || conn.discordGuildId) && (
-        <ScheduledPromptsHint />
-      )}
-
-      {/* Approval requests panel — only rendered when this card has a usable target. */}
-      {hasToken && (hasTarget || conn.discordGuildId) && (
-        <ApprovalsPanel
-          type={conn.type}
-          approvals={approvals.filter((a) => a.type === conn.type)}
-          onSendDemo={() =>
-            sendApprovalRequest(
-              conn.type,
-              'Approve project sync run? This is a demo request from the Otto settings page.',
-            )
-          }
-        />
-      )}
-
-      {/* Sync mode */}
-      <div className="space-y-1.5">
-        <div className="text-xs font-medium text-foreground">Sync Mode</div>
-        <div className="flex gap-1">
-          {SYNC_MODES.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              onClick={() => updateConnection(conn.type, { syncMode: mode.id })}
-              className={cn(
-                'flex-1 rounded-md px-2 py-1.5 text-[10px] font-medium transition-colors',
-                conn.syncMode === mode.id
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-muted text-muted-foreground hover:text-foreground',
-              )}
-              title={mode.desc}
-            >
-              {mode.label}
-            </button>
-          ))}
-        </div>
-        <div className="text-[10px] text-muted-foreground">
-          {SYNC_MODES.find((m) => m.id === conn.syncMode)?.desc}
-        </div>
-      </div>
-
-      {/* Sync options */}
-      <div className="flex flex-wrap gap-3 text-xs">
-        {(['syncProjects', 'syncTasks', 'syncSchedule', 'autoCreateThreads'] as const).map(
-          (key) => (
-            <label key={key} className="flex items-center gap-1.5 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={conn[key]}
-                onChange={(e) => updateConnection(conn.type, { [key]: e.target.checked })}
-                className="rounded border-border accent-primary"
-              />
-              <span className="text-muted-foreground">
-                {key.replace(/([A-Z])/g, ' $1').replace('sync ', '').trim()}
-              </span>
-            </label>
-          ),
-        )}
-      </div>
 
       {/* Project ↔ Channel mappings (advanced) */}
       {conn.syncProjects && projects.length > 0 && (

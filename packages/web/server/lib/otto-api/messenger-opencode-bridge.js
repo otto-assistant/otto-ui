@@ -156,6 +156,23 @@ function generateApprovalId() {
 }
 
 /**
+ * True when an Approve/Deny message for this OpenCode permission/request id is
+ * still live (posted, not yet decided or expired). This is the strongest
+ * dedupe signal because it is tied to an actual outstanding Discord message:
+ * it survives `forwardedPermissionIds` pruning, SSE redelivery, and reconcile
+ * re-forwarding. Without it, a single permission whose id briefly drops out of
+ * the pending-list snapshot used to spawn a brand-new approval message on every
+ * reconcile cycle (the "approvals duplicated many times" bug).
+ */
+function hasLiveApprovalForRequest(requestID) {
+  if (!requestID) return false;
+  for (const ctx of approvalContexts.values()) {
+    if (ctx && typeof ctx === 'object' && ctx.requestID === requestID) return true;
+  }
+  return false;
+}
+
+/**
  * Post an approval-request message with Approve / Deny buttons.
  * Returns { ok, approvalId, messageId } or { ok, error }.
  */
@@ -2475,6 +2492,11 @@ export function createMessengerOpencodeBridge({
       // Recorded synchronously before the async send so a concurrent reconcile
       // pass can't double-surface the same permission.
       if (permission.id) {
+        // Hard stop: a previous Approve/Deny message for this exact request is
+        // still actionable. This guards against the in-memory `forwarded` set
+        // being pruned (or lost) while the permission is genuinely pending, the
+        // root cause of approvals arriving duplicated many times.
+        if (hasLiveApprovalForRequest(permission.id)) return;
         if (forwardedPermissionIds.has(permission.id)) return;
         forwardedPermissionIds.add(permission.id);
       }
@@ -2689,10 +2711,15 @@ export function createMessengerOpencodeBridge({
       }
       if (permFetchOk) {
         for (const id of [...forwardedPermissionIds]) {
-          if (!pendingPermissions.has(id)) forwardedPermissionIds.delete(id);
+          // Keep the dedupe slot while an approval message is still live for
+          // it, even if this snapshot momentarily doesn't list it — otherwise
+          // the next snapshot that does list it re-forwards a duplicate.
+          if (!pendingPermissions.has(id) && !hasLiveApprovalForRequest(id)) {
+            forwardedPermissionIds.delete(id);
+          }
         }
         for (const [id, { item, directory }] of pendingPermissions) {
-          if (forwardedPermissionIds.has(id)) continue;
+          if (forwardedPermissionIds.has(id) || hasLiveApprovalForRequest(id)) continue;
           const replyDirectory = directory
             || (typeof item?.metadata?.directory === 'string' ? item.metadata.directory : undefined);
           try {
