@@ -24,11 +24,6 @@ export function isSyncDebugEnabled(): boolean {
   return _enabled
 }
 
-/** Force-refresh the flag (call after user toggles localStorage). */
-export function refreshSyncDebugFlag(): void {
-  _enabled = undefined
-}
-
 type SyncDebugCategory = "pipeline" | "reducer" | "dispatch"
 
 function log(cat: SyncDebugCategory, ...args: unknown[]): void {
