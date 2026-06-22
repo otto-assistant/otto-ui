@@ -105,6 +105,53 @@ function slugify(s) {
     .replace(/^-+|-+$/g, '');
 }
 
+/**
+ * Turn an OpenCode `session.error` payload into a short, human-readable line.
+ *
+ * OpenCode errors arrive in several shapes (`{ message }`, `{ data: { message } }`,
+ * `{ cause: { failures: [...] } }`, or a bare object). Dumping the raw JSON to a
+ * chat surface is hostile — it gets truncated mid-string and exposes internals.
+ * In particular, Drizzle/SQLite write failures carry a giant SQL query with bind
+ * placeholders that is meaningless to a chat user, so we collapse those to a
+ * single friendly sentence.
+ */
+function formatSessionError(raw) {
+  if (!raw) return 'OpenCode session error';
+  if (typeof raw === 'string') return raw.trim() || 'OpenCode session error';
+
+  let msg =
+    (typeof raw.message === 'string' && raw.message) ||
+    (typeof raw.data?.message === 'string' && raw.data.message) ||
+    (typeof raw.error?.message === 'string' && raw.error.message) ||
+    '';
+  if (!msg && raw.cause && typeof raw.cause === 'object') {
+    const c = raw.cause;
+    const failures = Array.isArray(c.failures) ? c.failures : Array.isArray(c) ? c : null;
+    if (failures && failures.length > 0) {
+      const first = failures[0];
+      msg = first?.error?.message ?? first?.message ?? first?.error ?? '';
+    }
+  }
+  if (!msg) {
+    try {
+      msg = JSON.stringify(raw);
+    } catch {
+      msg = String(raw);
+    }
+  }
+  msg = String(msg).trim();
+
+  // Collapse noisy DB write failures (huge SQL + bind placeholders) into one
+  // clear sentence instead of a truncated query dump.
+  if (/DrizzleQueryError|Failed query:|\binsert into\b|\bon conflict\b/i.test(msg)) {
+    return 'OpenCode could not save the message (database write error). The turn was not recorded — please try again.';
+  }
+
+  // Otherwise keep the first line and drop any stack-trace tail.
+  const firstLine = msg.split('\n')[0].trim();
+  return firstLine || 'OpenCode session error';
+}
+
 function pickProjectForName(projects, name) {
   if (!name) return null;
   const wanted = slugify(name);
@@ -2204,6 +2251,9 @@ export function createMessengerOpencodeBridge({
   async function emitPart(sessionId, part) {
     const ctx = sessionContexts.get(sessionId);
     if (!ctx) return;
+    // A new turn is producing output — clear any prior error state so its
+    // session.idle posts a proper "done" footer again.
+    ctx.errored = false;
     const partId = part?.id;
     const partType = part?.type;
     // Re-resolve per part (cheap SQLite lookup) so `/verbosity` changes and
@@ -2397,6 +2447,19 @@ export function createMessengerOpencodeBridge({
         if (defaultCtx) await handleGlobalEvent(normalized);
         return;
       }
+      // The turn already surfaced an error — OpenCode still emits idle (often
+      // more than once) afterwards. Skip the misleading "done · 1ms" footer but
+      // still settle the turn (clear busy, flush todos, drain the queue). The
+      // errored flag stays set until the next turn produces output.
+      if (ctx.errored) {
+        stopTypingPulse(ctx);
+        finishTodoMessageForSession(ctx, sessionId);
+        ctx.sentPartIds.clear();
+        ctx.startedAt = Date.now();
+        busySessions.delete(sessionId);
+        void drainSurfaceQueue(ctx);
+        return;
+      }
       stopTypingPulse(ctx);
       const ms = Date.now() - ctx.startedAt;
       const duration = ms < 1000 ? ms + 'ms' : Math.round(ms / 100) / 10 + 's';
@@ -2504,23 +2567,23 @@ export function createMessengerOpencodeBridge({
         return;
       }
       stopTypingPulse(ctx);
-      const err = (() => {
-        const raw = props?.error;
-        if (!raw) return 'OpenCode session error';
-        if (typeof raw === 'string') return raw;
-        if (typeof raw?.message === 'string' && raw.message) return raw.message;
-        if (typeof raw?.cause === 'object' && raw.cause) {
-          const c = raw.cause;
-          const failures = c.failures ?? c;
-          if (Array.isArray(failures) && failures.length > 0) {
-            const first = failures[0];
-            const errMsg = first?.error?.message ?? first?.message ?? first?.error ?? '';
-            if (errMsg) return String(errMsg).slice(0, 200);
-          }
-        }
-        try { return JSON.stringify(raw).slice(0, 200); } catch { return String(raw).slice(0, 200); }
-      })();
-      void postToSurface(ctx, `✗ session error: ${escapeMd(clipBlock(err, 300))}`);
+      // Mark the turn as errored so the trailing session.idle doesn't tack on a
+      // misleading "done · …" footer. The flag clears when the next turn starts
+      // producing output (see emitPart) or a new prompt is sent.
+      ctx.errored = true;
+      const errText = formatSessionError(props?.error);
+      const now = Date.now();
+      // OpenCode emits one session.error per failed write (message + each part),
+      // so the same fault can arrive several times in a row. Collapse repeats so
+      // the surface isn't spammed with three identical lines.
+      if (ctx.lastErrorText === errText && now - (ctx.lastErrorAt ?? 0) < 30000) {
+        ctx.sentPartIds.clear();
+        return;
+      }
+      ctx.lastErrorText = errText;
+      ctx.lastErrorAt = now;
+      ctx.lastError = errText;
+      void postToSurface(ctx, `✗ ${escapeMd(clipBlock(errText, 280))}`);
       ctx.sentPartIds.clear();
       return;
     }
@@ -3740,6 +3803,8 @@ export function createMessengerOpencodeBridge({
       sessionContexts.set(sessionId, ctx);
     }
     const ctx = sessionContexts.get(sessionId);
+    // New turn — clear any prior error state so its idle posts a real footer.
+    ctx.errored = false;
     // Re-resolve verbosity each turn so a mid-session `/verbosity` change (or a
     // UI default change) takes effect on the next prompt.
     ctx.verbosity = resolveVerbosity({ type, token, channelId, threadId: effectiveThreadId });
