@@ -45,7 +45,7 @@ export function buildSlashCommandDefinitions() {
         { type: STRING_OPTION, name: 'command', description: 'The shell command to run (e.g. pwd)', required: true },
       ],
     },
-    { name: 'model', description: 'Pick the model + thinking effort for this conversation' },
+    { name: 'model', description: 'Pick the model + thinking effort (this chat, project, or everywhere)' },
     { name: 'agent', description: 'Pick the agent for this conversation (or set a project default)' },
     { name: 'verbosity', description: 'Choose how much Otto streams back (this chat, project, or everywhere)' },
     { name: 'skill', description: 'Pick an available skill and hand it to the agent' },
