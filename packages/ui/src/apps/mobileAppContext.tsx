@@ -18,16 +18,6 @@ export const DedicatedMobileAppProvider: React.FC<{
 }> = ({ actions, children }) => (
   <DedicatedMobileAppContext.Provider value={actions}>{children}</DedicatedMobileAppContext.Provider>
 );
-
-/**
- * Returns true when the surrounding tree is the dedicated MobileApp root
- * (Capacitor or hosted /mobile.html), as opposed to the desktop responsive
- * mobile path. Use this to suppress UI that exists only to bridge the
- * desktop sidebar/layout into mobile, since the dedicated mobile root has
- * its own native-feeling navigation and no sidebars to bridge into.
- */
-export const useIsDedicatedMobileApp = (): boolean => React.useContext(DedicatedMobileAppContext) !== null;
-
 /**
  * Returns the dedicated mobile app's surface-opening actions, or null when
  * not inside the dedicated mobile root. Components living in shared chat /
