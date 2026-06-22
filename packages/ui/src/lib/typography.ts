@@ -27,8 +27,6 @@ export const FONT_SIZE_SCALES = {
   },
 } as const;
 
-export type FontSizeOption = keyof typeof FONT_SIZE_SCALES;
-
 export const VSCODE_TYPOGRAPHY = {
   // Keep VS Code webview typography slightly tighter; VS Code UI chrome already provides density.
   markdown: '0.9063rem',
@@ -37,15 +35,6 @@ export const VSCODE_TYPOGRAPHY = {
   uiLabel: '0.8438rem',
   meta: '0.8438rem',
   micro: '0.7813rem',
-} as const;
-
-export const SEMANTIC_TYPOGRAPHY_CSS = {
-  '--text-markdown': SEMANTIC_TYPOGRAPHY.markdown,
-  '--text-code': SEMANTIC_TYPOGRAPHY.code,
-  '--text-ui-header': SEMANTIC_TYPOGRAPHY.uiHeader,
-  '--text-ui-label': SEMANTIC_TYPOGRAPHY.uiLabel,
-  '--text-meta': SEMANTIC_TYPOGRAPHY.meta,
-  '--text-micro': SEMANTIC_TYPOGRAPHY.micro,
 } as const;
 
 export const TYPOGRAPHY_CLASSES = {
@@ -62,10 +51,6 @@ export type TypographyClassKey = keyof typeof TYPOGRAPHY_CLASSES;
 
 export function getTypographyVariable(key: SemanticTypographyKey): string {
   return `--text-${key.replace(/([A-Z])/g, '-$1').toLowerCase()}`;
-}
-
-export function getTypographyClass(key: TypographyClassKey): string {
-  return TYPOGRAPHY_CLASSES[key];
 }
 
 export const typography = {
@@ -248,22 +233,6 @@ export const typography = {
   },
 };
 
-export function getTypographyStyle(path: string, fallback?: React.CSSProperties): React.CSSProperties {
-  const parts = path.split('.');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = typography;
-
-  for (const part of parts) {
-    if (current && current[part]) {
-      current = current[part];
-    } else {
-      return fallback || {};
-    }
-  }
-
-  return current || fallback || {};
-}
-
 export const toolDisplayStyles = {
 
   padding: {
@@ -310,48 +279,3 @@ export const toolDisplayStyles = {
   }),
 };
 
-export const typographyClasses = {
-
-  'heading-1': 'typography-h1',
-  'heading-2': 'typography-h2',
-  'heading-3': 'typography-h3',
-  'heading-4': 'typography-h4',
-  'heading-5': 'typography-h5',
-  'heading-6': 'typography-h6',
-
-  'ui-button': 'typography-ui-button',
-  'ui-button-small': 'typography-ui-button-small',
-  'ui-button-large': 'typography-ui-button-large',
-  'ui-label': 'typography-ui-label',
-  'ui-caption': 'typography-ui-caption',
-  'ui-badge': 'typography-ui-badge',
-  'ui-tooltip': 'typography-ui-tooltip',
-  'ui-input': 'typography-ui-input',
-  'ui-helper': 'typography-ui-helper-text',
-
-  'code-inline': 'typography-code-inline',
-  'code-block': 'typography-code-block',
-  'code-line-numbers': 'typography-code-line-numbers',
-
-  'markdown-h1': 'typography-markdown-h1',
-  'markdown-h2': 'typography-markdown-h2',
-  'markdown-h3': 'typography-markdown-h3',
-  'markdown-h4': 'typography-markdown-h4',
-  'markdown-h5': 'typography-markdown-h5',
-  'markdown-h6': 'typography-markdown-h6',
-  'markdown-body': 'typography-markdown-body',
-  'markdown-body-small': 'typography-markdown-body-small',
-  'markdown-body-large': 'typography-markdown-body-large',
-  'markdown-blockquote': 'typography-markdown-blockquote',
-  'markdown-list': 'typography-markdown-list',
-  'markdown-link': 'typography-markdown-link',
-  'markdown-code': 'typography-markdown-code',
-  'markdown-code-block': 'typography-markdown-code-block',
-
-  'semantic-markdown': 'typography-markdown',
-  'semantic-code': 'typography-code',
-  'semantic-ui-header': 'typography-ui-header',
-  'semantic-ui-label': 'typography-ui-label',
-  'semantic-meta': 'typography-meta',
-  'semantic-micro': 'typography-micro',
-};

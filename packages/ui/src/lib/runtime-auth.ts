@@ -223,38 +223,6 @@ const scheduleUrlAuthRefresh = (): void => {
   }, delay);
 };
 
-// Register an active url-token consumer. While any consumer is held, the token
-// is proactively refreshed before it expires. Returns a release function;
-// the proactive loop stops once the last consumer releases.
-export const acquireRuntimeUrlAuthToken = (apiBaseUrl?: string | null): (() => void) => {
-  if (typeof apiBaseUrl === 'string' && apiBaseUrl.trim()) {
-    urlAuthApiBaseUrl = apiBaseUrl.trim();
-  }
-  urlAuthConsumerCount += 1;
-  scheduleUrlAuthRefresh();
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    urlAuthConsumerCount = Math.max(0, urlAuthConsumerCount - 1);
-    if (urlAuthConsumerCount === 0) {
-      clearUrlAuthRefreshTimer();
-    }
-  };
-};
-
-// Subscribe to url-token *replacements* (an existing token swapped for a fresh
-// one). Fires only on a real change — not the initial mint — so consumers can
-// remount token-bearing assets without churning on first load. Returns an
-// unsubscribe function.
-export const subscribeRuntimeUrlAuthToken = (listener: () => void): (() => void) => {
-  urlAuthListeners.add(listener);
-  return () => {
-    urlAuthListeners.delete(listener);
-  };
-};
-
 export const buildRuntimeAuthHeaders = async (headers?: HeadersInit): Promise<Headers> => {
   const next = new Headers(headers);
   if (next.has('Authorization')) {

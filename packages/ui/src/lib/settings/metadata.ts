@@ -59,18 +59,6 @@ export interface SettingsPageMeta {
   isAvailable?: (ctx: SettingsRuntimeContext) => boolean;
 }
 
-export const SETTINGS_GROUP_LABELS: Record<SettingsPageGroup, string> = {
-  appearance: 'Appearance',
-  projects: 'Projects',
-  general: 'General',
-  opencode: 'OpenCode',
-  git: 'Git',
-  skills: 'Skills',
-  memory: 'Memory',
-  usage: 'Usage',
-  advanced: 'Advanced',
-};
-
 export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
   {
     slug: 'home',
