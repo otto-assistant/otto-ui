@@ -77,28 +77,28 @@ const buildWindows = (usageData) => {
 };
 
 /**
- * Build windows from local DB data with anchor-based reset times.
- * Anchors provide the seconds-until-reset from the dashboard, giving
- * accurate billing cycle boundaries.
+ * Build windows from local DB data with persisted anchor reset times.
+ * resetAtConfig stores absolute epoch-ms boundaries captured when the user
+ * saved their "Resets in" values.
  */
-const buildAnchorWindows = (dbWindows, anchors) => {
+const buildAnchorWindows = (dbWindows, resetAtConfig) => {
   if (!dbWindows?.windows) return null;
   const windows = {};
+  const ANCHOR_TO_WINDOW = { rolling: '5h', weekly: 'weekly', monthly: 'monthly' };
 
-  for (const key of ['5h', 'weekly', 'monthly']) {
-    const dbWindow = dbWindows.windows[key];
+  for (const [anchorKey, windowKey] of Object.entries(ANCHOR_TO_WINDOW)) {
+    const dbWindow = dbWindows.windows[windowKey];
     if (!dbWindow) continue;
 
     const usedPercent = dbWindow.usedPercent;
-    const anchorSeconds = anchors[key];
-    const resetAt = anchorSeconds != null ? Date.now() + anchorSeconds * 1000 : dbWindow.resetAt;
+    const resetAt = resetAtConfig?.[anchorKey] ?? dbWindow.resetAt;
 
     let valueLabel = null;
     if (usedPercent !== null) {
       valueLabel = `${Math.round(usedPercent)}%`;
     }
 
-    windows[key] = toUsageWindow({ usedPercent, windowSeconds: null, resetAt, valueLabel });
+    windows[windowKey] = toUsageWindow({ usedPercent, windowSeconds: null, resetAt, valueLabel });
   }
   return Object.keys(windows).length > 0 ? windows : null;
 };
@@ -156,13 +156,6 @@ export const fetchQuota = async () => {
             usageSource: source
           };
         }
-
-        // Cookie mode configured but dashboard fetch failed
-        return buildResult({
-          providerId, providerName, ok: false, configured: true,
-          usage: models ? withModels({}) : null,
-          error: 'Could not fetch usage from the OpenCode Go dashboard.'
-        });
       }
 
       // mode === 'cookie' but no dashboardConfig found (stale/missing creds)
@@ -192,6 +185,25 @@ export const fetchQuota = async () => {
           ? 'Could not compute usage windows from local data with the provided reset times.'
           : 'Anchor mode configured but no reset times found. Re-enter your "Resets in" values.'
       });
+    }
+
+    // ── API key only (official endpoint when no mode is configured) ──
+    if (!mode && apiKey) {
+      const usageData = await fetchOfficialUsage(apiKey).catch(() => null);
+      if (usageData) {
+        const windows = buildWindows(usageData);
+        if (dbWindows?.windows) {
+          for (const key of ['monthly', 'weekly', '5h']) {
+            if (!windows[key] && dbWindows.windows[key]) {
+              windows[key] = dbWindows.windows[key];
+            }
+          }
+        }
+        return {
+          ...buildResult({ providerId, providerName, ok: true, configured: true, usage: withModels(windows) }),
+          usageSource: 'api'
+        };
+      }
     }
 
     // ── Fallback: local DB only (approximate) — only when no mode configured ──

@@ -54,18 +54,26 @@ export function registerQuotaRoutes(app, { getQuotaProviders }) {
   app.get('/api/quota/opencode-go/config', (_req, res) => {
     const mode = resolveConfigMode();
     const cookieConfig = mode === 'cookie' ? resolveDashboardConfig() : null;
-    const anchorConfig = mode === 'anchor' ? resolveAnchorConfig() : null;
+    const anchorResetAt = mode === 'anchor' ? resolveAnchorConfig() : null;
+    const anchorSeconds = anchorResetAt
+      ? Object.fromEntries(
+          Object.entries(anchorResetAt).map(([key, resetAt]) => [
+            key,
+            Math.max(0, Math.round((resetAt - Date.now()) / 1000)),
+          ]),
+        )
+      : null;
     res.json({
       configured: !!mode,
       mode,
       hasCookie: !!cookieConfig,
-      hasAnchors: !!anchorConfig,
+      hasAnchors: !!anchorResetAt,
       cookieSource: cookieConfig?.source ?? null,
       // Masked values so UI can show that credentials are saved
       maskedWorkspaceId: cookieConfig ? maskSensitiveValue(cookieConfig.workspaceId, { prefix: 4, suffix: 4 }) : null,
       hasAuthCookie: !!cookieConfig?.authCookie,
-      // Return anchor values (seconds until reset) so UI can pre-fill edit fields
-      anchors: anchorConfig ?? null,
+      // Remaining seconds until reset (derived from persisted resetAt) for UI pre-fill
+      anchors: anchorSeconds,
     });
   });
 

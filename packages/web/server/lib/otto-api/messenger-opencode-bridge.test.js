@@ -133,6 +133,40 @@ describe('approval flow — reply directory', () => {
     expect(respond).toHaveBeenCalledTimes(1);
     expect(respond).toHaveBeenCalledWith(expect.objectContaining({ reply: 'reject' }));
   });
+  it('auto-approves permissions when yolo mode is enabled', async () => {
+    const bridge = makeBridge({
+      isSessionAutoAcceptingFn: async () => true,
+    });
+    const respond = vi.fn(async () => {});
+    bridge.initApprovalListener(respond);
+
+    bridge._handleGlobalEvent({
+      directory: '/envelope/project',
+      payload: {
+        type: 'permission.asked',
+        properties: {
+          id: 'req-1',
+          sessionID: 'ses-1',
+          permission: 'bash',
+          patterns: [],
+          always: [],
+          metadata: {},
+        },
+      },
+    });
+    await flush();
+
+    expect(bridge.approvalContexts.size).toBe(0);
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith({
+      sessionID: 'ses-1',
+      requestID: 'req-1',
+      reply: 'once',
+      directory: '/envelope/project',
+    });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('discord project sync persistence', () => {
@@ -2362,5 +2396,97 @@ describe('session deletion → Discord thread cleanup', () => {
       'messenger.bridge.thread_deleted_from_session',
       expect.anything(),
     );
+  });
+});
+
+describe('session.error — MessageAbortedError', () => {
+  let originalFetch;
+  let calls;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ?? null });
+      const u = String(url);
+      if (u.includes('/session/') && !u.includes('/message')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'ses-abort' }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({ id: 'msg-1' }), text: async () => '' };
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  async function makeBridgeWithSession() {
+    const bound = { sessionId: 'ses-abort', projectPath: '/proj', projectLabel: 'Proj' };
+    const bridge = makeBridge({
+      store: {
+        ...makeFakeStore(),
+        lookup: ({ targetKey }) => (targetKey === 'chan-abort' ? bound : null),
+      },
+    });
+    const routed = await bridge.routeInbound({
+      type: 'discord',
+      token: 'bot-token',
+      channelId: 'chan-abort',
+      threadId: null,
+      sourceMessageId: null,
+      text: 'hello',
+      from: { id: 'user-1', username: 'alice' },
+    });
+    expect(routed.ok).toBe(true);
+    return bridge;
+  }
+
+  it('silently ignores MessageAbortedError (no Discord error post)', async () => {
+    const bridge = await makeBridgeWithSession();
+    calls.length = 0;
+
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'ses-abort',
+          error: { name: 'MessageAbortedError', data: { message: 'Aborted' } },
+        },
+      },
+    });
+    await flush();
+
+    const errorPost = calls.find(
+      (c) => c.method === 'POST' && c.body?.includes('session error'),
+    );
+    expect(errorPost).toBeUndefined();
+  });
+
+  it('still posts real session errors to Discord', async () => {
+    const bridge = await makeBridgeWithSession();
+    calls.length = 0;
+
+    await bridge._handleGlobalEvent({
+      directory: '/proj',
+      payload: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'ses-abort',
+          error: { name: 'SomeOtherError', message: 'boom' },
+        },
+      },
+    });
+    await flush();
+
+    const errorPost = calls.find(
+      (c) =>
+        c.method === 'POST' &&
+        c.url.includes('/channels/chan-abort/messages') &&
+        c.body?.includes('session error'),
+    );
+    expect(errorPost).toBeTruthy();
+    expect(JSON.parse(errorPost.body).content).toContain('boom');
   });
 });

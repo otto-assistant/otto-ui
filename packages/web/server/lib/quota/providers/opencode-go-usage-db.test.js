@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { aggregateModelUsage, buildModelUsageWindows } from './opencode-go-usage-db.js';
+import {
+  aggregateModelUsage,
+  buildModelUsageWindows,
+  computeMonthlyPeriodStart,
+  computeNextMonthlyResetAt,
+} from './opencode-go-usage-db.js';
 
 const aliases = ['opencode-go', 'opencode', 'opencode-zen'];
 
@@ -79,5 +84,27 @@ describe('buildModelUsageWindows', () => {
     ]);
 
     expect(models['glm-5'].windows.spend.valueLabel).toBe('$12.50 · 4 req');
+  });
+});
+
+describe('computeNextMonthlyResetAt', () => {
+  it('uses this month when the anchor day is still ahead', () => {
+    const now = Date.UTC(2026, 2, 10, 12, 0, 0); // 2026-03-10
+    const anchor = Date.UTC(2026, 0, 15, 8, 0, 0); // day 15
+    expect(computeNextMonthlyResetAt(anchor, now)).toBe(Date.UTC(2026, 2, 15));
+  });
+
+  it('uses next month when the anchor day has already passed', () => {
+    const now = Date.UTC(2026, 2, 20, 12, 0, 0); // 2026-03-20
+    const anchor = Date.UTC(2026, 0, 15, 8, 0, 0); // day 15
+    expect(computeNextMonthlyResetAt(anchor, now)).toBe(Date.UTC(2026, 3, 15));
+  });
+});
+
+describe('computeMonthlyPeriodStart', () => {
+  it('returns the previous anchor day for the current billing period', () => {
+    const resetAt = Date.UTC(2026, 2, 15);
+    const anchor = Date.UTC(2026, 0, 15, 8, 0, 0);
+    expect(computeMonthlyPeriodStart(resetAt, anchor)).toBe(Date.UTC(2026, 1, 15));
   });
 });

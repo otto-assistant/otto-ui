@@ -30,6 +30,12 @@ export const registerMemoryRoutes = (app, dependencies) => {
     return directory || undefined;
   };
 
+  const resolveProject = (req) => {
+    const fromQuery = typeof req.query.project === 'string' ? req.query.project.trim() : '';
+    const fromBody = typeof req.body?.project === 'string' ? req.body.project.trim() : '';
+    return fromQuery || fromBody || undefined;
+  };
+
   const handleError = (res, error, context) => {
     const status = error.statusCode || 500;
     if (status >= 500) {
@@ -127,8 +133,9 @@ export const registerMemoryRoutes = (app, dependencies) => {
   app.get('/api/config/memory/:id/records', async (req, res) => {
     try {
       const directory = await resolveDir(req);
+      const project = resolveProject(req);
       const query = typeof req.query.q === 'string' ? req.query.q : undefined;
-      const result = await listRecords(req.params.id, { workingDirectory: directory, query });
+      const result = await listRecords(req.params.id, { workingDirectory: directory, project, query });
       return res.json(result);
     } catch (error) {
       return handleError(res, error, 'list-records');
@@ -138,8 +145,9 @@ export const registerMemoryRoutes = (app, dependencies) => {
   app.post('/api/config/memory/:id/records', async (req, res) => {
     try {
       const directory = await resolveDir(req);
+      const project = resolveProject(req);
       const input = req.body?.input || req.body || {};
-      const record = await createRecord(req.params.id, { workingDirectory: directory, input });
+      const record = await createRecord(req.params.id, { workingDirectory: directory, project, input });
       return res.json({ success: true, record });
     } catch (error) {
       return handleError(res, error, 'create-record');
@@ -149,9 +157,11 @@ export const registerMemoryRoutes = (app, dependencies) => {
   app.put('/api/config/memory/:id/records/:recordId', async (req, res) => {
     try {
       const directory = await resolveDir(req);
+      const project = resolveProject(req);
       const input = req.body?.input || req.body || {};
       const record = await updateRecord(req.params.id, {
         workingDirectory: directory,
+        project,
         recordId: req.params.recordId,
         input,
       });
@@ -164,8 +174,10 @@ export const registerMemoryRoutes = (app, dependencies) => {
   app.delete('/api/config/memory/:id/records/:recordId', async (req, res) => {
     try {
       const directory = await resolveDir(req);
+      const project = resolveProject(req);
       const result = await deleteRecord(req.params.id, {
         workingDirectory: directory,
+        project,
         recordId: req.params.recordId,
       });
       return res.json({ success: true, ...result });

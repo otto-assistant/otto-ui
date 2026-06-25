@@ -157,6 +157,41 @@ const utcWeekBounds = (now) => {
 };
 
 /**
+ * Next monthly reset on the anchor day-of-month at 00:00 UTC.
+ * Uses this month when the day is still ahead; otherwise next month.
+ */
+export const computeNextMonthlyResetAt = (anchorTimestamp, now = Date.now()) => {
+  const anchorDate = new Date(anchorTimestamp);
+  const day = anchorDate.getUTCDate();
+  const nowDate = new Date(now);
+  let year = nowDate.getUTCFullYear();
+  let month = nowDate.getUTCMonth();
+  let resetAt = Date.UTC(year, month, day);
+  if (resetAt <= now) {
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+    resetAt = Date.UTC(year, month, day);
+  }
+  return resetAt;
+};
+
+/** Start of the current monthly billing period ending at resetAt. */
+export const computeMonthlyPeriodStart = (resetAt, anchorTimestamp) => {
+  const day = new Date(anchorTimestamp).getUTCDate();
+  const resetDate = new Date(resetAt);
+  let year = resetDate.getUTCFullYear();
+  let month = resetDate.getUTCMonth() - 1;
+  if (month < 0) {
+    month = 11;
+    year -= 1;
+  }
+  return Date.UTC(year, month, day);
+};
+
+/**
  * Detect the subscription anchor timestamp by scanning cost-bearing messages
  * from earliest to latest. When cumulative spend passes the monthly limit we
  * assume a billing-cycle rollover; the timestamp of the message that pushes
@@ -226,6 +261,11 @@ const aggregateWindowSpend = (messages, providerAliases, now = Date.now()) => {
     }
   }
 
+  const monthlyResetAt = monthlyAnchor === null ? null : computeNextMonthlyResetAt(monthlyAnchor, now);
+  const monthlyPeriodStart = monthlyResetAt === null
+    ? null
+    : computeMonthlyPeriodStart(monthlyResetAt, monthlyAnchor);
+
   return {
     '5h': {
       spend: rollingSpend,
@@ -239,31 +279,10 @@ const aggregateWindowSpend = (messages, providerAliases, now = Date.now()) => {
     },
     monthly: {
       spend: monthlySpend,
-      resetAt: monthlyAnchor === null
+      resetAt: monthlyResetAt,
+      windowSeconds: monthlyResetAt === null || monthlyPeriodStart === null
         ? null
-        : new Date(
-            Date.UTC(
-              new Date(now).getUTCFullYear(),
-              new Date(now).getUTCMonth() + 1,
-              new Date(monthlyAnchor).getUTCDate()
-            )
-          ).getTime(),
-      windowSeconds: Math.round(
-        (new Date(
-          Date.UTC(
-            new Date(now).getUTCFullYear(),
-            new Date(now).getUTCMonth() + 1,
-            new Date(monthlyAnchor).getUTCDate()
-          )
-        ).getTime() -
-          new Date(
-            Date.UTC(
-              new Date(now).getUTCFullYear(),
-              new Date(now).getUTCMonth(),
-              new Date(monthlyAnchor).getUTCDate()
-            )
-          ).getTime()) / 1000
-      )
+        : Math.round((monthlyResetAt - monthlyPeriodStart) / 1000)
     }
   };
 };

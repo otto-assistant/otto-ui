@@ -86,41 +86,77 @@ export const saveDashboardConfig = ({ workspaceId, authCookie }) => {
   fs.writeFileSync(CONFIG_SAVE_PATH, JSON.stringify({ mode: 'cookie', workspaceId, authCookie }, null, 2), 'utf8');
 };
 
-/**
- * Save anchor times to the config file (anchor mode).
- * The user enters "Resets in" values from the opencode.ai dashboard.
- * These are stored as seconds-until-reset and used with local DB data.
- *
- * @param {{ rolling?: number, weekly?: number, monthly?: number }} anchors
- *   seconds until reset for each window (e.g. 13920 for "3h 52m")
- */
-export const saveAnchorConfig = (anchors) => {
-  if (!anchors || typeof anchors !== 'object') {
-    throw new Error('anchors object is required');
+const ANCHOR_KEYS = ['rolling', 'weekly', 'monthly'];
+
+const normalizeResetAtConfig = (resetAt) => {
+  if (!resetAt || typeof resetAt !== 'object') return null;
+  const normalized = {};
+  for (const key of ANCHOR_KEYS) {
+    const value = resetAt[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      normalized[key] = value;
+    }
   }
-  // At least one anchor needed
-  if (!anchors.rolling && !anchors.weekly && !anchors.monthly) {
-    throw new Error('At least one anchor value is required');
+  return Object.keys(normalized).length > 0 ? normalized : null;
+};
+
+/** Legacy configs stored seconds-until-reset; convert to absolute resetAt once. */
+const migrateLegacyAnchors = (data) => {
+  if (!data?.anchors || typeof data.anchors !== 'object') return null;
+  const now = Date.now();
+  const resetAt = {};
+  for (const key of ANCHOR_KEYS) {
+    const seconds = data.anchors[key];
+    if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+      resetAt[key] = now + seconds * 1000;
+    }
   }
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_SAVE_PATH, JSON.stringify({ mode: 'anchor', anchors }, null, 2), 'utf8');
+  return normalizeResetAtConfig(resetAt);
 };
 
 /**
- * Read anchor config from the config file.
+ * Save anchor reset times to the config file (anchor mode).
+ * The user enters "Resets in" values from the opencode.ai dashboard; we persist
+ * absolute resetAt timestamps so quota refreshes count down instead of freezing.
+ *
+ * @param {{ rolling?: number, weekly?: number, monthly?: number }} anchorSeconds
+ *   seconds until reset for each window (e.g. 13920 for "3h 52m")
+ */
+export const saveAnchorConfig = (anchorSeconds) => {
+  if (!anchorSeconds || typeof anchorSeconds !== 'object') {
+    throw new Error('anchors object is required');
+  }
+
+  const existing = resolveAnchorConfig() ?? {};
+  const resetAt = { ...existing };
+  const now = Date.now();
+  for (const key of ANCHOR_KEYS) {
+    const seconds = anchorSeconds[key];
+    if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+      resetAt[key] = now + seconds * 1000;
+    }
+  }
+
+  if (Object.keys(resetAt).length === 0) {
+    throw new Error('At least one anchor value is required');
+  }
+
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(CONFIG_SAVE_PATH, JSON.stringify({ mode: 'anchor', resetAt }, null, 2), 'utf8');
+};
+
+/**
+ * Read persisted anchor reset timestamps from the config file.
  * @returns {{ rolling?: number, weekly?: number, monthly?: number } | null}
+ *   absolute epoch-ms resetAt values keyed by window
  */
 export const resolveAnchorConfig = () => {
   for (const filePath of [CONFIG_SAVE_PATH, ...CONFIG_FILE_PATHS]) {
     const data = readJsonFile(filePath);
     if (!data || typeof data !== 'object') continue;
-    if (data.mode === 'anchor' && data.anchors && typeof data.anchors === 'object') {
-      const anchors = {};
-      if (typeof data.anchors.rolling === 'number') anchors.rolling = data.anchors.rolling;
-      if (typeof data.anchors.weekly === 'number') anchors.weekly = data.anchors.weekly;
-      if (typeof data.anchors.monthly === 'number') anchors.monthly = data.anchors.monthly;
-      if (Object.keys(anchors).length > 0) return anchors;
-    }
+    if (data.mode !== 'anchor') continue;
+    const resetAt = normalizeResetAtConfig(data.resetAt) ?? migrateLegacyAnchors(data);
+    if (resetAt) return resetAt;
   }
   return null;
 };

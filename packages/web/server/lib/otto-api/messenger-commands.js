@@ -90,6 +90,12 @@ const COMMAND_HELP = [
       'How much Otto streams back: `quiet` = answer only, `normal` = tool names + thinking marker, `verbose` = full commands/diffs/outputs. `default <level>` sets the messenger-wide default.',
   },
   {
+    name: 'yolo',
+    usage: '/yolo [on | off | toggle]',
+    summary:
+      'Yolo mode — auto-approve tool permission prompts for this session (same as the web UI shield toggle).',
+  },
+  {
     name: 'skill',
     usage: '/skill [name]',
     summary:
@@ -525,6 +531,57 @@ export async function executeMessengerCommand({
       }
       await surfaceMutators.setOverrides({ agentOverride: raw });
       return { reply: `✓ Agent set to \`${raw}\` for this conversation.` };
+    }
+
+    case 'yolo': {
+      const sessionId = binding?.sessionId ?? null;
+      if (!sessionId) {
+        return { reply: '✗ No active session — send a message first, then use `/yolo`.' };
+      }
+
+      const readEnabled = async () => {
+        if (typeof opencode.isSessionAutoAccepting !== 'function') return false;
+        try {
+          return Boolean(await opencode.isSessionAutoAccepting(sessionId));
+        } catch {
+          return false;
+        }
+      };
+
+      const setEnabled = (enabled) => {
+        if (typeof opencode.setSessionAutoAccept !== 'function') return false;
+        opencode.setSessionAutoAccept(sessionId, enabled);
+        return true;
+      };
+
+      if (!command.args) {
+        const enabled = await readEnabled();
+        return {
+          reply: enabled
+            ? '🛡️ **Yolo mode: ON** — tool permissions are auto-approved for this session. Use `/yolo off` to disable.'
+            : '🛡️ **Yolo mode: OFF** — permission prompts show Approve/Deny buttons. Use `/yolo on` to auto-approve.',
+        };
+      }
+
+      const raw = command.args.trim().toLowerCase();
+      if (raw === 'on' || raw === 'enable' || raw === 'true') {
+        if (!setEnabled(true)) return { reply: '✗ Yolo mode is unavailable on this server.' };
+        return { reply: '🛡️ **Yolo mode enabled** — tool permissions will be auto-approved for this session.' };
+      }
+      if (raw === 'off' || raw === 'disable' || raw === 'false') {
+        if (!setEnabled(false)) return { reply: '✗ Yolo mode is unavailable on this server.' };
+        return { reply: '🛡️ **Yolo mode disabled** — permission prompts will require manual approval.' };
+      }
+      if (raw === 'toggle') {
+        const next = !(await readEnabled());
+        if (!setEnabled(next)) return { reply: '✗ Yolo mode is unavailable on this server.' };
+        return {
+          reply: next
+            ? '🛡️ **Yolo mode enabled** — tool permissions will be auto-approved for this session.'
+            : '🛡️ **Yolo mode disabled** — permission prompts will require manual approval.',
+        };
+      }
+      return { reply: '✗ Usage: `/yolo`, `/yolo on`, `/yolo off`, or `/yolo toggle`.' };
     }
 
     case 'verbosity': {

@@ -510,6 +510,9 @@ export function createMessengerOpencodeBridge({
    * (may be async).
    */
   getGlobalDefaults = null,
+  /** Auto-approve pending tool permissions (yolo mode). */
+  setAutoAcceptSession = null,
+  isSessionAutoAcceptingFn = null,
   /**
    * Optional settings reader (async () => settings object). Used for the
    * voice-message STT configuration (sttServerUrl / sttModel / sttLanguage)
@@ -1050,6 +1053,18 @@ export function createMessengerOpencodeBridge({
         hidden: Boolean(a.hidden),
         mode: a.mode,
       }));
+    },
+    setSessionAutoAccept(sessionId, enabled) {
+      if (typeof setAutoAcceptSession !== 'function' || !sessionId) return;
+      setAutoAcceptSession(sessionId, Boolean(enabled));
+    },
+    async isSessionAutoAccepting(sessionId) {
+      if (typeof isSessionAutoAcceptingFn !== 'function' || !sessionId) return false;
+      try {
+        return Boolean(await isSessionAutoAcceptingFn(sessionId));
+      } catch {
+        return false;
+      }
     },
     async listSessions(directory) {
       const params = directory ? `?directory=${encodeURIComponent(directory)}` : '';
@@ -2088,9 +2103,76 @@ export function createMessengerOpencodeBridge({
     }
   }
 
+  const SESSION_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000;
+  const SESSION_CONTEXT_MAX = 500;
+  const CANDIDATE_CACHE_TTL_MS = 10 * 60 * 1000;
+  const CANDIDATE_CACHE_MAX = 200;
+
+  function pruneSessionContexts() {
+    const now = Date.now();
+    for (const [sessionId, ctx] of sessionContexts) {
+      const last = ctx.lastAccessedAt ?? ctx.startedAt ?? 0;
+      if (now - last > SESSION_CONTEXT_TTL_MS) {
+        stopTypingPulse(ctx);
+        sessionContexts.delete(sessionId);
+      }
+    }
+    while (sessionContexts.size > SESSION_CONTEXT_MAX) {
+      let oldestId = null;
+      let oldestAt = Infinity;
+      for (const [sessionId, ctx] of sessionContexts) {
+        const last = ctx.lastAccessedAt ?? ctx.startedAt ?? 0;
+        if (last < oldestAt) {
+          oldestAt = last;
+          oldestId = sessionId;
+        }
+      }
+      if (oldestId == null) break;
+      stopTypingPulse(sessionContexts.get(oldestId));
+      sessionContexts.delete(oldestId);
+    }
+  }
+
+  function getSessionContext(sessionId) {
+    const ctx = sessionContexts.get(sessionId);
+    if (ctx) {
+      ctx.lastAccessedAt = Date.now();
+    }
+    return ctx;
+  }
+
+  function setSessionContext(sessionId, ctx) {
+    ctx.lastAccessedAt = Date.now();
+    sessionContexts.set(sessionId, ctx);
+    pruneSessionContexts();
+  }
+
+  function setCandidateCache(map, key, candidates) {
+    map.set(key, { candidates, expiresAt: Date.now() + CANDIDATE_CACHE_TTL_MS });
+    const now = Date.now();
+    for (const [cacheKey, entry] of map) {
+      if (entry.expiresAt <= now) map.delete(cacheKey);
+    }
+    while (map.size > CANDIDATE_CACHE_MAX) {
+      const firstKey = map.keys().next().value;
+      if (firstKey === undefined) break;
+      map.delete(firstKey);
+    }
+  }
+
+  function getCandidateCache(map, key) {
+    const entry = map.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      map.delete(key);
+      return null;
+    }
+    return entry.candidates;
+  }
+
   async function ensureDefaultSessionContext(sessionId, { projectPath = null, threadName = null } = {}) {
     if (!sessionId) return null;
-    const existing = sessionContexts.get(sessionId);
+    const existing = getSessionContext(sessionId);
     if (existing) return existing;
     if (typeof getDefaultMessengerTarget !== 'function') return null;
 
@@ -2201,7 +2283,7 @@ export function createMessengerOpencodeBridge({
         channelId: ctx.channelId,
         threadId: ctx.threadId,
       });
-      sessionContexts.set(sessionId, ctx);
+      setSessionContext(sessionId, ctx);
       broadcastEvent?.('messenger.bridge.web_session_bound', {
         type: ctx.type,
         channelId: ctx.channelId,
@@ -2249,7 +2331,7 @@ export function createMessengerOpencodeBridge({
   }
 
   async function emitPart(sessionId, part) {
-    const ctx = sessionContexts.get(sessionId);
+    const ctx = getSessionContext(sessionId);
     if (!ctx) return;
     // A new turn is producing output — clear any prior error state so its
     // session.idle posts a proper "done" footer again, and re-arm idle
@@ -2368,7 +2450,7 @@ export function createMessengerOpencodeBridge({
         // Only for web-originated sessions: a session already bound to a
         // Discord surface had its prompt typed there already, so
         // echoing it back would duplicate it.
-        const ctx = sessionContexts.get(sessionId);
+        const ctx = getSessionContext(sessionId);
         if (!ctx) {
           // Check the bridge store: if this session has a Discord
           // binding, the user's prompt came from a messenger, not the web.
@@ -2443,7 +2525,7 @@ export function createMessengerOpencodeBridge({
         runSupersede(sessionId, sessionContexts.get(sessionId));
         return;
       }
-      const ctx = sessionId ? sessionContexts.get(sessionId) : null;
+      const ctx = sessionId ? getSessionContext(sessionId) : null;
       if (!ctx) {
         const defaultCtx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
         if (defaultCtx) await handleGlobalEvent(normalized);
@@ -2574,13 +2656,19 @@ export function createMessengerOpencodeBridge({
         return;
       }
       if (sessionId) busySessions.delete(sessionId);
-      const ctx = sessionId ? sessionContexts.get(sessionId) : null;
+      const ctx = sessionId ? getSessionContext(sessionId) : null;
       if (!ctx) {
         const defaultCtx = await ensureDefaultSessionContext(sessionId, { projectPath: envelopeDirectory });
         if (defaultCtx) await handleGlobalEvent(normalized);
         return;
       }
       stopTypingPulse(ctx);
+      // Skip abort errors — expected when operations are cancelled (new prompt, /abort).
+      const rawError = props?.error;
+      if (rawError?.name === 'MessageAbortedError') {
+        ctx.sentPartIds.clear();
+        return;
+      }
       // Mark the turn as errored so the trailing session.idle doesn't tack on a
       // misleading "done · …" footer. The flag clears when the next turn starts
       // producing output (see emitPart) or a new prompt is sent.
@@ -2605,7 +2693,7 @@ export function createMessengerOpencodeBridge({
     // ── Permission requested — send Approve/Deny buttons ───────────
     if (type === 'permission.asked') {
       const sessionId = props?.sessionID ?? props?.sessionId ?? null;
-      let ctx = sessionId ? sessionContexts.get(sessionId) : null;
+      let ctx = sessionId ? getSessionContext(sessionId) : null;
 
       // If the session is not tracked locally (e.g. gateway bot handles inbound),
       // try to look up the binding from the bridge store and messenger config.
@@ -2678,6 +2766,31 @@ export function createMessengerOpencodeBridge({
 
       console.log('[PERMISSION]', `session=${sessionId} tool=${permission.permission} dir=${replyDirectory ?? 'none'} patterns=${permission.patterns.join(',')}`);
 
+      // Yolo mode — auto-approve without surfacing Discord buttons.
+      if (sessionId && typeof isSessionAutoAcceptingFn === 'function') {
+        let autoAccept = false;
+        try {
+          autoAccept = await isSessionAutoAcceptingFn(sessionId);
+        } catch {
+          autoAccept = false;
+        }
+        if (autoAccept) {
+          if (permission.id) forwardedPermissionIds.add(permission.id);
+          if (typeof _respondToOpenCode === 'function') {
+            _respondToOpenCode({
+              sessionID: sessionId,
+              requestID: permission.id,
+              reply: 'once',
+              directory: replyDirectory,
+            }).catch((err) => {
+              if (permission.id) forwardedPermissionIds.delete(permission.id);
+              console.error('[PERMISSION] Yolo auto-approve failed:', err?.message ?? err);
+            });
+          }
+          return;
+        }
+      }
+
       sendApprovalToSurface({
         type: ctx.type,
         token: ctx.token,
@@ -2703,7 +2816,7 @@ export function createMessengerOpencodeBridge({
     // like permission prompts.
     if (type === 'question.asked') {
       const sessionId = props?.sessionID ?? props?.sessionId ?? null;
-      let ctx = sessionId ? sessionContexts.get(sessionId) : null;
+      let ctx = sessionId ? getSessionContext(sessionId) : null;
 
       if (!ctx && sessionId && lookupMessengerTarget) {
         try {
@@ -2786,7 +2899,7 @@ export function createMessengerOpencodeBridge({
       if (!sessionId) return;
       // Narrow: only mirror plans for sessions already bound to a surface;
       // a todo list alone should never spawn a mirror thread.
-      const ctx = sessionContexts.get(sessionId);
+      const ctx = getSessionContext(sessionId);
       if (!ctx) return;
       const todos = Array.isArray(props?.todos) ? props.todos : [];
       scheduleTodoUpdate(ctx, sessionId, todos);
@@ -3103,7 +3216,7 @@ export function createMessengerOpencodeBridge({
         // channel/thread it was issued from, instead of an auto-resolved
         // default. Reuse an existing context (active conversation) untouched.
         if (!sessionContexts.has(sessionId)) {
-          sessionContexts.set(sessionId, {
+          setSessionContext(sessionId, {
             sessionId,
             type,
             token,
@@ -3157,7 +3270,7 @@ export function createMessengerOpencodeBridge({
             title: s.title ?? '(untitled)',
             when: s.time?.updated ? new Date(s.time.updated).toLocaleString() : '',
           }));
-        resumeCandidatesCache.set(surfaceCacheKey, candidates);
+        setCandidateCache(resumeCandidatesCache, surfaceCacheKey, candidates);
         return candidates;
       },
 
@@ -3170,7 +3283,7 @@ export function createMessengerOpencodeBridge({
         let target = null;
         const index = /^\d{1,2}$/.test(ref) ? Number.parseInt(ref, 10) : null;
         if (index != null) {
-          const cached = resumeCandidatesCache.get(surfaceCacheKey)
+          const cached = getCandidateCache(resumeCandidatesCache, surfaceCacheKey)
             ?? await this.listResumeCandidates();
           target = cached[index - 1] ?? null;
           if (!target) return { ok: false, error: `no session #${index} in the /resume list.` };
@@ -3227,13 +3340,13 @@ export function createMessengerOpencodeBridge({
           // Hide synthetic / injected messages (memory + scheduling blocks).
           .filter((m) => !m.preview.startsWith('<project-memory>') && !m.preview.startsWith('<scheduling>'))
           .slice(-25);
-        forkCandidatesCache.set(surfaceCacheKey, candidates);
+        setCandidateCache(forkCandidatesCache, surfaceCacheKey, candidates);
         return candidates;
       },
 
       async forkSession({ index }) {
         if (!stored?.sessionId) return { ok: false, error: 'no session bound to this conversation.' };
-        const cached = forkCandidatesCache.get(surfaceCacheKey)
+        const cached = getCandidateCache(forkCandidatesCache, surfaceCacheKey)
           ?? await this.listForkCandidates();
         const target = cached[index - 1];
         if (!target) return { ok: false, error: `no message #${index} in the /fork list.` };
@@ -3787,7 +3900,7 @@ export function createMessengerOpencodeBridge({
     await rejectPendingApprovalsForSession(sessionId).catch(() => {});
 
     // Bind context so the SSE handler routes outbound parts here.
-    const existingCtx = sessionContexts.get(sessionId);
+    const existingCtx = getSessionContext(sessionId);
     if (existingCtx) {
       // Same surface, follow-up message — keep typing pulse alive but reset
       // the dedup set so the next turn's parts post.
@@ -3814,9 +3927,9 @@ export function createMessengerOpencodeBridge({
         // same messenger they came from (prevents duplication).
         source: type,
       };
-      sessionContexts.set(sessionId, ctx);
+      setSessionContext(sessionId, ctx);
     }
-    const ctx = sessionContexts.get(sessionId);
+    const ctx = getSessionContext(sessionId);
     // New turn — clear any prior error state so its idle posts a real footer,
     // and re-arm idle settling so this turn's session.idle isn't deduped.
     ctx.errored = false;
@@ -4238,7 +4351,7 @@ export function createMessengerOpencodeBridge({
 
     for (const b of bindings) {
       // Clean up in-memory session context (stop typing pulse, remove)
-      const ctx = b.sessionId ? sessionContexts.get(b.sessionId) : null;
+      const ctx = b.sessionId ? getSessionContext(b.sessionId) : null;
       if (ctx) {
         stopTypingPulse(ctx);
         sessionContexts.delete(b.sessionId);
@@ -4286,7 +4399,7 @@ export function createMessengerOpencodeBridge({
     // Resolve the Discord surface: live context first, then the persistent
     // binding (survives restarts), then the reverse-lookup helper for token.
     const bindings = bridgeStore.lookupBySessionId(sessionId).filter((b) => b.type === 'discord' && b.targetKey);
-    const ctx = sessionContexts.get(sessionId);
+    const ctx = getSessionContext(sessionId);
     if (ctx) {
       stopTypingPulse(ctx);
       sessionContexts.delete(sessionId);

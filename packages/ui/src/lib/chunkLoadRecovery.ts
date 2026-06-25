@@ -3,7 +3,7 @@ import { lazy } from 'react';
 declare const __APP_VERSION__: string | undefined;
 
 const RELOAD_STORAGE_KEY = 'openchamber:chunk-import-reload';
-const RETRY_DELAY_MS = 250;
+const RETRY_DELAY_MS = 500;
 const RELOAD_GUARD_MS = 30_000;
 
 const DYNAMIC_IMPORT_ERROR_PATTERNS = [
@@ -80,7 +80,7 @@ export async function importWithChunkRecovery<T>(
   load: () => Promise<T>,
   options: { retries?: number } = {},
 ): Promise<T> {
-  const retries = options.retries ?? 1;
+  const retries = options.retries ?? 2;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {

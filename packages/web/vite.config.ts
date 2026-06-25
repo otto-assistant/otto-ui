@@ -83,10 +83,10 @@ export default defineConfig({
   },
   optimizeDeps: {
     // Pre-bundle the eager critical-path deps so the browser doesn't pay a
-    // discovery + reload round when it first imports them. Deliberately omit
-    // the now-lazy heavy deps (CodeMirror, @pierre/diffs, shiki) — forcing
-    // those into the startup pre-bundle would slow cold start for code that
-    // isn't needed until a file/diff is opened.
+    // discovery + reload round when it first imports them. CodeMirror,
+    // @pierre/diffs, and shiki stay out of include — shiki lives under
+    // packages/ui and isn't resolvable from this package root; Settings is
+    // pre-warmed instead (see server.warmup.clientFiles).
     include: [
       '@opencode-ai/sdk/v2',
       'react',
@@ -109,6 +109,8 @@ export default defineConfig({
         '../ui/src/App.tsx',
         '../ui/src/components/layout/MainLayout.tsx',
         '../ui/src/components/chat/ChatContainer.tsx',
+        '../ui/src/components/views/SettingsWindow.tsx',
+        '../ui/src/components/views/SettingsView.tsx',
       ],
     },
     proxy: {

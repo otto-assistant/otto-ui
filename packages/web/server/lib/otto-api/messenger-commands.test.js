@@ -456,3 +456,34 @@ describe('/help lists the extended command set', () => {
     }
   });
 });
+
+describe('/yolo command', () => {
+  it('reports status when no args', async () => {
+    const { result } = await run('/yolo', {
+      binding: { sessionId: 'ses-yolo' },
+      opencode: {
+        isSessionAutoAccepting: async () => false,
+        setSessionAutoAccept: () => {},
+      },
+    });
+    expect(result.reply).toContain('Yolo mode: OFF');
+  });
+
+  it('enables yolo mode', async () => {
+    const setSessionAutoAccept = vi.fn();
+    const { result } = await run('/yolo on', {
+      binding: { sessionId: 'ses-yolo' },
+      opencode: {
+        isSessionAutoAccepting: async () => false,
+        setSessionAutoAccept,
+      },
+    });
+    expect(setSessionAutoAccept).toHaveBeenCalledWith('ses-yolo', true);
+    expect(result.reply).toContain('enabled');
+  });
+
+  it('requires an active session', async () => {
+    const { result } = await run('/yolo on', { binding: { sessionId: null } });
+    expect(result.reply).toContain('No active session');
+  });
+});

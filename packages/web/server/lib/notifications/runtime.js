@@ -561,6 +561,7 @@ export const createNotificationTriggerRuntime = (deps) => {
   return {
     maybeSendPushForTrigger,
     setAutoAcceptSession,
+    isSessionAutoAccepting,
     setGetIsWindowFocused,
   };
 };

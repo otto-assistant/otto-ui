@@ -222,6 +222,44 @@ describe('opencode-go quota provider', () => {
     expect(isConfigured()).toBe(true);
   });
 
+  it('uses the official API when only an api key is configured (no mode)', async () => {
+    vi.mocked(readAuthFile).mockReturnValue({ 'opencode-go': { key: 'sk-test' } });
+    vi.mocked(resolveConfigMode).mockReturnValue(null);
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        rollingUsage: { status: 'ok', resetInSec: 1200, usagePercent: 42 }
+      })
+    });
+
+    const result = await fetchQuota();
+
+    expect(result.ok).toBe(true);
+    expect(result.configured).toBe(true);
+    expect(result.usageSource).toBe('api');
+    expect(result.usage.windows['5h'].usedPercent).toBe(42);
+  });
+
+  it('uses persisted anchor resetAt without recomputing from seconds each fetch', async () => {
+    vi.mocked(readAuthFile).mockReturnValue({});
+    vi.mocked(resolveConfigMode).mockReturnValue('anchor');
+    const resetAt = Date.now() + 3600 * 1000;
+    vi.mocked(resolveAnchorConfig).mockReturnValue({ rolling: resetAt });
+    vi.mocked(readOpenCodeWindows).mockResolvedValue({
+      windows: {
+        '5h': { usedPercent: 10, remainingPercent: 90, windowSeconds: null, resetAt: null, resetAtFormatted: null, resetAfterFormatted: null }
+      }
+    });
+
+    const result = await fetchQuota();
+
+    expect(result.ok).toBe(true);
+    expect(result.usageSource).toBe('anchor');
+    expect(result.usage.windows['5h'].resetAt).toBe(resetAt);
+    expect(result.usage.windows['5h'].resetAfterSeconds).toBeGreaterThan(3500);
+    expect(result.usage.windows['5h'].resetAfterSeconds).toBeLessThanOrEqual(3600);
+  });
+
   it('is configured when only dashboard env vars are present', () => {
     vi.mocked(readAuthFile).mockReturnValue({});
     vi.mocked(resolveDashboardConfig).mockReturnValue({ workspaceId: 'wrk_test', authCookie: 'cookie', source: 'env' });

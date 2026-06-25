@@ -59,6 +59,9 @@ export interface MemoryRecord {
   kind?: string;
   tags: string[];
   project?: string;
+  wing?: string;
+  room?: string;
+  truncated?: boolean;
   createdAt?: string | number | null;
   updatedAt?: string | number | null;
 }
@@ -121,6 +124,23 @@ const getConfigDirectory = (): string | null => {
   return null;
 };
 
+const getMemoryProject = (): string | null => {
+  try {
+    const activeProject = useProjectsStore.getState().getActiveProject?.();
+    if (activeProject?.label?.trim()) {
+      return activeProject.label.trim();
+    }
+    if (activeProject?.path?.trim()) {
+      const normalized = activeProject.path.trim().replace(/\\/g, '/');
+      const parts = normalized.split('/').filter(Boolean);
+      return parts[parts.length - 1] ?? null;
+    }
+  } catch (err) {
+    console.warn('[MemoryStore] Error resolving memory project:', err);
+  }
+  return null;
+};
+
 const dirSuffix = (): string => {
   const dir = getConfigDirectory();
   return dir ? `?directory=${encodeURIComponent(dir)}` : '';
@@ -130,9 +150,16 @@ const recordsUrl = (id: string, query?: string): string => {
   const params = new URLSearchParams();
   const dir = getConfigDirectory();
   if (dir) params.set('directory', dir);
+  const project = getMemoryProject();
+  if (project) params.set('project', project);
   if (query) params.set('q', query);
   const qs = params.toString();
   return `/api/config/memory/${encodeURIComponent(id)}/records${qs ? `?${qs}` : ''}`;
+};
+
+const recordMutationBody = (input: MemoryRecordInput) => {
+  const project = getMemoryProject();
+  return JSON.stringify(project ? { input, project } : { input });
 };
 
 const dirHeaders = (extra?: Record<string, string>): Record<string, string> => {
@@ -348,7 +375,7 @@ export const useMemoryStore = create<MemoryStoreState>()(
           const response = await runtimeFetch(`/api/config/memory/${encodeURIComponent(id)}/records${dirSuffix()}`, {
             method: 'POST',
             headers: dirHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ input }),
+            body: recordMutationBody(input),
           });
           const data = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -367,7 +394,7 @@ export const useMemoryStore = create<MemoryStoreState>()(
           const response = await runtimeFetch(`/api/config/memory/${encodeURIComponent(id)}/records/${encodeURIComponent(recordId)}${dirSuffix()}`, {
             method: 'PUT',
             headers: dirHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ input }),
+            body: recordMutationBody(input),
           });
           const data = await response.json().catch(() => ({}));
           if (!response.ok) {

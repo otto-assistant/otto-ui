@@ -23,6 +23,8 @@ import {
   type MemoryRecordInput,
 } from '@/stores/useMemoryStore';
 import { memoryBackendIcon } from './backendMeta';
+import { MempalaceRecordsList } from './MempalaceRecordsList';
+import { filterMempalaceRecords, type MempalaceSort } from './mempalaceRecordUtils';
 
 interface MemoryRecordsPageProps {
   backendId: string;
@@ -38,6 +40,7 @@ interface DraftState {
 }
 
 const emptyDraft: DraftState = { open: false, editingId: null, title: '', content: '', kind: '', tags: '' };
+const EMPTY_RECORDS: MemoryRecord[] = [];
 
 export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId }) => {
   const { t } = useI18n();
@@ -55,8 +58,12 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
     [status, backendId],
   );
   const projectScoped = backend?.capabilities?.projectScoped !== false;
+  const isMempalace = backendId === 'mempalace';
 
   const [search, setSearch] = React.useState('');
+  const [wingFilter, setWingFilter] = React.useState('');
+  const [roomFilter, setRoomFilter] = React.useState('');
+  const [sortBy, setSortBy] = React.useState<MempalaceSort>('newest');
   const [draft, setDraft] = React.useState<DraftState>(emptyDraft);
   const [saving, setSaving] = React.useState(false);
 
@@ -71,7 +78,7 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendId, loadRecords, projectScoped ? activeProjectId : null]);
 
-  const items = recordsState?.items ?? [];
+  const items = recordsState?.items ?? EMPTY_RECORDS;
   const availability = recordsState?.availability;
   const loading = recordsState?.loading ?? false;
 
@@ -80,8 +87,19 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
 
   const handleSearch = React.useCallback((value: string) => {
     setSearch(value);
-    void loadRecords(backendId, value.trim() || undefined);
-  }, [backendId, loadRecords]);
+    if (!isMempalace) {
+      void loadRecords(backendId, value.trim() || undefined);
+    }
+  }, [backendId, isMempalace, loadRecords]);
+
+  const mempalaceItems = React.useMemo(() => {
+    if (!isMempalace) return [];
+    return filterMempalaceRecords(items, {
+      wing: wingFilter || undefined,
+      room: roomFilter || undefined,
+      query: search,
+    });
+  }, [isMempalace, items, wingFilter, roomFilter, search]);
 
   const openCreate = () => setDraft({ ...emptyDraft, open: true });
   const openEdit = (record: MemoryRecord) => setDraft({
@@ -180,7 +198,11 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
                   disabled={!caps.search}
                 />
               </div>
-              <Button size="sm" variant="outline" onClick={() => void loadRecords(backendId, search.trim() || undefined)}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void loadRecords(backendId, isMempalace ? undefined : search.trim() || undefined)}
+              >
                 {loading ? <Icon name="loader-4" className="h-4 w-4 animate-spin" /> : <Icon name="refresh" className="h-4 w-4" />}
                 {t('settings.memory.records.refresh')}
               </Button>
@@ -190,8 +212,31 @@ export const MemoryRecordsPage: React.FC<MemoryRecordsPageProps> = ({ backendId 
               <p className="typography-meta mb-2" style={{ color: 'var(--status-error)' }}>{recordsState.error}</p>
             )}
 
-            {items.length === 0 && !loading ? (
-              <p className="typography-meta text-muted-foreground py-6 text-center">{t('settings.memory.records.empty')}</p>
+            {loading && items.length === 0 ? (
+              <div className="flex justify-center py-10">
+                <Icon name="loader-4" className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : items.length === 0 ? (
+              <p className="typography-meta text-muted-foreground py-6 text-center">
+                {projectScoped ? t('settings.memory.records.empty') : t('settings.memory.records.emptyGlobal')}
+              </p>
+            ) : isMempalace ? (
+              <MempalaceRecordsList
+                items={mempalaceItems}
+                wingFilter={wingFilter}
+                roomFilter={roomFilter}
+                sortBy={sortBy}
+                onWingFilterChange={(value) => {
+                  setWingFilter(value);
+                  setRoomFilter('');
+                }}
+                onRoomFilterChange={setRoomFilter}
+                onSortChange={setSortBy}
+                onEdit={openEdit}
+                onDelete={handleDelete}
+                canUpdate={Boolean(caps.update)}
+                canDelete={Boolean(caps.delete)}
+              />
             ) : (
               <ul className="space-y-2">
                 {items.map((record) => (

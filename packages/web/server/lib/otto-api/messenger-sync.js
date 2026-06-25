@@ -128,6 +128,9 @@ export function createMessengerSyncRouter({
   // questions, todos and permissions — without this, a headless server that
   // never had a browser client connected would silently mirror nothing.
   ensureEventStream = null,
+  // Yolo mode (permission auto-accept) — shared with the web UI via notifications runtime.
+  setAutoAcceptSession = null,
+  isSessionAutoAcceptingFn = null,
 }) {
   const router = Router();
 
@@ -322,6 +325,8 @@ export function createMessengerSyncRouter({
           getLocalApiBaseUrl,
           projectConfigRuntime,
           scheduledTasksRuntime,
+          setAutoAcceptSession,
+          isSessionAutoAcceptingFn,
           // Powers the Discord `/skill` picker — list skills available to the
           // agent in the surface's bound project (or user-level when unbound).
           listSkills: ({ projectPath } = {}) => {

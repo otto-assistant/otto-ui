@@ -1,0 +1,28 @@
+[Unit]
+Description=OpenChamber production server (built static UI + API)
+Documentation=https://github.com/otto-assistant/otto-ui
+After=network-online.target
+Conflicts=otto-dev.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/data/projects/otto-ui/packages/web
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.opencode/bin:/home/ubuntu/.npm-global/bin:/home/ubuntu/.local/share/pnpm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=OPENCHAMBER_ALLOW_UNAUTHENTICATED_LAN=true
+ExecStart=/usr/bin/node /data/projects/otto-ui/packages/web/bin/cli.js serve --lan --foreground --port 5180
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+KillSignal=SIGTERM
+
+# Memory guardrails (static UI + API; lower than dev bundler)
+MemoryHigh=4G
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

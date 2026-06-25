@@ -683,6 +683,7 @@ const notificationTriggerRuntime = createNotificationTriggerRuntime({
 
 const maybeSendPushForTrigger = (...args) => notificationTriggerRuntime.maybeSendPushForTrigger(...args);
 const setAutoAcceptSession = (...args) => notificationTriggerRuntime.setAutoAcceptSession(...args);
+const isSessionAutoAcceptingFn = (...args) => notificationTriggerRuntime.isSessionAutoAccepting(...args);
 
 const globalMessageStreamHub = createGlobalMessageStreamHub({
   buildOpenCodeUrl,
@@ -694,7 +695,7 @@ const globalMessageStreamHub = createGlobalMessageStreamHub({
 // title agent silently fails (rate limits, missing small model). Watches
 // session.idle on the shared hub and writes a first-user-message-derived
 // title if the "New session - <ISO>" placeholder is still in place.
-createSessionTitleFallback({
+const sessionTitleFallbackRuntime = createSessionTitleFallback({
   globalEventHub: globalMessageStreamHub,
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
@@ -1022,6 +1023,7 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   syncToHmrState,
   openCodeWatcherRuntime,
   sessionRuntime,
+  sessionTitleFallbackRuntime,
   getHealthCheckInterval: () => healthCheckInterval,
   clearHealthCheckInterval: (value) => clearInterval(value),
   getTerminalRuntime: () => terminalRuntime,
@@ -1297,6 +1299,8 @@ async function main(options = {}) {
     // on the shared global event hub — start it when a listener starts so a
     // headless server doesn't depend on a browser client connecting first.
     ensureEventStream: () => ensureGlobalWatcherStarted(),
+    setAutoAcceptSession,
+    isSessionAutoAcceptingFn,
   });
   app.use('/api/otto/messenger', messengerRouter);
 
